@@ -857,6 +857,8 @@ class Launcher:
     def __init__(self, root):
         self.root = root
         self.s = max(1.0, root.winfo_fpixels("1i") / 96.0)
+        # Small screens (Steam Deck 1280x800): the 1180-pixel layout must still fit the width.
+        self.s = max(1.0, min(self.s, root.winfo_screenwidth() / 1220))
         self.config = read_config()
         if self.config.get("game") not in GAME_KEYS:
             self.config["game"] = "u1"
@@ -881,7 +883,7 @@ class Launcher:
             pass
         self.build()
         root.update_idletasks()
-        root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
+        self.fit_to_screen()
         self.restore_window_position()
         write_config(self.config)  # keeps one-time updates (read_config) even without a change
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -906,6 +908,46 @@ class Launcher:
         if -50 <= x <= max(0, screen_w - 200) and 0 <= y <= max(0, screen_h - 200):
             self.root.geometry(f"+{x}+{y}")
 
+    def fit_to_screen(self):
+        """The window is never larger than the screen (Steam Deck 1280x800): the content scrolls
+        in it and the footer with PLAY stays visible."""
+        root = self.root
+        self.scroll_canvas.configure(width=self.content.winfo_reqwidth(),
+                                     height=self.content.winfo_reqheight())
+        root.update_idletasks()
+        screen_w, screen_h = root.winfo_screenwidth(), root.winfo_screenheight()
+        # Room for the title bar and a taskbar or panel.
+        w = min(root.winfo_reqwidth(), screen_w)
+        h = min(root.winfo_reqheight(), screen_h - self.px(70))
+        root.minsize(min(w, self.px(640)), min(h, self.px(400)))
+        root.geometry(f"{w}x{h}")
+
+    def build_scroll_area(self):
+        """Hero, game cards and tabs in a vertically scrolling area (wheel, touchpad or the bar)."""
+        holder = tk.Frame(self.root, bg=BG)
+        holder.pack(side="top", fill="both", expand=True)
+        canvas = tk.Canvas(holder, bg=BG, highlightthickness=0, yscrollincrement=self.px(40))
+        bar = tk.Scrollbar(holder, orient="vertical", command=canvas.yview, width=self.px(18))
+        self.content = tk.Frame(canvas, bg=BG)
+        self.content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.content, anchor="nw")
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.scroll_canvas = canvas
+        # Toplevel binding: every widget of the window passes it on (the Controls list keeps its own).
+        self.root.bind("<MouseWheel>", self.scroll_window)
+
+    def scroll_window(self, event):
+        if getattr(self, "capturing", None) is not None or not event.delta:
+            return
+        inner = getattr(self, "controls_canvas", None)
+        if inner is not None and str(event.widget).startswith(str(inner)):
+            return
+        # Touchpads send steps smaller than a wheel notch (120).
+        steps = -event.delta // 120 if abs(event.delta) >= 120 else (-1 if event.delta > 0 else 1)
+        self.scroll_canvas.yview_scroll(steps, "units")
+
     def px(self, value):
         return int(value * self.s)
 
@@ -923,9 +965,11 @@ class Launcher:
     # -- layout -----------------------------------------------------------------------------
 
     def build(self):
+        # The footer first: it keeps the bottom of the window, the scrolling area takes the rest.
+        self.build_footer()
+        self.build_scroll_area()
         self.build_hero()
         self.build_cards()
-        self.build_footer()
         self.build_tabs()
         self.select_game(self.config.get("game", "u1"), save=False)
         self.show_tab(self.config.get("tab", "setup") if self.config.get("tab") in self.pages else "setup",
@@ -955,7 +999,7 @@ class Launcher:
         art = Image.composite(dark, art, fade)
         photo = ImageTk.PhotoImage(art)
         self.images.append(photo)
-        canvas = tk.Canvas(self.root, width=w, height=h, bg=BG, highlightthickness=0)
+        canvas = tk.Canvas(self.content, width=w, height=h, bg=BG, highlightthickness=0)
         canvas.pack(side="top")
         canvas.create_image(0, 0, image=photo, anchor="nw")
         x, y = self.px(48), self.px(58)
@@ -998,7 +1042,7 @@ class Launcher:
             right = left - self.px(10)
 
     def build_cards(self):
-        frame = tk.Frame(self.root, bg=BG)
+        frame = tk.Frame(self.content, bg=BG)
         frame.pack(side="top", fill="x", padx=self.px(40), pady=(0, self.px(14)))
         self.cards = {}
         gap = self.px(16)
@@ -1136,7 +1180,7 @@ class Launcher:
         return next(g for g in GAMES if g["key"] == self.config.get("game"))
 
     def build_tabs(self):
-        outer = tk.Frame(self.root, bg=BG)
+        outer = tk.Frame(self.content, bg=BG)
         outer.pack(side="top", fill="both", expand=True, padx=self.px(40))
         strip = tk.Frame(outer, bg=BG)
         strip.pack(side="top", fill="x")
@@ -1163,6 +1207,11 @@ class Launcher:
             "controls": self.page_controls(),
             "advanced": self.page_advanced(),
         }
+        # Other fonts (Proton has no Segoe UI or Georgia) make the rows taller: the page area
+        # takes the tallest page instead of cutting it at 330 pixels.
+        self.root.update_idletasks()
+        tallest = max(page.winfo_reqheight() for name, page in self.pages.items() if name != "controls")
+        self.body.configure(height=max(self.px(330), tallest))
 
     def show_tab(self, name, save=True):
         if save and self.config.get("tab") != name:
@@ -1406,6 +1455,7 @@ class Launcher:
         holder = tk.Frame(page, bg=BG)
         holder.pack(side="top", fill="both", expand=True)
         canvas = tk.Canvas(holder, bg=BG, highlightthickness=0)
+        self.controls_canvas = canvas  # scrolls itself (scroll_window leaves its wheel events)
         bar = tk.Scrollbar(holder, orient="vertical", command=canvas.yview)
         inner = tk.Frame(canvas, bg=BG)
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
