@@ -6190,7 +6190,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         image.usage.depth_target = true;
         if (upscaler->Enabled()) {
             VulkanUpscalerTarget depth_redirect;
-            depth_redirected = upscaler->RedirectDepth(image_id, depth_redirect);
+            depth_redirected = upscaler->RedirectDepth(image_id, depth_redirect,
+                                                       color_redirected && !redirect.native_ui);
             if (depth_redirected) {
                 guest_extent = {image.info.size.width, image.info.size.height};
                 attachment.image_view = depth_redirect.view;

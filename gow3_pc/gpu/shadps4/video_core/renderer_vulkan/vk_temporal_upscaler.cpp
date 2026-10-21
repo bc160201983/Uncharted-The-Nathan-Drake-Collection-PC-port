@@ -377,6 +377,7 @@ bool TemporalUpscaler::OnFrameStart() {
     // The display pass of an upscaled frame reads the upscaled UI image. After OnComposite the
     // HUD and menu draws of the frame just upscaled still go to its host display buffer.
     display_redirect = ui_phase || composite_done;
+    display_depth = {};
     composite_done = false;
     tonemap_pending = false;
     ui_phase = false;
@@ -2179,12 +2180,112 @@ bool TemporalUpscaler::OnComposite(u64 ps_hash, VideoCore::ImageId color) {
     return true;
 }
 
-bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target) {
-    if (!ui_phase || depth != ui_depth) {
+bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target,
+                                     bool display_pass) {
+    if (ui_phase && depth == ui_depth) {
+        target = {*ui_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height, true};
+        return true;
+    }
+    // A 3D draw into a host display buffer with the game's depth (Uncharted's Treasures screen
+    // model): the depth goes to an output-size copy, else the pass falls back to the guest
+    // buffer and the model is never presented.
+    if (!display_pass || !depth) {
         return false;
     }
-    target = {*ui_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height, true};
+    PrepareDisplayDepth(depth);
+    target = {*display_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height};
     return true;
+}
+
+void TemporalUpscaler::PrepareDisplayDepth(VideoCore::ImageId depth_id) {
+    if (depth_id == display_depth) {
+        return; // filled earlier this frame: keep what the previous passes wrote
+    }
+    auto& source = texture_cache.GetImage(depth_id);
+    const vk::Format format = source.info.pixel_format;
+    if (!display_depth_image || display_depth_format != format ||
+        display_depth_width != ui_width || display_depth_height != ui_height) {
+        scheduler.Finish();
+        const auto device = instance.GetDevice();
+        display_depth_view.reset();
+        display_depth_image = VideoCore::UniqueImage(device, instance.GetAllocator());
+        display_depth_image.Create(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = {ui_width, ui_height, 1},
+            .mipLevels = 1, .arrayLayers = 1, .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment |
+                     vk::ImageUsageFlagBits::eTransferDst,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        const auto aspect = vk::ImageAspectFlagBits::eDepth |
+            (format == vk::Format::eD32SfloatS8Uint ? vk::ImageAspectFlagBits::eStencil
+                                                    : vk::ImageAspectFlags{});
+        display_depth_view = Check(device.createImageViewUnique({
+            .image = vk::Image(display_depth_image), .viewType = vk::ImageViewType::e2D,
+            .format = format, .subresourceRange = {aspect, 0, 1, 0, 1},
+        }));
+        display_depth_format = format;
+        display_depth_width = ui_width;
+        display_depth_height = ui_height;
+        std::printf("Display: host depth %ux%u %s for 3D draws into display buffers\n", ui_width,
+                    ui_height, vk::to_string(format).c_str());
+    }
+    display_depth = depth_id;
+    scheduler.EndRendering();
+    // The guest image's pending attachment barrier first: a second transition of the same image
+    // in one barrier batch would be unordered.
+    runtime.FlushBarriers();
+    const bool copy = depth_blit && format == vk::Format::eD32SfloatS8Uint;
+    if (copy) {
+        runtime.Transit(&source, vk::ImageLayout::eTransferSrcOptimal,
+                        vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+        runtime.FlushBarriers();
+    }
+    const auto aspect = vk::ImageAspectFlagBits::eDepth |
+        (format == vk::Format::eD32SfloatS8Uint ? vk::ImageAspectFlagBits::eStencil
+                                                : vk::ImageAspectFlags{});
+    const vk::ImageSubresourceRange range{aspect, 0, 1, 0, 1};
+    const auto cmd = scheduler.CommandBuffer();
+    vk::ImageMemoryBarrier2 barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+        .image = vk::Image(display_depth_image), .subresourceRange = range,
+    };
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+    cmd.clearDepthStencilImage(vk::Image(display_depth_image), vk::ImageLayout::eTransferDstOptimal,
+                               {.depth = 1.0f, .stencil = 0}, range);
+    if (copy) {
+        barrier.srcStageMask = vk::PipelineStageFlagBits2::eTransfer;
+        barrier.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+        barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+        const vk::ImageBlit region{
+            .srcSubresource = {vk::ImageAspectFlagBits::eDepth, 0, 0, 1},
+            .srcOffsets = std::array{vk::Offset3D{0, 0, 0},
+                vk::Offset3D{s32(source.info.size.width), s32(source.info.size.height), 1}},
+            .dstSubresource = {vk::ImageAspectFlagBits::eDepth, 0, 0, 1},
+            .dstOffsets = std::array{vk::Offset3D{0, 0, 0},
+                vk::Offset3D{s32(ui_width), s32(ui_height), 1}},
+        };
+        cmd.blitImage(vk::Image(source.backing->image), vk::ImageLayout::eTransferSrcOptimal,
+                      vk::Image(display_depth_image), vk::ImageLayout::eTransferDstOptimal,
+                      region, vk::Filter::eNearest);
+    }
+    barrier.srcStageMask = vk::PipelineStageFlagBits2::eTransfer;
+    barrier.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+    barrier.dstStageMask = vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                           vk::PipelineStageFlagBits2::eLateFragmentTests;
+    barrier.dstAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+                            vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+    barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+    barrier.newLayout = vk::ImageLayout::eGeneral;
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
 }
 
 bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,

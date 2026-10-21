@@ -75,6 +75,7 @@ public:
     /// draw's render state (Rasterizer::BeginRendering).
     [[nodiscard]] u64 RedirectState() const noexcept {
         return u64(ui_phase) | u64(display_redirect) << 1 | u64(done_this_frame) << 2 |
+               u64(bool(display_depth)) << 3 |
                u64(ui_color.index) << 8 | u64(ui_depth.index) << 36;
     }
 
@@ -107,7 +108,8 @@ public:
     /// for sampling, its channel swizzle.
     bool RedirectColor(VideoCore::ImageId color, const VideoCore::ImageViewInfo& view,
                        Target& target);
-    bool RedirectDepth(VideoCore::ImageId depth, Target& target);
+    /// `display_pass`: the pass's color went to a host display buffer (RedirectColor).
+    bool RedirectDepth(VideoCore::ImageId depth, Target& target, bool display_pass = false);
     /// A sampled image replaced by the upscaled frame (the display pass).
     bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& info,
                          vk::ImageView& view, vk::ImageLayout& layout);
@@ -240,6 +242,14 @@ private:
     vk::UniqueImageView ui_view;
     vk::UniqueImageView ui_depth_view;
     bool depth_blit = false;
+    /// Output-size depth of 3D draws into host display buffers, filled from the game's depth
+    /// once per frame (PrepareDisplayDepth).
+    VideoCore::UniqueImage display_depth_image;
+    vk::UniqueImageView display_depth_view;
+    VideoCore::ImageId display_depth{};
+    vk::Format display_depth_format = vk::Format::eUndefined;
+    u32 display_depth_width = 0, display_depth_height = 0;
+    void PrepareDisplayDepth(VideoCore::ImageId depth_id);
     bool scaled_session = false;
     u32 ui_width = 0, ui_height = 0;
     u32 render_width = 0, render_height = 0;
