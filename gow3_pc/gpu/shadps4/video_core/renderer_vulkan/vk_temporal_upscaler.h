@@ -107,6 +107,11 @@ public:
     /// for sampling, its channel swizzle.
     bool RedirectColor(VideoCore::ImageId color, const VideoCore::ImageViewInfo& view,
                        Target& target);
+    /// gow3: the last RedirectColor sent the draw to an RGBA16F image of the HDR10 chain: it
+    /// must use the pipeline's float-target variant.
+    [[nodiscard]] bool RedirectedToFloat() const noexcept {
+        return redirected_float;
+    }
     bool RedirectDepth(VideoCore::ImageId depth, Target& target);
     /// A sampled image replaced by the upscaled frame (the display pass).
     bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& info,
@@ -252,6 +257,7 @@ private:
     struct DisplayImage {
         VideoCore::UniqueImage image;
         std::vector<MirrorView> views;
+        vk::UniqueImageView storage_view; ///< RGBA16F (HDR10 chain): the composite's encode
         vk::Format format{};
         u32 width = 0, height = 0;
         bool valid = false;
@@ -263,6 +269,25 @@ private:
     /// Upscales source (the finished frame at the render size) into ui_image; draws into source
     /// go to ui_image after it.
     void UpscaleToUi(VideoCore::ImageId source);
+
+    /// gow3: HDR10 output (the menu's HDR setting) of composite frames, latched each frame. The
+    /// HUD is drawn into ui_hdr_image (RGBA16F, linear: its draws blend through sRGB views) and
+    /// the display buffers are RGBA16F (stored values: their draws use UNORM views).
+    bool hdr_chain = false;
+    bool redirected_float = false;
+    VideoCore::UniqueImage ui_hdr_image;
+    std::vector<MirrorView> ui_hdr_views;
+    vk::UniqueImageView ui_hdr_storage_view;
+    vk::UniqueImageView ui_decode_view; ///< ui_image as RGBA8 UNORM storage
+    u32 ui_hdr_width = 0, ui_hdr_height = 0;
+    vk::UniqueDescriptorSetLayout hdr_transfer_desc_layout;
+    vk::UniquePipelineLayout hdr_transfer_pipeline_layout;
+    vk::UniquePipeline hdr_decode_pipeline, hdr_encode_pipeline;
+    /// Starts the HUD phase of the HDR10 chain: ui_image (General, upscaled) decoded into
+    /// ui_hdr_image. Turns the chain off for the frame when it cannot.
+    void DecodeToHdrUi(vk::CommandBuffer cmd);
+    void RecordHdrTransfer(vk::CommandBuffer cmd, bool decode, vk::ImageView source,
+                           vk::ImageView target, u32 w, u32 h);
     u64 composite_ps = 0;
     u64 tonemap_ps = 0;               ///< the draw finishing the frame (GOW3_UI_TONEMAP_PS)
     VideoCore::ImageId tonemap_target{};

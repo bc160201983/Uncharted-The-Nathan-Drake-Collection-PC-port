@@ -8,6 +8,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
+#include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -508,6 +509,29 @@ GraphicsPipeline::GraphicsPipeline(
         }
         square_pipeline = std::move(square);
         SetObjectName(device, *square_pipeline, "Graphics Pipeline {} squaring pass", debug_str);
+    }
+    // gow3: HDR10 output keeps the upscaled frame, its HUD and the display buffer in RGBA16F
+    // (TemporalUpscaler::HdrChain). Draws redirected there need this variant: same shaders and
+    // state, only color target 0's format differs (about 1 in 12 pipelines in Uncharted 2).
+    // Without GOW3_HDR (allowed by default) the HDR10 chain is never used: none are built.
+    const bool float_candidate = EmulatorSettings.IsHdrAllowed() &&
+                                 key.num_color_attachments == 1 && !needs_square_pass &&
+                                 (color_formats[0] == vk::Format::eR8G8B8A8Unorm ||
+                                  color_formats[0] == vk::Format::eR8G8B8A8Srgb);
+    if (float_candidate) {
+        auto float_formats = color_formats;
+        float_formats[0] = vk::Format::eR16G16B16A16Sfloat;
+        auto float_rendering_ci = pipeline_rendering_ci;
+        float_rendering_ci.pColorAttachmentFormats = float_formats.data();
+        auto float_info = pipeline_info;
+        float_info.pNext = &float_rendering_ci;
+        auto [float_result, float_pipe] =
+            CreateCachedGraphicsPipeline(device, pipeline_cache, float_info, key,
+                                         instance.GetPipelineBinaryGlobalKey(), binary_directory);
+        if (float_result == vk::Result::eSuccess && float_pipe) {
+            float_pipeline = std::move(float_pipe);
+            SetObjectName(device, *float_pipeline, "Graphics Pipeline {} float target", debug_str);
+        }
     }
     g_gow3_pipeline_total_ns += NsSince(started);
     ++g_gow3_pipelines_built;

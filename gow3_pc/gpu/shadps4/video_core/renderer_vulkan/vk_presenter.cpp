@@ -644,12 +644,15 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     vk::ImageView image_view{};
     vk::Extent2D image_size{};
+    // gow3: the HDR10 chain's display buffer is RGBA16F holding the game's stored values
+    // (TemporalUpscaler::OnComposite): read as they are, like a 10-bit sRGB buffer.
+    const bool stored_display = upscaled && display.format == vk::Format::eR16G16B16A16Sfloat;
     if (upscaled) {
         const auto device = instance.GetDevice();
         image_view = Check(device.createImageView({
             .image = display.image,
             .viewType = vk::ImageViewType::e2D,
-            .format = view_info.format,
+            .format = stored_display ? display.format : view_info.format,
             .components = {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
                            vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eOne},
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
@@ -666,7 +669,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                 .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
             cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
             DumpRaw(instance, draw_scheduler, cmdbuf, display.image, vk::ImageLayout::eGeneral,
-                    display.width, display.height, "display", frame_dump_index);
+                    display.width, display.height, "display", frame_dump_index,
+                    stored_display ? 8 : 4);
         }
         const vk::ImageMemoryBarrier2 to_read{
             .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput |
@@ -721,7 +725,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
-        attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+        attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb ||
+        stored_display;
     pp_settings.game_nits = float(graphics.hdr_game_nits.load());
     pp_settings.peak_nits = float(graphics.hdr_peak_nits.load());
     pp_settings.ui_nits = float(graphics.hdr_ui_nits.load());
@@ -743,13 +748,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             std::fprintf(f,
                          "output_format=%s\nguest_format=%u\nview_format=%s\nhdr_mode=%u\n"
                          "srgb_input=%u\ngame_nits=%.1f\npeak_nits=%.1f\nui_nits=%.1f\n"
-                         "rcas=%d\nfsr1=%d\ninput=%ux%u\noutput=%ux%u\n",
+                         "rcas=%d\nfsr1=%d\ninput=%ux%u\noutput=%ux%u\nstored_display=%d\n",
                          vk::to_string(swapchain.GetImageFormat()).c_str(),
                          u32(attribute.attrib.pixel_format), vk::to_string(view_info.format).c_str(),
                          pp_settings.hdr, pp_settings.srgb_input, pp_settings.game_nits,
                          pp_settings.peak_nits, pp_settings.ui_nits, int(fsr_settings.use_rcas),
                          int(fsr_settings.enable), image_size.width, image_size.height,
-                         frame->width, frame->height);
+                         frame->width, frame->height, int(stored_display));
             std::fclose(f);
         }
         ++frame_dump_index;

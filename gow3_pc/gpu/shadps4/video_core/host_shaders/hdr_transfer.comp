@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// gow3: HDR10 HUD composition. The HUD draws into the upscaled frame through sRGB views (they
+// blend in linear light) and the later draws into the display buffer through UNORM views (they
+// blend the stored values). With the float images of the HDR10 chain each keeps that domain:
+// DECODE=1: the 8-bit upscaled frame (stored sRGB-encoded values) -> linear, for the HUD;
+// DECODE=0: the linear frame with its HUD -> stored values, into the display buffer.
+// Values above 1.0 (HDR highlights) keep the curves' extension.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#if DECODE
+layout(binding = 0, rgba8) uniform readonly image2D source;
+#else
+layout(binding = 0, rgba16f) uniform readonly image2D source;
+#endif
+layout(binding = 1, rgba16f) uniform writeonly image2D target;
+
+vec3 Decode(vec3 v) {
+    const vec3 a = abs(v);
+    return sign(v) * mix(pow((a + 0.055) / 1.055, vec3(2.4)), a / 12.92, lessThanEqual(a, vec3(0.04045)));
+}
+
+vec3 Encode(vec3 v) {
+    const vec3 a = abs(v);
+    return sign(v) * mix(1.055 * pow(a, vec3(1.0 / 2.4)) - 0.055, a * 12.92, lessThan(a, vec3(0.0031308)));
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(target)))) {
+        return;
+    }
+    vec4 color = imageLoad(source, pixel);
+#if DECODE
+    color.rgb = Decode(color.rgb);
+#else
+    color.rgb = Encode(color.rgb);
+#endif
+    imageStore(target, pixel, color);
+}

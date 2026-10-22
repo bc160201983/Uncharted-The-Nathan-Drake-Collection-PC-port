@@ -2293,6 +2293,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     const auto state = BeginRendering(pipeline);
+    if (float_color0 && !pipeline->FloatTargetHandle()) [[unlikely]] {
+        SkipFloatTargetDraw(*pipeline);
+        return;
+    }
 
     if (!inputs_resolved) {
         ResolveVertexBuffers(pipeline, draw_prepared);
@@ -2448,8 +2452,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
-    const vk::Pipeline handle = pipeline->Handle();
-    const vk::Pipeline square = SquarePass(*pipeline);
+    const vk::Pipeline handle =
+        float_color0 ? pipeline->FloatTargetHandle() : pipeline->Handle();
+    const vk::Pipeline square = float_color0 ? vk::Pipeline{} : SquarePass(*pipeline);
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
@@ -2637,6 +2642,10 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         return;
     }
     const auto state = BeginRendering(pipeline);
+    if (float_color0 && !pipeline->FloatTargetHandle()) [[unlikely]] {
+        SkipFloatTargetDraw(*pipeline);
+        return;
+    }
 
     BindVertexBuffers(pipeline);
     if (is_indexed) {
@@ -2692,8 +2701,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
                                  : sizeof(VkDrawIndirectCommand)));
-    const vk::Pipeline handle = pipeline->Handle();
-    const vk::Pipeline square = SquarePass(*pipeline);
+    const vk::Pipeline handle =
+        float_color0 ? pipeline->FloatTargetHandle() : pipeline->Handle();
+    const vk::Pipeline square = float_color0 ? vk::Pipeline{} : SquarePass(*pipeline);
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
@@ -5778,6 +5788,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             attachment_feedback_loop = false;
             push_data.scene_size = begin_memo.scene_size;
             target_scale = begin_memo.target_scale;
+            float_color0 = begin_memo.float_color0;
             return begin_memo.state;
         }
         ++begin_memo_misses;
@@ -5794,7 +5805,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         if (!clears) {
             // Recomputed after the full path: it may have started the scene (scene_started).
             begin_memo = {true, MakeBeginSignature(pipeline), state, push_data.scene_size,
-                          target_scale};
+                          target_scale, float_color0};
         }
     }
     return state;
@@ -5802,6 +5813,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 
 RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     attachment_feedback_loop = false;
+    float_color0 = false;
     using VulkanUpscalerTarget = TemporalUpscaler::Target;
     VulkanUpscalerTarget redirect{};
     bool color_redirected = false, depth_redirected = false;
@@ -6005,6 +6017,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         image->usage.render_target = 1u;
         if (cb == 0 && upscaler->Enabled()) {
             color_redirected = upscaler->RedirectColor(image_id, desc.view_info, redirect);
+            float_color0 = color_redirected && upscaler->RedirectedToFloat();
             if (color_redirected) {
                 guest_extent = {image->info.size.width, image->info.size.height};
                 original_color = {attachment.image_view, attachment.image_layout};
@@ -6921,6 +6934,19 @@ void Rasterizer::UpdateViewportScissorState() const {
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.SetViewports(viewports);
     dynamic_state.SetScissors(scissors);
+}
+
+// gow3: a draw sent to the HDR10 chain's float HUD / display image whose pipeline has no
+// RGBA16F variant (not one RGBA8 target, or a squaring blend): skipped instead of recorded with
+// a mismatched attachment format. Named for the first few pixel shaders.
+void Rasterizer::SkipFloatTargetDraw(const GraphicsPipeline& pipeline) const {
+    static std::atomic<u32> skipped{0};
+    if (skipped++ < 8) {
+        const auto* ps = pipeline.GetStages()[u32(Shader::SwStage::Fragment)];
+        std::printf("HDR: draw skipped, pixel shader %016llx has no float-target pipeline\n",
+                    static_cast<unsigned long long>(ps ? ps->pgm_hash : 0));
+        std::fflush(stdout);
+    }
 }
 
 vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
