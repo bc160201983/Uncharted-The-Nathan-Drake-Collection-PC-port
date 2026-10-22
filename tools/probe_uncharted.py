@@ -433,7 +433,7 @@ UNLOCK_PATCHES = {
 # orthographic cameras keep their own branches. The zoom loads jump to small stubs in dead assert
 # branches of the projection code (each now starts with int 0x41, so it still stops the game), and
 # back. Applied only to render sizes wider than 16:9 (UNCHARTED_HOR_PLUS=0: never).
-_XMM_BASE = {"rbx": 3, "rdi": 7}
+_XMM_BASE = {"rdx": 2, "rbx": 3, "rdi": 7}
 
 
 def _vex_mem(op, dst, src, base, disp):
@@ -491,6 +491,15 @@ HOR_PLUS_PATCHES = {
                          0x254, 0x250,
                          [(0x10, "rbx", 4, 0), (0x267, "rbx", 4, 0), (0xb2f, "rdi", 0, 1)],
                          [(0x26, 0xb6, bytes.fromhex("488b055d16b9004885c0"))]),
+    ]),
+    # The water's planar reflection camera 0xc902b4 is square (aspect 1.0, so the camera update
+    # leaves it alone) with the render camera's own zoom: it kept the 16:9 horizontal view, and
+    # past the 16:9 edges the water sampled outside the reflection (streaks). Its zoom load takes
+    # the render camera's (rdx) aspect instead; the stub goes in the dead assert branch 0xc90485.
+    ("Uncharted 2 ultrawide: water reflections as wide as the view", [
+        hor_plus_variant("c5fa108a54020000 c5f82815 ????????", 0x254, 0x250,
+                         [(0, "rdx", 1, 2)],
+                         [(0x1d1, 0x35, bytes.fromhex("488b05ecda8d004885c0"))]),
     ])],
     # Infinite far 0x11c1107 (both of its paths), finite 0x11c11e1 and 0x11c1406, frustum planes
     # 0x11c1f21 (Uncharted 3 1.02).
