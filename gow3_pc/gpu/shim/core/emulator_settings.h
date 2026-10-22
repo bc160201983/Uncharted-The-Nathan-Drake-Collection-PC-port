@@ -53,7 +53,9 @@ public:
     bool IsCopyGpuBuffers() { static const auto value = Flag("GOW3_COPY_GPU_BUFFERS", false); return value; }
     bool IsDirectMemoryAccessEnabled() { static const auto value = Flag("GOW3_DIRECT_MEMORY_ACCESS", false); return value; }
     bool IsDumpShaders() { static const auto value = Flag("GOW3_DUMP_SHADERS", false); return value; }
-    bool IsHdrAllowed() { static const auto value = Flag("GOW3_HDR", false); return value; }
+    // gow3: on by default so the menu's HDR setting finds the HDR10 swapchain format; GOW3_HDR=0
+    // keeps the swapchain SDR-only.
+    bool IsHdrAllowed() { static const auto value = Flag("GOW3_HDR", true); return value; }
     bool IsNullGPU() { static const auto value = Flag("GOW3_NULL_GPU", false); return value; }
     bool IsPatchShaders() { return false; }
     bool IsPipelineCacheArchived() { return false; }

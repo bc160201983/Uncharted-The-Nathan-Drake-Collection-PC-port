@@ -96,6 +96,11 @@ public:
         return needs_hdr;
     }
 
+    /// gow3: the swapchain images' format now: HDR10 (A2B10G10R10, Rec. 2020 PQ) while HDR is on.
+    vk::Format GetImageFormat() const {
+        return needs_hdr ? vk::Format::eA2B10G10R10UnormPack32 : surface_format.format;
+    }
+
 private:
     /// Selects the best available swapchain image format
     void FindPresentFormat();

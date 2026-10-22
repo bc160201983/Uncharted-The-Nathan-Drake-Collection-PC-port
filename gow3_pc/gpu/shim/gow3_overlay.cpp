@@ -381,6 +381,19 @@ void ImageTab() {
         ChoiceRow("Display mode", s.display_mode, G::DisplayModeNames.data(), nullptr, G::DisplayModeCount,
                   "Windowed, borderless window or exclusive fullscreen.");
         CheckRow("VSync", s.vsync, "Waits for the monitor: no tearing, a little more input delay.");
+        ImGui::BeginDisabled(!s.hdr_supported);
+        CheckRow("HDR", s.hdr,
+                 s.hdr_supported ? "HDR10 output. Turn on HDR in Windows display settings first."
+                                 : "Needs a display with HDR turned on in Windows display settings.");
+        ImGui::BeginDisabled(!s.hdr);
+        SliderRow("Peak brightness", s.hdr_peak_nits, 400, 4000, "%d nits",
+                  "The brightest highlights; set it to your display's peak.");
+        SliderRow("Game brightness", s.hdr_game_nits, 80, 500, "%d nits",
+                  "The brightness of white surfaces in the game (203 = the HDR reference).");
+        SliderRow("HUD brightness", s.hdr_ui_nits, 80, 500, "%d nits",
+                  "The brightness of the HUD, menus and this overlay.");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
         ImGui::EndTable();
     }
     const int iw = s.image_width, ih = s.image_height, ww = s.window_width, wh = s.window_height;

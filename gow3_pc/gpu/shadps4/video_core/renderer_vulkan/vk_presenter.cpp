@@ -162,8 +162,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     }
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
-    pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+    pp_pass.Create(device, swapchain.GetSurfaceFormat().format,
+                   vk::Format::eA2B10G10R10UnormPack32);
     Gow3Overlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
+    Gow3Settings::Get().hdr_supported = swapchain.HasHDR();
 
     const bool binary_cache = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARIES", true) &&
                               EmulatorSettings.IsPipelineCacheEnabled();
@@ -220,6 +222,78 @@ Presenter::~Presenter() {
         device.destroyImageView(frame.image_view);
         device.destroyFence(frame.present_done);
     }
+    if (overlay_image) {
+        device.destroyImageView(overlay_view);
+        vmaDestroyImage(instance.GetAllocator(), overlay_image, overlay_allocation);
+    }
+}
+
+void Presenter::RenderOverlay(vk::CommandBuffer cmdbuf, vk::Extent2D extent) {
+    if (!swapchain.GetHDR()) {
+        Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
+        return;
+    }
+    // HDR10: the menu keeps its 8-bit pipeline, drawn into a cleared image of the window's size.
+    const vk::Device device = instance.GetDevice();
+    if (!overlay_image || overlay_extent != extent) {
+        if (overlay_image) {
+            Check(device.waitIdle());
+            device.destroyImageView(overlay_view);
+            vmaDestroyImage(instance.GetAllocator(), overlay_image, overlay_allocation);
+        }
+        const VkImageCreateInfo image_info = static_cast<VkImageCreateInfo>(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = swapchain.GetSurfaceFormat().format,
+            .extent = {extent.width, extent.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .usage = vk::ImageUsageFlagBits::eColorAttachment |
+                     vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+        });
+        const VmaAllocationCreateInfo alloc_info = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkImage image{};
+        if (vmaCreateImage(instance.GetAllocator(), &image_info, &alloc_info, &image,
+                           &overlay_allocation, nullptr) != VK_SUCCESS) {
+            overlay_image = vk::Image{};
+            return;
+        }
+        overlay_image = vk::Image{image};
+        overlay_view = Check<"create overlay view">(device.createImageView(vk::ImageViewCreateInfo{
+            .image = overlay_image,
+            .viewType = vk::ImageViewType::e2D,
+            .format = swapchain.GetSurfaceFormat().format,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+        overlay_extent = extent;
+    }
+    const auto barrier = [&](vk::ImageLayout from, vk::ImageLayout to, vk::AccessFlags src,
+                             vk::AccessFlags dst) {
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eAllCommands, {}, {}, {},
+                               vk::ImageMemoryBarrier{
+                                   .srcAccessMask = src,
+                                   .dstAccessMask = dst,
+                                   .oldLayout = from,
+                                   .newLayout = to,
+                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .image = overlay_image,
+                                   .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+                               });
+    };
+    barrier(vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, {},
+            vk::AccessFlagBits::eTransferWrite);
+    cmdbuf.clearColorImage(overlay_image, vk::ImageLayout::eTransferDstOptimal,
+                           vk::ClearColorValue{std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}},
+                           vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
+    barrier(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eColorAttachmentOptimal,
+            vk::AccessFlagBits::eTransferWrite,
+            vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite);
+    Gow3Overlay::Render(cmdbuf, overlay_view, extent);
+    barrier(vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+            vk::AccessFlagBits::eColorAttachmentWrite, vk::AccessFlagBits::eShaderRead);
+    pp_pass.RenderOverlay(cmdbuf, overlay_view, swapchain.ImageView(), extent, pp_settings);
 }
 
 bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const {
@@ -235,7 +309,8 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
         vmaDestroyImage(instance.GetAllocator(), frame->image, frame->allocation);
     }
 
-    const vk::Format format = swapchain.GetSurfaceFormat().format;
+    // gow3: HDR10 frames keep the 10-bit format up to the swapchain (an 8-bit frame would band).
+    const vk::Format format = swapchain.GetImageFormat();
     const vk::ImageCreateInfo image_info = {
         .flags = vk::ImageCreateFlagBits::eMutableFormat,
         .imageType = vk::ImageType::e2D,
@@ -581,8 +656,21 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         }));
         draw_scheduler.DeferOperation([device, image_view] { device.destroyImageView(image_view); });
         image_size = vk::Extent2D{display.width, display.height};
+        if (frame_dump) {
+            // gow3: the upscaled display buffer the presenter reads (HDR10 checks compare it
+            // with the "output" dump).
+            const vk::MemoryBarrier2 written{
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+            DumpRaw(instance, draw_scheduler, cmdbuf, display.image, vk::ImageLayout::eGeneral,
+                    display.width, display.height, "display", frame_dump_index);
+        }
         const vk::ImageMemoryBarrier2 to_read{
-            .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput |
+                            vk::PipelineStageFlagBits2::eTransfer,
             .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
             .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
             .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
@@ -624,13 +712,19 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         fsr_settings.use_rcas &&
         Gow3Graphics::FsrPassRuns(fsr_settings.enable, true, int(image_size.width), int(image_size.height),
                                   int(frame->width), int(frame->height));
+    // gow3: FSR's HDR sampling squares its output (for a guest PQ image); the HDR10 encode reads
+    // the game's ordinary SDR image, so FSR 1 / RCAS stay in SDR mode for it.
+    const bool encode_hdr = pp_settings.hdr == HostPasses::PostProcessingPass::HdrEncode;
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
-                                 fsr_settings, frame->is_hdr);
+                                 fsr_settings, frame->is_hdr && !encode_hdr);
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+    pp_settings.game_nits = float(graphics.hdr_game_nits.load());
+    pp_settings.peak_nits = float(graphics.hdr_peak_nits.load());
+    pp_settings.ui_nits = float(graphics.hdr_ui_nits.load());
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
     if (frame_dump) {
         // The presented image as the swapchain blit reads it (General after the pass).
@@ -641,6 +735,23 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &done});
         DumpRaw(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
                 frame->width, frame->height, "output", frame_dump_index);
+        // gow3: what the raw files hold, for the offline HDR10 checks.
+        const char* dir = std::getenv("GOW3_DUMP_DIR");
+        const auto info_path = std::filesystem::path(dir && *dir ? dir : "out/dump") /
+                               std::format("output_{:03}.txt", frame_dump_index);
+        if (FILE* f = std::fopen(info_path.string().c_str(), "w")) {
+            std::fprintf(f,
+                         "output_format=%s\nguest_format=%u\nview_format=%s\nhdr_mode=%u\n"
+                         "srgb_input=%u\ngame_nits=%.1f\npeak_nits=%.1f\nui_nits=%.1f\n"
+                         "rcas=%d\nfsr1=%d\ninput=%ux%u\noutput=%ux%u\n",
+                         vk::to_string(swapchain.GetImageFormat()).c_str(),
+                         u32(attribute.attrib.pixel_format), vk::to_string(view_info.format).c_str(),
+                         pp_settings.hdr, pp_settings.srgb_input, pp_settings.game_nits,
+                         pp_settings.peak_nits, pp_settings.ui_nits, int(fsr_settings.use_rcas),
+                         int(fsr_settings.enable), image_size.width, image_size.height,
+                         frame->width, frame->height);
+            std::fclose(f);
+        }
         ++frame_dump_index;
     }
 
@@ -885,7 +996,7 @@ void Presenter::PresentLoadingFrame() {
                            range);
     barrier(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eColorAttachmentOptimal,
             vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eColorAttachmentWrite);
-    Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
+    RenderOverlay(cmdbuf, extent);
     barrier(vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::ePresentSrcKHR,
             vk::AccessFlagBits::eColorAttachmentWrite, {});
     SubmitInfo info{};
@@ -1046,7 +1157,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                vk::PipelineStageFlagBits::eAllCommands,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
         if (overlay) {
-            Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            RenderOverlay(cmdbuf, extent);
             const vk::ImageMemoryBarrier to_present{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
