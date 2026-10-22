@@ -1195,11 +1195,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     scheduler.Flush(info);
 
     // Present to swapchain.
+    bool presented;
     {
         std::scoped_lock present_lock{PresentLock(instance)};
-        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        }
+        presented = swapchain.Present();
+    }
+    // Recreate waits for device idle under the submit lock. Release the present lock first
+    // because the shared-queue path uses that same mutex.
+    if (!presented && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
     free_frame();

@@ -2074,9 +2074,17 @@ void TemporalUpscaler::DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_sc
     }
     const auto device = instance.GetDevice();
     if (!ui_hdr_image || ui_hdr_width != ui_width || ui_hdr_height != ui_height) {
-        scheduler.Finish();
-        ui_hdr_views.clear();
-        ui_hdr_storage_view.reset();
+        // The caller has already recorded into cmd. Finish would submit it and leave this
+        // function writing to an ended command buffer. Retain old resources through this
+        // submission instead, keeping cmd and the caller's bindings intact.
+        if (ui_hdr_image) {
+            scheduler.DeferOperation([image = std::move(ui_hdr_image),
+                                      views = std::move(ui_hdr_views),
+                                      storage = std::move(ui_hdr_storage_view)]() mutable {
+                views.clear();
+                storage.reset();
+            });
+        }
         ui_hdr_image = VideoCore::UniqueImage(device, instance.GetAllocator());
         ui_hdr_image.Create(vk::ImageCreateInfo{
             .imageType = vk::ImageType::e2D,
