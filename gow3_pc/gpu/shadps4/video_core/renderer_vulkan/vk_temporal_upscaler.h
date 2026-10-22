@@ -116,7 +116,8 @@ public:
     /// gow3: HDR10 scene (Stage 3). The tone pass is drawn again with its RenoDX replacement
     /// into the Tone shadow (HDR, gamma 2.2 encoded where the game writes its graded value);
     /// the pass after it (GOW3_UI_TONEMAP_PS) again with that shadow as its input into the
-    /// Scene shadow (linear HDR, with the game's distortion and overlays). DLSS upscales it.
+    /// Scene shadow (linear HDR, with the game's distortion and overlays). The upscalers read
+    /// it instead of the game's 8-bit frame (RunScaled, UpscaleToUi).
     enum class HdrShadow { Tone, Scene };
     struct ShadowTarget {
         vk::Image image;
@@ -126,7 +127,7 @@ public:
         return hdr_chain;
     }
     /// GOW3_HDR_STAGE (diagnostics): 1 = the Tone shadow only, 2 = also the Scene shadow,
-    /// 3 (default) = also DLSS in HDR mode on it.
+    /// 3 (default) = also the upscale (DLSS, FSR 3/4, TAA or the stretch) from it.
     [[nodiscard]] static int HdrStage() {
         static const int stage = [] {
             const char* env = std::getenv("GOW3_HDR_STAGE");
@@ -320,7 +321,10 @@ private:
         bool drawn = false; ///< this frame
     };
     ShadowImage tone_shadow, scene_shadow;
-    bool dlss_hdr_output = false; ///< this frame's DLSS output is the HDR scene
+    bool hdr_output = false;     ///< this frame's upscaled output_image is the HDR scene
+    bool last_hdr_input = false; ///< the upscalers' input domain of the last frame (history)
+    u32 hdr_logged = 0;          ///< LogHdrUpscale: upscalers (bits) already logged
+    void LogHdrUpscale(bool hdr, const char* name = nullptr);
     VideoCore::UniqueImage ui_hdr_image;
     std::vector<MirrorView> ui_hdr_views;
     vk::UniqueImageView ui_hdr_storage_view;
@@ -331,11 +335,21 @@ private:
     vk::UniquePipeline hdr_decode_pipeline, hdr_encode_pipeline;
     /// Starts the HUD phase of the HDR10 chain: ui_image (General, upscaled) decoded into
     /// ui_hdr_image. Turns the chain off for the frame when it cannot.
-    /// With `hdr_scene` (DLSS's HDR output, General) that is written instead, from linear.
-    void DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_scene = {});
+    /// With `hdr_scene` (the upscalers' HDR output or the Scene shadow, linear, General) that
+    /// is written instead, from linear: its top-left scene_w x scene_h (0: the output size),
+    /// stretched to the output size.
+    void DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_scene = {}, u32 scene_w = 0,
+                       u32 scene_h = 0);
+    /// The HDR scene this frame's upscale reads instead of the game's 8-bit frame of size
+    /// iw x ih: the Scene shadow, drawn this frame at that size.
+    [[nodiscard]] bool HdrSceneInput(u32 iw, u32 ih) const noexcept {
+        return hdr_chain && scene_shadow.drawn && HdrStage() >= 3 && scene_shadow.width == iw &&
+               scene_shadow.height == ih;
+    }
     enum class HdrTransfer { Decode, Encode, FromLinear };
     void RecordHdrTransfer(vk::CommandBuffer cmd, HdrTransfer mode, vk::ImageView source,
-                           vk::ImageView target, u32 w, u32 h, float stored_scale = 1.0f);
+                           vk::ImageView target, u32 w, u32 h, float stored_scale = 1.0f,
+                           u32 source_w = 0, u32 source_h = 0);
     vk::UniquePipeline hdr_from_linear_pipeline;
     u64 composite_ps = 0;
     u64 tonemap_ps = 0;               ///< the draw finishing the frame (GOW3_UI_TONEMAP_PS)

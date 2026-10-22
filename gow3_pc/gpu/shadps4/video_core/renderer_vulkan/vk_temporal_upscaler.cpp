@@ -383,7 +383,7 @@ bool TemporalUpscaler::OnFrameStart() {
     // gow3: HDR10 output (Stage 2: the HUD and display buffers in RGBA16F), for this frame.
     hdr_chain = composite_frames && Gow3Settings::Get().hdr && Gow3Settings::Get().hdr_supported;
     tone_shadow.drawn = scene_shadow.drawn = false;
-    dlss_hdr_output = false;
+    hdr_output = false;
     composite_done = false;
     tonemap_pending = false;
     ui_phase = false;
@@ -1638,7 +1638,18 @@ void TemporalUpscaler::RunScaled() {
     // output size after. The others upscale themselves.
     const bool taa = Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa;
     const u32 tw = taa ? w : ow, th = taa ? h : oh;
-    if (!EnsureResources(w, h, tw, th, false)) {
+    // gow3: HDR10 chain: each upscaler reads the Scene shadow (linear HDR, the game's own frame
+    // with RenoDX highlights) drawn this frame by the pass the port upscales, and writes the
+    // HDR scene to output_image, which DecodeToHdrUi then stretches to the output size. The
+    // FSR 3 context keeps its HDR mode while the chain is on (a context per frame type would be
+    // rebuilt at each menu); a frame without the shadow is upscaled as before.
+    const bool hdr_input = HdrSceneInput(iw, ih);
+    if (hdr_input != last_hdr_input) {
+        reset = true; // the history holds the other domain
+        last_hdr_input = hdr_input;
+    }
+    const bool fsr3 = !taa && !UseFsr4() && !UseDlss();
+    if (!EnsureResources(w, h, tw, th, fsr3 && hdr_chain && HdrStage() >= 3)) {
         failed = true;
         return;
     }
@@ -1722,13 +1733,9 @@ void TemporalUpscaler::RunScaled() {
                 vk::ImageLayout::eGeneral, all, rw);
         bool ok4 = true;
         if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
-            RecordTaa(cmdbuf, color_view, depth_view);
+            // TAA blends in a tonemapped space: the HDR scene needs no other change.
+            RecordTaa(cmdbuf, hdr_input ? *scene_shadow.view : color_view, depth_view);
         } else if (UseDlss()) {
-            // gow3: HDR10 chain: DLSS in HDR mode on the Scene shadow (linear, the game's own
-            // frame with RenoDX highlights), drawn this frame by the pass the port upscales.
-            const bool hdr_input = hdr_chain && scene_shadow.drawn && HdrStage() >= 3 &&
-                                   scene_shadow.width == color.info.size.width &&
-                                   scene_shadow.height == color.info.size.height;
             ok4 = hdr_input
                       ? RecordDlss(cmdbuf,
                                    {vk::Image(scene_shadow.image), *scene_shadow.view,
@@ -1743,18 +1750,25 @@ void TemporalUpscaler::RunScaled() {
                                    {depth_image, depth_view, depth_format,
                                     vk::ImageAspectFlagBits::eDepth, source_width, source_height},
                                    w, h, ow, oh, frame_ms, false);
-            dlss_hdr_output = hdr_input && ok4;
         } else {
-            ok4 = RecordFsr4(cmdbuf, {color_image, color_view, source_width, source_height},
-                            {depth_image, depth_view, source_width, source_height}, w, h, ow,
-                            oh, frame_ms);
+            // FSR 4's context is always in HDR mode (vk_fsr4.cpp).
+            ok4 = RecordFsr4(cmdbuf,
+                             hdr_input ? Fsr4Upscaler::Image{vk::Image(scene_shadow.image),
+                                                             *scene_shadow.view, source_width,
+                                                             source_height}
+                                       : Fsr4Upscaler::Image{color_image, color_view,
+                                                             source_width, source_height},
+                             {depth_image, depth_view, source_width, source_height}, w, h, ow,
+                             oh, frame_ms);
         }
+        hdr_output = hdr_input && ok4;
+        LogHdrUpscale(hdr_output);
         if (ok4) {
             if (Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa) {
                 ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
             }
-            // HDR10 chain: DLSS's HDR output goes to the HUD image itself (DecodeToHdrUi).
-            if (!dlss_hdr_output) {
+            // HDR10 chain: the HDR output goes to the HUD image itself (DecodeToHdrUi).
+            if (!hdr_output) {
                 vk::Image source = vk::Image(output_image);
                 vk::ImageLayout source_layout = vk::ImageLayout::eGeneral;
                 u32 sw = tw, sh = th;
@@ -1835,7 +1849,8 @@ void TemporalUpscaler::RunScaled() {
             ui_phase = true;
             ui_color = ldr_target;
             ui_depth = camera_motion.Depth();
-            DecodeToHdrUi(cmdbuf, dlss_hdr_output ? *output_view : vk::ImageView{});
+            // TAA's output is at the render size (tw x th).
+            DecodeToHdrUi(cmdbuf, hdr_output ? *output_view : vk::ImageView{}, tw, th);
         }
         return;
     }
@@ -1844,9 +1859,20 @@ void TemporalUpscaler::RunScaled() {
     FfxVkPortableUpscaleDispatchInfo info{};
     info.structSize = sizeof(info);
     info.commandBuffer = cmdbuf;
-    info.color = Describe(color_image, LdrFormat(color.info.pixel_format), source_width, source_height,
-                          color.usage_flags, vk::ImageAspectFlagBits::eColor,
-                          FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+    // HDR10 chain: the context in HDR mode on the Scene shadow, into output_image (RGBA16F).
+    const bool fsr3_hdr = hdr_input && context_hdr;
+    info.color = fsr3_hdr
+                     ? Describe(vk::Image(scene_shadow.image), vk::Format::eR16G16B16A16Sfloat,
+                                source_width, source_height,
+                                vk::ImageUsageFlagBits::eColorAttachment |
+                                    vk::ImageUsageFlagBits::eSampled |
+                                    vk::ImageUsageFlagBits::eStorage |
+                                    vk::ImageUsageFlagBits::eTransferSrc,
+                                vk::ImageAspectFlagBits::eColor,
+                                FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ)
+                     : Describe(color_image, LdrFormat(color.info.pixel_format), source_width,
+                                source_height, color.usage_flags, vk::ImageAspectFlagBits::eColor,
+                                FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
     info.depth = Describe(depth_image, depth_format, source_width, source_height, depth.usage_flags,
                           vk::ImageAspectFlagBits::eDepth,
                           FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
@@ -1854,11 +1880,24 @@ void TemporalUpscaler::RunScaled() {
                                   vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
                                   vk::ImageAspectFlagBits::eColor,
                                   FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
-    info.output = Describe(vk::Image(ui_image), vk::Format::eR8G8B8A8Unorm, ow, oh,
-                           vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
-                               vk::ImageUsageFlagBits::eColorAttachment,
-                           vk::ImageAspectFlagBits::eColor,
-                           FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (fsr3_hdr) {
+        barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
+                vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
+                vk::ImageLayout::eGeneral, all, rw);
+    }
+    info.output = fsr3_hdr
+                      ? Describe(vk::Image(output_image), vk::Format::eR16G16B16A16Sfloat, ow, oh,
+                                 vk::ImageUsageFlagBits::eStorage |
+                                     vk::ImageUsageFlagBits::eSampled |
+                                     vk::ImageUsageFlagBits::eTransferSrc,
+                                 vk::ImageAspectFlagBits::eColor,
+                                 FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS)
+                      : Describe(vk::Image(ui_image), vk::Format::eR8G8B8A8Unorm, ow, oh,
+                                 vk::ImageUsageFlagBits::eStorage |
+                                     vk::ImageUsageFlagBits::eSampled |
+                                     vk::ImageUsageFlagBits::eColorAttachment,
+                                 vk::ImageAspectFlagBits::eColor,
+                                 FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS);
     info.exposure.structSize = sizeof(info.exposure);
     info.reactiveMask.structSize = sizeof(info.reactiveMask);
     if (mask_ready && ReactiveOn()) {
@@ -1899,7 +1938,15 @@ void TemporalUpscaler::RunScaled() {
         ok = true;
         reset = false;
         dispatched_last_frame = true;
-        ExtraSharpen(cmdbuf, vk::Image(ui_image), true, ow, oh);
+        hdr_output = fsr3_hdr;
+        LogHdrUpscale(hdr_output);
+        ExtraSharpen(cmdbuf, vk::Image(fsr3_hdr ? output_image : ui_image), !fsr3_hdr, ow, oh);
+        if (fsr3_hdr) {
+            barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
+                    vk::ImageLayout::eGeneral, all, rw, vk::ImageLayout::eGeneral,
+                    vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderStorageRead);
+        }
         // GOW3_DUMP_TRIGGER: the inputs, the motion with and without the characters' own and
         // the scene stencil (motion vector checks).
         if (const int dump = DumpFrame(); dump >= 0 && camera_motion.VelocityMode()) {
@@ -1930,10 +1977,23 @@ void TemporalUpscaler::RunScaled() {
         ui_phase = true;
         ui_color = ldr_target;
         ui_depth = camera_motion.Depth();
-        DecodeToHdrUi(cmdbuf);
+        DecodeToHdrUi(cmdbuf, hdr_output ? *output_view : vk::ImageView{});
     }
 }
 
+
+// gow3: the first frame each upscaler (or the stretch without one) upscales the HDR scene.
+void TemporalUpscaler::LogHdrUpscale(bool hdr, const char* name) {
+    static constexpr std::array names{"off", "FSR 3", "FSR 4", "FSR 4.1.1", "TAA", "DLSS"};
+    const int upscaler = Gow3Settings::Get().upscaler.load();
+    const u32 bit = name ? 1u << names.size() : 1u << u32(upscaler);
+    if (!hdr || (hdr_logged & bit) || (!name && u32(upscaler) >= names.size())) {
+        return;
+    }
+    hdr_logged |= bit;
+    std::printf("HDR: %s upscales the HDR scene\n", name ? name : names[upscaler]);
+    std::fflush(stdout);
+}
 
 // gow3: GOW3_HDR_TRACE=1: each (use, view format) pair on the output-size images, once.
 static void HdrTraceUse(const char* use, vk::Format format) {
@@ -1994,7 +2054,12 @@ TemporalUpscaler::ShadowTarget TemporalUpscaler::HdrShadowTarget(HdrShadow which
 
 void TemporalUpscaler::RecordHdrTransfer(vk::CommandBuffer cmd, HdrTransfer mode,
                                           vk::ImageView source, vk::ImageView target, u32 w,
-                                          u32 h, float stored_scale) {
+                                          u32 h, float stored_scale, u32 source_w,
+                                          u32 source_h) {
+    struct Composition {
+        float stored_scale;
+        u32 source_width, source_height;
+    };
     if (!hdr_decode_pipeline) {
         const auto device = instance.GetDevice();
         std::array<vk::DescriptorSetLayoutBinding, 2> bindings{};
@@ -2010,7 +2075,8 @@ void TemporalUpscaler::RecordHdrTransfer(vk::CommandBuffer cmd, HdrTransfer mode
             .pBindings = bindings.data(),
         }));
         const vk::PushConstantRange composition_range{
-            .stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0, .size = sizeof(float)};
+            .stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0,
+            .size = sizeof(Composition)};
         hdr_transfer_pipeline_layout = Check(device.createPipelineLayoutUnique({
             .setLayoutCount = 1,
             .pSetLayouts = &*hdr_transfer_desc_layout,
@@ -2053,12 +2119,14 @@ void TemporalUpscaler::RecordHdrTransfer(vk::CommandBuffer cmd, HdrTransfer mode
                                                    : *hdr_from_linear_pipeline);
     cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *hdr_transfer_pipeline_layout, 0,
                              writes);
+    const Composition composition{stored_scale, source_w ? source_w : w, source_h ? source_h : h};
     cmd.pushConstants(*hdr_transfer_pipeline_layout, vk::ShaderStageFlagBits::eCompute,
-                       0, sizeof(stored_scale), &stored_scale);
+                       0, sizeof(composition), &composition);
     cmd.dispatch((w + 7) / 8, (h + 7) / 8, 1);
 }
 
-void TemporalUpscaler::DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_scene) {
+void TemporalUpscaler::DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_scene,
+                                     u32 scene_w, u32 scene_h) {
     if (!hdr_chain) {
         return;
     }
@@ -2144,7 +2212,7 @@ void TemporalUpscaler::DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_sc
                           .pImageMemoryBarriers = to_decode.data()});
     if (hdr_scene) {
         RecordHdrTransfer(cmd, HdrTransfer::FromLinear, hdr_scene, *ui_hdr_storage_view, ui_width,
-                          ui_height, stored_scale);
+                          ui_height, stored_scale, scene_w, scene_h);
     } else {
         RecordHdrTransfer(cmd, HdrTransfer::Decode, *ui_decode_view, *ui_hdr_storage_view,
                           ui_width, ui_height, stored_scale);
@@ -2384,7 +2452,13 @@ void TemporalUpscaler::UpscaleToUi(VideoCore::ImageId source) {
         ui_phase = true;
         ui_color = ldr_target;
         ui_depth = {};
-        DecodeToHdrUi(cmd);
+        // HDR10 chain: the Scene shadow of this frame, stretched (bilinear) like the 8-bit one.
+        if (HdrSceneInput(ldr.info.size.width, ldr.info.size.height)) {
+            LogHdrUpscale(true, "the stretch");
+            DecodeToHdrUi(cmd, *scene_shadow.view, w, h);
+        } else {
+            DecodeToHdrUi(cmd);
+        }
     }
 }
 
