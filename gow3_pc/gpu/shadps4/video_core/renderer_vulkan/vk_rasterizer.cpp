@@ -2916,7 +2916,11 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     const u64 serial_after_bind = scheduler.RecordSerial();
 
     const vk::Pipeline handle = pipeline->Handle();
-    const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+    u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y;
+    const u32 dim_z = cs_program.dim_z;
+    // gow3: movie frames at the display size: the whole frame converted (gow3_movie.h).
+    Gow3Movie::CoverDisplay(cs.pgm_hash, cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                            dim_x, dim_y);
     scheduler.Checkpoint("dispatch",cs.pgm_hash);
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
