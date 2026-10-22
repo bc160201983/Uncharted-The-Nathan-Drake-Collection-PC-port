@@ -223,8 +223,15 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     if (const char* ps = std::getenv("GOW3_UI_TONEMAP_PS")) {
         tonemap_ps = u32(std::strtoull(ps, nullptr, 16));
     }
+    // GOW3_COMPOSITE_NATIVE=1 (the launcher with HDR on at the game's own size): the same frames
+    // at 1:1. The HDR10 scene (the shadows, the float HUD chain) lives on this path; the
+    // anti-aliasing then runs on the finished frame, as when upscaling.
+    const char* native = std::getenv("GOW3_COMPOSITE_NATIVE");
+    const bool composite_native = native && native[0] == '1' && render_width == target_width &&
+                                  render_height == target_height;
     composite_frames = enabled && scaled_session && composite_ps && camera_motion.VelocityMode() &&
-                       (render_width < target_width || render_height < target_height);
+                       (render_width < target_width || render_height < target_height ||
+                        composite_native);
     if (composite_frames) {
         std::printf("Upscaler: the game draws %ux%u, frames are upscaled to %ux%u at pixel shader "
                     "%08llx; HUD and menus at %ux%u\n", render_width, render_height, target_width,
