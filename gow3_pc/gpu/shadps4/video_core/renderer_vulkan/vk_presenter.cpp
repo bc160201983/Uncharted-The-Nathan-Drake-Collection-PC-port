@@ -727,7 +727,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb ||
         stored_display;
-    pp_settings.game_nits = float(graphics.hdr_game_nits.load());
+    // The float composition is expressed in UI-white units: the scene was rebased before
+    // HUD/menu blending, so its physical brightness stays independent of UI brightness.
+    pp_settings.game_nits = stored_display && display.white_nits > 0.0f
+                                ? display.white_nits : float(graphics.hdr_game_nits.load());
     pp_settings.peak_nits = float(graphics.hdr_peak_nits.load());
     pp_settings.ui_nits = float(graphics.hdr_ui_nits.load());
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);

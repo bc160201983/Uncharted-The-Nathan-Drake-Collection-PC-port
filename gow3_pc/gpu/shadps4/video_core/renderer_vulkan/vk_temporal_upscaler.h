@@ -112,6 +112,41 @@ public:
     [[nodiscard]] bool RedirectedToFloat() const noexcept {
         return redirected_float;
     }
+
+    /// gow3: HDR10 scene (Stage 3). The tone pass is drawn again with its RenoDX replacement
+    /// into the Tone shadow (HDR, gamma 2.2 encoded where the game writes its graded value);
+    /// the pass after it (GOW3_UI_TONEMAP_PS) again with that shadow as its input into the
+    /// Scene shadow (linear HDR, with the game's distortion and overlays). DLSS upscales it.
+    enum class HdrShadow { Tone, Scene };
+    struct ShadowTarget {
+        vk::Image image;
+        vk::ImageView view;
+    };
+    [[nodiscard]] bool HdrChain() const noexcept {
+        return hdr_chain;
+    }
+    /// GOW3_HDR_STAGE (diagnostics): 1 = the Tone shadow only, 2 = also the Scene shadow,
+    /// 3 (default) = also DLSS in HDR mode on it.
+    [[nodiscard]] static int HdrStage() {
+        static const int stage = [] {
+            const char* env = std::getenv("GOW3_HDR_STAGE");
+            return env && *env ? std::atoi(env) : 3;
+        }();
+        return stage;
+    }
+    /// The shadow's RGBA16F image at w x h (made or resized here), for this frame's draw.
+    ShadowTarget HdrShadowTarget(HdrShadow which, u32 w, u32 h);
+    void HdrShadowDrawn(HdrShadow which) {
+        (which == HdrShadow::Tone ? tone_shadow : scene_shadow).drawn = true;
+    }
+    /// The pass after the tone pass, with a Tone shadow drawn this frame to read.
+    [[nodiscard]] bool HdrPostPass(u64 ps_hash) const noexcept {
+        return hdr_chain && tonemap_ps && ps_hash == tonemap_ps && tone_shadow.drawn &&
+               HdrStage() >= 2;
+    }
+    [[nodiscard]] vk::ImageView ToneShadowView() const noexcept {
+        return *tone_shadow.view;
+    }
     bool RedirectDepth(VideoCore::ImageId depth, Target& target);
     /// A sampled image replaced by the upscaled frame (the display pass).
     bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& info,
@@ -126,6 +161,7 @@ public:
         vk::Image image;
         vk::Format format;
         u32 width, height;
+        float white_nits = 0.0f; ///< encoding white of a rebased HDR composition
     };
     bool DisplayOverride(VAddr address, Display& display);
 
@@ -257,6 +293,7 @@ private:
     struct DisplayImage {
         VideoCore::UniqueImage image;
         std::vector<MirrorView> views;
+        float white_nits = 0.0f;
         vk::UniqueImageView storage_view; ///< RGBA16F (HDR10 chain): the composite's encode
         vk::Format format{};
         u32 width = 0, height = 0;
@@ -274,7 +311,16 @@ private:
     /// HUD is drawn into ui_hdr_image (RGBA16F, linear: its draws blend through sRGB views) and
     /// the display buffers are RGBA16F (stored values: their draws use UNORM views).
     bool hdr_chain = false;
+    float hdr_ui_white = 203.0f;
     bool redirected_float = false;
+    struct ShadowImage {
+        VideoCore::UniqueImage image;
+        vk::UniqueImageView view;
+        u32 width = 0, height = 0;
+        bool drawn = false; ///< this frame
+    };
+    ShadowImage tone_shadow, scene_shadow;
+    bool dlss_hdr_output = false; ///< this frame's DLSS output is the HDR scene
     VideoCore::UniqueImage ui_hdr_image;
     std::vector<MirrorView> ui_hdr_views;
     vk::UniqueImageView ui_hdr_storage_view;
@@ -285,9 +331,12 @@ private:
     vk::UniquePipeline hdr_decode_pipeline, hdr_encode_pipeline;
     /// Starts the HUD phase of the HDR10 chain: ui_image (General, upscaled) decoded into
     /// ui_hdr_image. Turns the chain off for the frame when it cannot.
-    void DecodeToHdrUi(vk::CommandBuffer cmd);
-    void RecordHdrTransfer(vk::CommandBuffer cmd, bool decode, vk::ImageView source,
-                           vk::ImageView target, u32 w, u32 h);
+    /// With `hdr_scene` (DLSS's HDR output, General) that is written instead, from linear.
+    void DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_scene = {});
+    enum class HdrTransfer { Decode, Encode, FromLinear };
+    void RecordHdrTransfer(vk::CommandBuffer cmd, HdrTransfer mode, vk::ImageView source,
+                           vk::ImageView target, u32 w, u32 h, float stored_scale = 1.0f);
+    vk::UniquePipeline hdr_from_linear_pipeline;
     u64 composite_ps = 0;
     u64 tonemap_ps = 0;               ///< the draw finishing the frame (GOW3_UI_TONEMAP_PS)
     VideoCore::ImageId tonemap_target{};

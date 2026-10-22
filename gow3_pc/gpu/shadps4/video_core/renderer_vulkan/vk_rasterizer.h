@@ -249,6 +249,9 @@ private:
     /// gow3: the squaring pipeline of a scaled MIN/MAX blend when this draw can use it.
     vk::Pipeline SquarePass(const GraphicsPipeline& pipeline) const;
     void SkipFloatTargetDraw(const GraphicsPipeline& pipeline) const;
+    void RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
+                         bool is_indexed, u32 num_indices, u32 num_instances, u32 first_vertex,
+                         u32 first_instance, const vk::DescriptorBufferInfo& settings);
     void UpdatePrimitiveState(bool is_indexed) const;
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;

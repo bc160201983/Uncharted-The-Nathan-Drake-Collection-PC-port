@@ -121,6 +121,12 @@ public:
         return *float_pipeline;
     }
 
+    /// gow3: HDR10 tone pass: this draw again with a replacement fragment shader
+    /// (hdr/fs_<hash>_hdr.spv) into an RGBA16F shadow target. Null for other pipelines.
+    vk::Pipeline HdrShadowHandle() const noexcept {
+        return *hdr_shadow_pipeline;
+    }
+
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>
     void GetVertexInputs(VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
@@ -143,6 +149,8 @@ private:
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
     vk::UniquePipeline square_pipeline;
     vk::UniquePipeline float_pipeline;
+    vk::UniquePipeline hdr_shadow_pipeline;
+    bool hdr_settings_binding = false;
 };
 
 struct ClipDistanceShaderKey {

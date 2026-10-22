@@ -2,19 +2,24 @@
 // gow3: HDR10 HUD composition. The HUD draws into the upscaled frame through sRGB views (they
 // blend in linear light) and the later draws into the display buffer through UNORM views (they
 // blend the stored values). With the float images of the HDR10 chain each keeps that domain:
-// DECODE=1: the 8-bit upscaled frame (stored sRGB-encoded values) -> linear, for the HUD;
-// DECODE=0: the linear frame with its HUD -> stored values, into the display buffer.
+// MODE 0: the 8-bit upscaled frame (stored sRGB-encoded values) -> linear, for the HUD;
+// MODE 1: the linear frame with its HUD -> stored values, into the display buffer;
+// MODE 2: the upscaled HDR scene (linear, 1.0 = the game's white) -> the HUD's domain: equal up
+//         to 1.0 (the SDR frame's value there), above it the value the presenter's gamma 2.2
+//         decode of the stored value turns back into the scene's own.
 // Values above 1.0 (HDR highlights) keep the curves' extension.
 #version 450
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
-#if DECODE
+#if MODE == 0
 layout(binding = 0, rgba8) uniform readonly image2D source;
 #else
 layout(binding = 0, rgba16f) uniform readonly image2D source;
 #endif
 layout(binding = 1, rgba16f) uniform writeonly image2D target;
+// Scene storage is rebased to UI white before native HUD/menu blending.
+layout(push_constant) uniform HdrComposition { float stored_scale; } settings;
 
 vec3 Decode(vec3 v) {
     const vec3 a = abs(v);
@@ -32,10 +37,19 @@ void main() {
         return;
     }
     vec4 color = imageLoad(source, pixel);
-#if DECODE
+#if MODE == 0
     color.rgb = Decode(color.rgb);
-#else
+#elif MODE == 1
     color.rgb = Encode(color.rgb);
+#else
+    color.rgb = max(color.rgb, 0.0);
+    color.rgb = mix(color.rgb, Decode(pow(color.rgb, vec3(1.0 / 2.2))), greaterThan(color.rgb, vec3(1.0)));
+    color.a = 1.0;
+#endif
+#if MODE != 1
+    // Work in the game's stored-value domain so changing UI white cancels exactly
+    // at presentation for the scene. Native UI sources still use white = 1.
+    color.rgb = Decode(Encode(color.rgb) * settings.stored_scale);
 #endif
     imageStore(target, pixel, color);
 }

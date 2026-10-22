@@ -4,7 +4,15 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <unordered_map>
 #include <utility>
+#include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
@@ -71,6 +79,49 @@ vk::UniquePipeline CreateRefusedAgain(vk::Device device, const vk::GraphicsPipel
 
 u64 NsSince(Clock::time_point start) {
     return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+}
+
+// gow3: HDR10 tone pass replacements: SPIR-V fragment shaders named fs_<guest hash>_hdr.spv in
+// the hdr folder next to the executable (GOW3_HDR_SHADER_DIR overrides), read once per hash.
+// They keep the translated shader descriptors and push constants, plus a read-only settings
+// buffer at binding 12 for live peak and diffuse-white values.
+const std::vector<u32>* HdrShadowShader(u64 ps_hash) {
+    static std::mutex mutex;
+    static std::unordered_map<u64, std::vector<u32>> shaders;
+    std::scoped_lock lock{mutex};
+    const auto [it, fresh] = shaders.try_emplace(ps_hash);
+    if (fresh) {
+        std::filesystem::path dir;
+        if (const char* env = std::getenv("GOW3_HDR_SHADER_DIR"); env && *env) {
+            dir = env;
+        } else {
+#ifdef _WIN32
+            wchar_t path[MAX_PATH];
+            const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+            dir = std::filesystem::path(std::wstring(path, length)).parent_path() / "hdr";
+#else
+            std::error_code error;
+            const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+            dir = (error ? std::filesystem::current_path() : executable.parent_path()) / "hdr";
+#endif
+        }
+        const auto file = dir / fmt::format("fs_{:08x}_hdr.spv", u32(ps_hash));
+        if (std::ifstream in{file, std::ios::binary | std::ios::ate}) {
+            const auto bytes = size_t(in.tellg());
+            if (bytes >= 20 && bytes % 4 == 0) {
+                it->second.resize(bytes / 4);
+                in.seekg(0);
+                in.read(reinterpret_cast<char*>(it->second.data()), std::streamsize(bytes));
+                if (!in || it->second[0] != 0x07230203) {
+                    it->second.clear();
+                    return nullptr;
+                }
+                std::printf("HDR: tone pass shader %s\n", file.string().c_str());
+                std::fflush(stdout);
+            }
+        }
+    }
+    return it->second.empty() ? nullptr : &it->second;
 }
 } // namespace
 
@@ -533,6 +584,45 @@ GraphicsPipeline::GraphicsPipeline(
             SetObjectName(device, *float_pipeline, "Graphics Pipeline {} float target", debug_str);
         }
     }
+    // gow3: HDR10 tone pass shadow (TemporalUpscaler::HdrShadowTarget): this pipeline with the
+    // replacement fragment shader and an RGBA16F target. Brightness comes from binding 12.
+    const auto* fragment_info = stages[u32(Shader::SwStage::Fragment)];
+    const std::vector<u32>* shadow_code =
+        EmulatorSettings.IsHdrAllowed() && fragment_info && key.num_color_attachments == 1 &&
+                !needs_square_pass
+            ? HdrShadowShader(fragment_info->pgm_hash)
+            : nullptr;
+    if (shadow_code && hdr_settings_binding) {
+        const auto module = Check<"create HDR shadow shader">(device.createShaderModule({
+            .codeSize = shadow_code->size() * sizeof(u32),
+            .pCode = shadow_code->data(),
+        }));
+        auto shadow_stages = shader_stages;
+        for (auto& stage_ci : shadow_stages) {
+            if (stage_ci.stage == vk::ShaderStageFlagBits::eFragment) {
+                stage_ci.module = module;
+            }
+        }
+        auto shadow_formats = color_formats;
+        shadow_formats[0] = vk::Format::eR16G16B16A16Sfloat;
+        auto shadow_rendering_ci = pipeline_rendering_ci;
+        shadow_rendering_ci.pColorAttachmentFormats = shadow_formats.data();
+        auto shadow_info = pipeline_info;
+        shadow_info.pNext = &shadow_rendering_ci;
+        shadow_info.pStages = shadow_stages.data();
+        shadow_info.stageCount = u32(shadow_stages.size());
+        auto [shadow_result, shadow_pipe] = device.createGraphicsPipelineUnique(pipeline_cache,
+                                                                                shadow_info);
+        device.destroyShaderModule(module);
+        if (shadow_result == vk::Result::eSuccess && shadow_pipe) {
+            hdr_shadow_pipeline = std::move(shadow_pipe);
+            SetObjectName(device, *hdr_shadow_pipeline, "Graphics Pipeline {} HDR shadow", debug_str);
+        } else {
+            std::printf("HDR: the tone pass shadow pipeline was refused (%s)\n",
+                        vk::to_string(shadow_result).c_str());
+            std::fflush(stdout);
+        }
+    }
     g_gow3_pipeline_total_ns += NsSince(started);
     ++g_gow3_pipelines_built;
 }
@@ -630,6 +720,17 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
                 .stageFlags = stage_bit,
             });
         }
+    }
+    // The U2 replacement shader adds a settings buffer after the translated bindings 0-11.
+    const auto* ps = stages[u32(Shader::SwStage::Fragment)];
+    hdr_settings_binding = EmulatorSettings.IsHdrAllowed() && ps &&
+                           u32(ps->pgm_hash) == 0x3371ae8d && binding == 12 &&
+                           HdrShadowShader(ps->pgm_hash);
+    if (hdr_settings_binding) {
+        bindings.push_back({.binding = binding++,
+                            .descriptorType = vk::DescriptorType::eStorageBuffer,
+                            .descriptorCount = 1,
+                            .stageFlags = vk::ShaderStageFlagBits::eFragment});
     }
     uses_push_descriptors = binding < instance.MaxPushDescriptors();
     const auto flags = uses_push_descriptors
