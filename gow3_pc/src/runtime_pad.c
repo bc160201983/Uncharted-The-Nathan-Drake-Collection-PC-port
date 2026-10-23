@@ -586,7 +586,10 @@ static void sample_host(PadData *d) {
     runtime_gamesettings_tick();
     publish_pad_prompts(g);
     int keyboard_used=0, gamepad_used=0;
-    if (g) {
+    /* SDL delivers gamepad events in the background too (window.cpp): the game takes them
+     * only while its window is in front, or always with its own controller (GOW3_PAD_INDEX,
+     * local co-op: two windows, one controller each). */
+    if (g && (pad_index() || gow3gpu_window_foreground())) {
         for (size_t i=0;i<pad_map.count;++i)
             if (SDL_GetGamepadButton(g,(SDL_GamepadButton)pad_map.entries[i].source)) d->buttons|=pad_map.entries[i].ps;
         const uint32_t mapped=d->buttons;
