@@ -433,7 +433,7 @@ UNLOCK_PATCHES = {
 # orthographic cameras keep their own branches. The zoom loads jump to small stubs in dead assert
 # branches of the projection code (each now starts with int 0x41, so it still stops the game), and
 # back. Applied only to render sizes wider than 16:9 (UNCHARTED_HOR_PLUS=0: never).
-_XMM_BASE = {"rbx": 3, "rdi": 7}
+_XMM_BASE = {"rdx": 2, "rbx": 3, "rdi": 7}
 
 
 def _vex_mem(op, dst, src, base, disp):
@@ -491,6 +491,15 @@ HOR_PLUS_PATCHES = {
                          0x254, 0x250,
                          [(0x10, "rbx", 4, 0), (0x267, "rbx", 4, 0), (0xb2f, "rdi", 0, 1)],
                          [(0x26, 0xb6, bytes.fromhex("488b055d16b9004885c0"))]),
+    ]),
+    # The water's planar reflection camera 0xc902b4 is square (aspect 1.0, so the camera update
+    # leaves it alone) with the render camera's own zoom: it kept the 16:9 horizontal view, and
+    # past the 16:9 edges the water sampled outside the reflection (streaks). Its zoom load takes
+    # the render camera's (rdx) aspect instead; the stub goes in the dead assert branch 0xc90485.
+    ("Uncharted 2 ultrawide: water reflections as wide as the view", [
+        hor_plus_variant("c5fa108a54020000 c5f82815 ????????", 0x254, 0x250,
+                         [(0, "rdx", 1, 2)],
+                         [(0x1d1, 0x35, bytes.fromhex("488b05ecda8d004885c0"))]),
     ])],
     # Infinite far 0x11c1107 (both of its paths), finite 0x11c11e1 and 0x11c1406, frustum planes
     # 0x11c1f21 (Uncharted 3 1.02).
@@ -1182,6 +1191,20 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             # into its target after it, so the upscale runs at the draw after it.
             env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")
             print(f"Upscaling: {render_size[0]}x{render_size[1]} -> {out_w}x{out_h}")
+    # HDR at the game's own size (Among Thieves, the game with a scene HDR tone pass, gow3_pc/hdr):
+    # the scene HDR and the float HUD chain live on the upscaling path, so the frame takes it at
+    # 1:1 (GOW3_COMPOSITE_NATIVE). The anti-aliasing then runs on the finished frame, as when
+    # upscaling. Read at start: switching HDR on in the game takes a restart for the scene.
+    # UNCHARTED_HDR_NATIVE=0 keeps the native path (anti-aliasing before post processing, SDR scene).
+    if ("GOW3_RENDER_RES" not in env and game_key == "u2"
+            and os.environ.get("UNCHARTED_TEMPORAL_AA", "1") != "0"
+            and os.environ.get("UNCHARTED_HDR_NATIVE", "1") != "0"
+            and ini_value(Path(env["GOW3_CONFIG"]), "hdr", "0") == "1"):
+        env["GOW3_RENDER_RES"] = env["GOW3_OUTPUT_RES"] = f"{render_size[0]}x{render_size[1]}"
+        env["GOW3_COMPOSITE_NATIVE"] = "1"
+        env.setdefault("GOW3_UI_COMPOSITE_PS", "749bbec9")
+        env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")
+        print(f"HDR: {render_size[0]}x{render_size[1]} through the upscaling path at 1:1 (scene HDR)")
     pad_file=user / "probe-pad.txt"
     pad_file.write_text("",encoding="ascii")
     env["GOW3_PAD_FILE"] = str(pad_file)

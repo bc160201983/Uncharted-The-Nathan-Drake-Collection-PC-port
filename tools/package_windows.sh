@@ -31,6 +31,9 @@ ldd gow3_pc/out/gow3-probe.exe | awk '/clang64/ {print $3}' | sort -u | while re
     cp "$dll" "$stage/gow3_pc/out/"
 done
 
+# HDR tone replacement, its source, exact include snapshot and MIT license.
+# The checked-in SPIR-V avoids making DXC a dependency of the runtime build.
+cp -R gow3_pc/hdr "$stage/gow3_pc/out/hdr"
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/install_update.py "$stage/tools/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
@@ -51,6 +54,8 @@ cp tools/github/CHANGELOG.md "$stage/CHANGELOG.md"
 # among them, carry no license file).
 licenses=$stage/licenses
 mkdir -p "$licenses"
+mkdir -p "$licenses/renodx"
+cp gow3_pc/hdr/renodx/LICENSE gow3_pc/hdr/renodx/SOURCE.txt "$licenses/renodx/"
 for dir in gow3_pc/gpu/third_party/* gow3_pc/third_party/*; do
     for file in "$dir"/LICENSE* "$dir"/COPYING* "$dir"/COPYRIGHT*; do
         [[ -f $file ]] || continue
@@ -87,7 +92,14 @@ done
 if [[ -f gow3_pc/out/gow3_dlss.dll && -f gow3_pc/out/nvngx_dlss.dll ]]; then
     cp gow3_pc/out/gow3_dlss.dll gow3_pc/out/nvngx_dlss.dll "$stage/gow3_pc/out/"
     mkdir -p "$licenses/nvidia-dlss" "$licenses/gow3-dlss-bridge"
-    cp downloads/dlss-sdk-*/LICENSE.txt "$licenses/nvidia-dlss/LICENSE.txt"
+    dlss_license=${NVIDIA_DLSS_LICENSE:-}
+    if [[ -z $dlss_license ]]; then
+        for file in downloads/dlss-sdk-*/LICENSE.txt; do
+            [[ -f $file ]] && { dlss_license=$file; break; }
+        done
+    fi
+    [[ -f $dlss_license ]] || { echo 'Need the DLSS license (NVIDIA_DLSS_LICENSE).' >&2; exit 1; }
+    cp "$dlss_license" "$licenses/nvidia-dlss/LICENSE.txt"
     cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$licenses/gow3-dlss-bridge/LICENSE.txt"
 fi
 if [[ -f gow3_pc/fsr4_shaders/fsr4_model_v07_i8_native_1080_pre.spv ]]; then
@@ -120,8 +132,7 @@ if [[ -n $forbidden ]]; then
 fi
 
 rm -f dist/Uncharted-windows.zip
-(cd dist/stage && powershell -NoProfile -Command \
-    "Compress-Archive -Path Uncharted-windows -DestinationPath ../Uncharted-windows.zip")
+"$python_home/python.exe" -m zipfile -c dist/Uncharted-windows.zip "$stage"
 rm -rf dist/Uncharted-windows
 mv "$stage" dist/Uncharted-windows
 du -sh dist/Uncharted-windows dist/Uncharted-windows.zip

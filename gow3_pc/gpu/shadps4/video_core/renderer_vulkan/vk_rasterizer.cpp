@@ -15,6 +15,7 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
+#include "gow3_settings.h"
 #include "gow3_watch_range.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
@@ -2293,12 +2294,28 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     const auto state = BeginRendering(pipeline);
+    if (float_color0 && !pipeline->FloatTargetHandle()) [[unlikely]] {
+        SkipFloatTargetDraw(*pipeline);
+        return;
+    }
 
     if (!inputs_resolved) {
         ResolveVertexBuffers(pipeline, draw_prepared);
         if (is_indexed) {
             ResolveIndexBuffer(index_offset);
         }
+    }
+    // Allocate before emitting vertex/index state: a stream-buffer wrap may submit recording.
+    vk::DescriptorBufferInfo hdr_settings{};
+    if (upscaler->HdrChain() && pipeline->HdrShadowHandle() && !float_color0) {
+        const auto& settings = Gow3Settings::Get();
+        const std::array<float, 2> nits{float(settings.hdr_peak_nits.load()),
+                                      float(settings.hdr_game_nits.load())};
+        auto& stream = buffer_cache.GetStreamBuffer();
+        const auto [data, offset] = stream.Map(sizeof(nits), instance.StorageMinAlignment());
+        std::memcpy(data, nits.data(), sizeof(nits));
+        stream.Commit();
+        hdr_settings = {stream.Handle(), offset, sizeof(nits)};
     }
     EmitVertexBuffers();
     if (is_indexed) {
@@ -2448,8 +2465,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
-    const vk::Pipeline handle = pipeline->Handle();
-    const vk::Pipeline square = SquarePass(*pipeline);
+    const vk::Pipeline handle =
+        float_color0 ? pipeline->FloatTargetHandle() : pipeline->Handle();
+    const vk::Pipeline square = float_color0 ? vk::Pipeline{} : SquarePass(*pipeline);
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
@@ -2470,6 +2488,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             draw();
         }
     });
+    if (upscaler->HdrChain()) [[unlikely]] {
+        RecordHdrShadow(*pipeline, state, is_indexed, num_indices, num_instances, first_vertex,
+                        first_instance, hdr_settings);
+    }
     // gow3: the camera of the game's velocity pass (GOW3_VELOCITY_PS, Uncharted): its constant
     // buffer, as this draw reads it, for the upscaler's motion vectors.
     if (camera_motion->VelocityMode()) {
@@ -2637,6 +2659,10 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         return;
     }
     const auto state = BeginRendering(pipeline);
+    if (float_color0 && !pipeline->FloatTargetHandle()) [[unlikely]] {
+        SkipFloatTargetDraw(*pipeline);
+        return;
+    }
 
     BindVertexBuffers(pipeline);
     if (is_indexed) {
@@ -2692,8 +2718,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
                                  : sizeof(VkDrawIndirectCommand)));
-    const vk::Pipeline handle = pipeline->Handle();
-    const vk::Pipeline square = SquarePass(*pipeline);
+    const vk::Pipeline handle =
+        float_color0 ? pipeline->FloatTargetHandle() : pipeline->Handle();
+    const vk::Pipeline square = float_color0 ? vk::Pipeline{} : SquarePass(*pipeline);
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
@@ -2889,7 +2916,11 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     const u64 serial_after_bind = scheduler.RecordSerial();
 
     const vk::Pipeline handle = pipeline->Handle();
-    const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+    u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y;
+    const u32 dim_z = cs_program.dim_z;
+    // gow3: movie frames at the display size: the whole frame converted (gow3_movie.h).
+    Gow3Movie::CoverDisplay(cs.pgm_hash, cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                            dim_x, dim_y);
     scheduler.Checkpoint("dispatch",cs.pgm_hash);
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
@@ -5778,6 +5809,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             attachment_feedback_loop = false;
             push_data.scene_size = begin_memo.scene_size;
             target_scale = begin_memo.target_scale;
+            float_color0 = begin_memo.float_color0;
             return begin_memo.state;
         }
         ++begin_memo_misses;
@@ -5794,7 +5826,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         if (!clears) {
             // Recomputed after the full path: it may have started the scene (scene_started).
             begin_memo = {true, MakeBeginSignature(pipeline), state, push_data.scene_size,
-                          target_scale};
+                          target_scale, float_color0};
         }
     }
     return state;
@@ -5802,6 +5834,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 
 RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     attachment_feedback_loop = false;
+    float_color0 = false;
     using VulkanUpscalerTarget = TemporalUpscaler::Target;
     VulkanUpscalerTarget redirect{};
     bool color_redirected = false, depth_redirected = false;
@@ -6005,6 +6038,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         image->usage.render_target = 1u;
         if (cb == 0 && upscaler->Enabled()) {
             color_redirected = upscaler->RedirectColor(image_id, desc.view_info, redirect);
+            float_color0 = color_redirected && upscaler->RedirectedToFloat();
             if (color_redirected) {
                 guest_extent = {image->info.size.width, image->info.size.height};
                 original_color = {attachment.image_view, attachment.image_layout};
@@ -6921,6 +6955,109 @@ void Rasterizer::UpdateViewportScissorState() const {
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.SetViewports(viewports);
     dynamic_state.SetScissors(scissors);
+}
+
+// gow3: HDR10 scene (TemporalUpscaler::HdrShadow). The tone pass is drawn again with its RenoDX
+// replacement into the Tone shadow; the pass after it again with the Tone shadow in place of its
+// input (binding 2) into the Scene shadow, through its float-target pipeline: the game's own
+// math (distortion, overlays, the 2.2 power) on the HDR values. Same constants, buffers and
+// render area; the guest's own draws are untouched.
+void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
+                                 bool is_indexed, u32 num_indices, u32 num_instances,
+                                 u32 first_vertex, u32 first_instance,
+                                 const vk::DescriptorBufferInfo& settings) {
+    using Shadow = TemporalUpscaler::HdrShadow;
+    const auto* ps = pipeline.GetStages()[u32(Shader::SwStage::Fragment)];
+    if (!ps || state.num_color_attachments != 1 || float_color0) {
+        return;
+    }
+    Pipeline::DescriptorWrites writes = set_writes;
+    vk::DescriptorImageInfo tone_info{};
+    vk::Pipeline handle{};
+    Shadow which{};
+    if (pipeline.HdrShadowHandle()) {
+        handle = pipeline.HdrShadowHandle();
+        which = Shadow::Tone;
+        writes.push_back({.dstBinding = 12,
+                          .descriptorCount = 1,
+                          .descriptorType = vk::DescriptorType::eStorageBuffer,
+                          .pBufferInfo = &settings});
+    } else if (upscaler->HdrPostPass(ps->pgm_hash) && pipeline.FloatTargetHandle()) {
+        tone_info = {.imageView = upscaler->ToneShadowView(),
+                     .imageLayout = vk::ImageLayout::eGeneral};
+        bool swapped = false;
+        for (auto& write : writes) {
+            if (write.dstBinding == 2 && write.descriptorCount == 1 &&
+                write.descriptorType == vk::DescriptorType::eSampledImage) {
+                write.pImageInfo = &tone_info;
+                swapped = true;
+            }
+        }
+        if (!swapped) {
+            return;
+        }
+        handle = pipeline.FloatTargetHandle();
+        which = Shadow::Scene;
+    } else {
+        return;
+    }
+    const auto target = upscaler->HdrShadowTarget(which, state.width, state.height);
+    scheduler.EndRendering();
+    const auto shadow_barrier = [&](vk::ImageLayout old_layout, vk::PipelineStageFlags2 src,
+                                    vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst,
+                                    vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src,
+            .srcAccessMask = src_access,
+            .dstStageMask = dst,
+            .dstAccessMask = dst_access,
+            .oldLayout = old_layout,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = target.image,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        scheduler.Record([b](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        });
+    };
+    shadow_barrier(vk::ImageLayout::eUndefined, vk::PipelineStageFlagBits2::eAllCommands,
+                   vk::AccessFlagBits2::eMemoryRead, vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                   vk::AccessFlagBits2::eColorAttachmentWrite);
+    RenderState shadow = state;
+    shadow.color_attachments[0].image_view = target.view;
+    shadow.color_attachments[0].image_layout = vk::ImageLayout::eGeneral;
+    shadow.color_attachments[0].is_clear = 0;
+    shadow.depth_stencil_attachment.depth_clear = false;
+    shadow.depth_stencil_attachment.stencil_clear = false;
+    scheduler.BeginRendering(shadow);
+    pipeline.BindResources(writes, push_data);
+    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        if (is_indexed) {
+            cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
+        } else {
+            cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
+        }
+    });
+    scheduler.EndRendering();
+    shadow_barrier(vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                   vk::AccessFlagBits2::eColorAttachmentWrite,
+                   vk::PipelineStageFlagBits2::eAllCommands,
+                   vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderStorageRead);
+    upscaler->HdrShadowDrawn(which);
+}
+
+// gow3: a draw sent to the HDR10 chain's float HUD / display image whose pipeline has no
+// RGBA16F variant (not one RGBA8 target, or a squaring blend): skipped instead of recorded with
+// a mismatched attachment format. Named for the first few pixel shaders.
+void Rasterizer::SkipFloatTargetDraw(const GraphicsPipeline& pipeline) const {
+    static std::atomic<u32> skipped{0};
+    if (skipped++ < 8) {
+        const auto* ps = pipeline.GetStages()[u32(Shader::SwStage::Fragment)];
+        std::printf("HDR: draw skipped, pixel shader %016llx has no float-target pipeline\n",
+                    static_cast<unsigned long long>(ps ? ps->pgm_hash : 0));
+        std::fflush(stdout);
+    }
 }
 
 vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {

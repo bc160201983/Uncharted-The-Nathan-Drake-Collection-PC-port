@@ -77,12 +77,16 @@ public:
         return swapchain.HasHDR();
     }
 
-    void SetHDR(bool enable) {
+    /// gow3: `encode` = the HDR10 output of the menu's HDR setting (the game's image is encoded at
+    /// presentation); otherwise HDR means the guest's own PQ image, passed through.
+    void SetHDR(bool enable, bool encode = false) {
         if (!IsHDRSupported()) {
             return;
         }
         swapchain.SetHDR(enable);
-        pp_settings.hdr = enable ? 1 : 0;
+        pp_settings.hdr = !enable ? 0
+                          : encode ? HostPasses::PostProcessingPass::HdrEncode
+                                   : HostPasses::PostProcessingPass::HdrGuestPq;
     }
 
     VideoCore::Image& RegisterVideoOutSurface(
@@ -114,7 +118,16 @@ private:
 
     void SetExpectedGameSize(s32 width, s32 height);
 
+    /// gow3: the settings menu / FPS counter onto the swapchain image (ColorAttachmentOptimal).
+    /// With HDR10 it is drawn into `overlay_image` and blended on at the HUD brightness.
+    void RenderOverlay(vk::CommandBuffer cmdbuf, vk::Extent2D extent);
+
 private:
+    vk::Image overlay_image{};
+    VmaAllocation overlay_allocation{};
+    vk::ImageView overlay_view{};
+    vk::Extent2D overlay_extent{};
+
     float expected_ratio{1920.0 / 1080.0f};
     u32 expected_frame_width{1920};
     u32 expected_frame_height{1080};

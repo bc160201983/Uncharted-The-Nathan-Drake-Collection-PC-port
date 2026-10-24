@@ -13,6 +13,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 namespace Vulkan {
@@ -105,13 +106,8 @@ void Swapchain::SetHDR(bool hdr) {
         return;
     }
 
-    auto result = instance.GetDevice().waitIdle();
-    if (result != vk::Result::eSuccess) {
-        LOG_WARNING(ImGui, "Failed to wait for Vulkan device idle on mode change: {}",
-                    vk::to_string(result));
-    }
-
     needs_hdr = hdr;
+    // Recreate's Destroy waits for idle while excluding concurrent queue submissions.
     Recreate(width, height);
     ImGui::Core::OnSurfaceFormatChange(needs_hdr ? SURFACE_FORMAT_HDR.format
                                                  : surface_format.format);
@@ -236,10 +232,6 @@ void Swapchain::UpdateVsync() {
     if (Gow3Settings::Get().vsync == vsync) {
         return;
     }
-    if (const auto result = instance.GetDevice().waitIdle(); result != vk::Result::eSuccess) {
-        LOG_WARNING(Render_Vulkan, "Failed to wait for the device before a VSync change: {}",
-                    vk::to_string(result));
-    }
     FindPresentMode();
     Recreate(width, height);
 }
@@ -279,6 +271,9 @@ void Swapchain::SetSurfaceProperties() {
 
 void Swapchain::Destroy() {
     vk::Device device = instance.GetDevice();
+    // vkDeviceWaitIdle requires host synchronization with queue submissions. The game
+    // scheduler can submit on another thread while the presentation thread resizes.
+    std::scoped_lock submit_lock{Scheduler::submit_mutex};
     const auto wait_result = device.waitIdle();
     if (wait_result != vk::Result::eSuccess) {
         LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",

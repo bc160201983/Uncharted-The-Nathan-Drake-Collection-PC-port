@@ -28,6 +28,8 @@ MINGW*|MSYS*)
         echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
     fi
     cp out/gpu/gow3-probe.exe out/gpu/gow3-gpu-capabilities.exe out/
+    mkdir -p out/hdr
+    cp hdr/*.spv out/hdr/
     echo "Built $PWD/out/gow3-probe.exe"
     exit 0
     ;;

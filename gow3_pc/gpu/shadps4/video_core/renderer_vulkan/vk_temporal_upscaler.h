@@ -107,6 +107,47 @@ public:
     /// for sampling, its channel swizzle.
     bool RedirectColor(VideoCore::ImageId color, const VideoCore::ImageViewInfo& view,
                        Target& target);
+    /// gow3: the last RedirectColor sent the draw to an RGBA16F image of the HDR10 chain: it
+    /// must use the pipeline's float-target variant.
+    [[nodiscard]] bool RedirectedToFloat() const noexcept {
+        return redirected_float;
+    }
+
+    /// gow3: HDR10 scene (Stage 3). The tone pass is drawn again with its RenoDX replacement
+    /// into the Tone shadow (HDR, gamma 2.2 encoded where the game writes its graded value);
+    /// the pass after it (GOW3_UI_TONEMAP_PS) again with that shadow as its input into the
+    /// Scene shadow (linear HDR, with the game's distortion and overlays). The upscalers read
+    /// it instead of the game's 8-bit frame (RunScaled, UpscaleToUi).
+    enum class HdrShadow { Tone, Scene };
+    struct ShadowTarget {
+        vk::Image image;
+        vk::ImageView view;
+    };
+    [[nodiscard]] bool HdrChain() const noexcept {
+        return hdr_chain;
+    }
+    /// GOW3_HDR_STAGE (diagnostics): 1 = the Tone shadow only, 2 = also the Scene shadow,
+    /// 3 (default) = also the upscale (DLSS, FSR 3/4, TAA or the stretch) from it.
+    [[nodiscard]] static int HdrStage() {
+        static const int stage = [] {
+            const char* env = std::getenv("GOW3_HDR_STAGE");
+            return env && *env ? std::atoi(env) : 3;
+        }();
+        return stage;
+    }
+    /// The shadow's RGBA16F image at w x h (made or resized here), for this frame's draw.
+    ShadowTarget HdrShadowTarget(HdrShadow which, u32 w, u32 h);
+    void HdrShadowDrawn(HdrShadow which) {
+        (which == HdrShadow::Tone ? tone_shadow : scene_shadow).drawn = true;
+    }
+    /// The pass after the tone pass, with a Tone shadow drawn this frame to read.
+    [[nodiscard]] bool HdrPostPass(u64 ps_hash) const noexcept {
+        return hdr_chain && tonemap_ps && ps_hash == tonemap_ps && tone_shadow.drawn &&
+               HdrStage() >= 2;
+    }
+    [[nodiscard]] vk::ImageView ToneShadowView() const noexcept {
+        return *tone_shadow.view;
+    }
     bool RedirectDepth(VideoCore::ImageId depth, Target& target);
     /// A sampled image replaced by the upscaled frame (the display pass).
     bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& info,
@@ -121,6 +162,7 @@ public:
         vk::Image image;
         vk::Format format;
         u32 width, height;
+        float white_nits = 0.0f; ///< encoding white of a rebased HDR composition
     };
     bool DisplayOverride(VAddr address, Display& display);
 
@@ -252,6 +294,8 @@ private:
     struct DisplayImage {
         VideoCore::UniqueImage image;
         std::vector<MirrorView> views;
+        float white_nits = 0.0f;
+        vk::UniqueImageView storage_view; ///< RGBA16F (HDR10 chain): the composite's encode
         vk::Format format{};
         u32 width = 0, height = 0;
         bool valid = false;
@@ -263,6 +307,50 @@ private:
     /// Upscales source (the finished frame at the render size) into ui_image; draws into source
     /// go to ui_image after it.
     void UpscaleToUi(VideoCore::ImageId source);
+
+    /// gow3: HDR10 output (the menu's HDR setting) of composite frames, latched each frame. The
+    /// HUD is drawn into ui_hdr_image (RGBA16F, linear: its draws blend through sRGB views) and
+    /// the display buffers are RGBA16F (stored values: their draws use UNORM views).
+    bool hdr_chain = false;
+    float hdr_ui_white = 203.0f;
+    bool redirected_float = false;
+    struct ShadowImage {
+        VideoCore::UniqueImage image;
+        vk::UniqueImageView view;
+        u32 width = 0, height = 0;
+        bool drawn = false; ///< this frame
+    };
+    ShadowImage tone_shadow, scene_shadow;
+    bool hdr_output = false;     ///< this frame's upscaled output_image is the HDR scene
+    bool last_hdr_input = false; ///< the upscalers' input domain of the last frame (history)
+    u32 hdr_logged = 0;          ///< LogHdrUpscale: upscalers (bits) already logged
+    void LogHdrUpscale(bool hdr, const char* name = nullptr);
+    VideoCore::UniqueImage ui_hdr_image;
+    std::vector<MirrorView> ui_hdr_views;
+    vk::UniqueImageView ui_hdr_storage_view;
+    vk::UniqueImageView ui_decode_view; ///< ui_image as RGBA8 UNORM storage
+    u32 ui_hdr_width = 0, ui_hdr_height = 0;
+    vk::UniqueDescriptorSetLayout hdr_transfer_desc_layout;
+    vk::UniquePipelineLayout hdr_transfer_pipeline_layout;
+    vk::UniquePipeline hdr_decode_pipeline, hdr_encode_pipeline;
+    /// Starts the HUD phase of the HDR10 chain: ui_image (General, upscaled) decoded into
+    /// ui_hdr_image. Turns the chain off for the frame when it cannot.
+    /// With `hdr_scene` (the upscalers' HDR output or the Scene shadow, linear, General) that
+    /// is written instead, from linear: its top-left scene_w x scene_h (0: the output size),
+    /// stretched to the output size.
+    void DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_scene = {}, u32 scene_w = 0,
+                       u32 scene_h = 0);
+    /// The HDR scene this frame's upscale reads instead of the game's 8-bit frame of size
+    /// iw x ih: the Scene shadow, drawn this frame at that size.
+    [[nodiscard]] bool HdrSceneInput(u32 iw, u32 ih) const noexcept {
+        return hdr_chain && scene_shadow.drawn && HdrStage() >= 3 && scene_shadow.width == iw &&
+               scene_shadow.height == ih;
+    }
+    enum class HdrTransfer { Decode, Encode, FromLinear };
+    void RecordHdrTransfer(vk::CommandBuffer cmd, HdrTransfer mode, vk::ImageView source,
+                           vk::ImageView target, u32 w, u32 h, float stored_scale = 1.0f,
+                           u32 source_w = 0, u32 source_h = 0);
+    vk::UniquePipeline hdr_from_linear_pipeline;
     u64 composite_ps = 0;
     u64 tonemap_ps = 0;               ///< the draw finishing the frame (GOW3_UI_TONEMAP_PS)
     VideoCore::ImageId tonemap_target{};

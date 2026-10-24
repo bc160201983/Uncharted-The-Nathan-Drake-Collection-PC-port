@@ -1,5 +1,6 @@
 #include "gow3_movie.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -49,6 +50,33 @@ struct Scratch {
 };
 std::array<Scratch, 16> scratch;
 std::mutex scratch_mutex;
+
+// The keys of the movie shaders seen (ShaderKey), for CoverDisplay.
+std::array<std::atomic<std::uint64_t>, 8> movie_keys{};
+
+bool IsMovieKey(std::uint64_t key) {
+    for (const auto& entry : movie_keys) {
+        if (entry.load(std::memory_order_acquire) == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void AddMovieKey(std::uint64_t key) {
+    if (IsMovieKey(key)) {
+        return;
+    }
+    for (auto& entry : movie_keys) {
+        std::uint64_t empty = 0;
+        if (entry.compare_exchange_strong(empty, key, std::memory_order_acq_rel)) {
+            return;
+        }
+        if (empty == key) {
+            return;
+        }
+    }
+}
 
 std::uint64_t FindScratch(std::uint64_t base) {
     for (auto& entry : scratch) {
@@ -161,6 +189,7 @@ std::uint64_t ShaderKey(std::uint64_t hash, const std::uint32_t* code, std::size
     std::uint64_t key = hash;
     if (IsMovieShader(code, words)) {
         key ^= (std::uint64_t(Display().width) << 32 | Display().height) * 0x9e3779b97f4a7c15ull;
+        AddMovieKey(key);
     }
     keys.emplace(hash, key);
     return key;
@@ -189,6 +218,16 @@ bool MovieShaderConstant(std::uint32_t bits, float& patched) {
     default:
         return false;
     }
+}
+
+void CoverDisplay(std::uint64_t key, std::uint32_t threads_x, std::uint32_t threads_y,
+                  std::uint32_t& groups_x, std::uint32_t& groups_y) {
+    const Size& display = Display();
+    if (!display.width || !threads_x || !threads_y || !IsMovieKey(key)) {
+        return;
+    }
+    groups_x = std::max(groups_x, (display.width + threads_x - 1) / threads_x);
+    groups_y = std::max(groups_y, (display.height + threads_y - 1) / threads_y);
 }
 
 bool Remap(std::uint64_t& address, std::uint32_t& width, std::uint32_t& height, std::uint32_t& pitch,

@@ -18,6 +18,9 @@
 #include "gow3_settings.h"
 #include "gow3_toggles.h"
 #include "ffx_vk_portable.h"
+#include "video_core/host_shaders/hdr_decode_comp.h"
+#include "video_core/host_shaders/hdr_encode_comp.h"
+#include "video_core/host_shaders/hdr_from_linear_comp.h"
 #include "video_core/host_shaders/upscale_merge_comp.h"
 #include "video_core/host_shaders/upscale_reactive_comp.h"
 #include "video_core/host_shaders/taa_comp.h"
@@ -220,8 +223,15 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     if (const char* ps = std::getenv("GOW3_UI_TONEMAP_PS")) {
         tonemap_ps = u32(std::strtoull(ps, nullptr, 16));
     }
+    // GOW3_COMPOSITE_NATIVE=1 (the launcher with HDR on at the game's own size): the same frames
+    // at 1:1. The HDR10 scene (the shadows, the float HUD chain) lives on this path; the
+    // anti-aliasing then runs on the finished frame, as when upscaling.
+    const char* native = std::getenv("GOW3_COMPOSITE_NATIVE");
+    const bool composite_native = native && native[0] == '1' && render_width == target_width &&
+                                  render_height == target_height;
     composite_frames = enabled && scaled_session && composite_ps && camera_motion.VelocityMode() &&
-                       (render_width < target_width || render_height < target_height);
+                       (render_width < target_width || render_height < target_height ||
+                        composite_native);
     if (composite_frames) {
         std::printf("Upscaler: the game draws %ux%u, frames are upscaled to %ux%u at pixel shader "
                     "%08llx; HUD and menus at %ux%u\n", render_width, render_height, target_width,
@@ -377,6 +387,10 @@ bool TemporalUpscaler::OnFrameStart() {
     // The display pass of an upscaled frame reads the upscaled UI image. After OnComposite the
     // HUD and menu draws of the frame just upscaled still go to its host display buffer.
     display_redirect = ui_phase || composite_done;
+    // gow3: HDR10 output (Stage 2: the HUD and display buffers in RGBA16F), for this frame.
+    hdr_chain = composite_frames && Gow3Settings::Get().hdr && Gow3Settings::Get().hdr_supported;
+    tone_shadow.drawn = scene_shadow.drawn = false;
+    hdr_output = false;
     composite_done = false;
     tonemap_pending = false;
     ui_phase = false;
@@ -1441,6 +1455,7 @@ void TemporalUpscaler::EnsureUiResources(u32 w, u32 h, vk::Format color, vk::For
     ui_height = h;
     if (new_color) {
         ui_views.clear();
+        ui_decode_view.reset();
         ui_view.reset();
         ui_storage_view.reset();
         ui_image = VideoCore::UniqueImage(device, allocator);
@@ -1607,6 +1622,7 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
     done_this_frame = ui_phase = true;
     ui_color = color_id;
     ui_depth = depth_id;
+    DecodeToHdrUi(cmd);
 }
 
 void TemporalUpscaler::RunScaled() {
@@ -1629,7 +1645,18 @@ void TemporalUpscaler::RunScaled() {
     // output size after. The others upscale themselves.
     const bool taa = Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa;
     const u32 tw = taa ? w : ow, th = taa ? h : oh;
-    if (!EnsureResources(w, h, tw, th, false)) {
+    // gow3: HDR10 chain: each upscaler reads the Scene shadow (linear HDR, the game's own frame
+    // with RenoDX highlights) drawn this frame by the pass the port upscales, and writes the
+    // HDR scene to output_image, which DecodeToHdrUi then stretches to the output size. The
+    // FSR 3 context keeps its HDR mode while the chain is on (a context per frame type would be
+    // rebuilt at each menu); a frame without the shadow is upscaled as before.
+    const bool hdr_input = HdrSceneInput(iw, ih);
+    if (hdr_input != last_hdr_input) {
+        reset = true; // the history holds the other domain
+        last_hdr_input = hdr_input;
+    }
+    const bool fsr3 = !taa && !UseFsr4() && !UseDlss();
+    if (!EnsureResources(w, h, tw, th, fsr3 && hdr_chain && HdrStage() >= 3)) {
         failed = true;
         return;
     }
@@ -1713,67 +1740,92 @@ void TemporalUpscaler::RunScaled() {
                 vk::ImageLayout::eGeneral, all, rw);
         bool ok4 = true;
         if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
-            RecordTaa(cmdbuf, color_view, depth_view);
+            // TAA blends in a tonemapped space: the HDR scene needs no other change.
+            RecordTaa(cmdbuf, hdr_input ? *scene_shadow.view : color_view, depth_view);
         } else if (UseDlss()) {
-            ok4 = RecordDlss(cmdbuf,
-                             {color_image, color_view, LdrFormat(color.info.pixel_format),
-                              vk::ImageAspectFlagBits::eColor, source_width, source_height},
-                             {depth_image, depth_view, depth_format, vk::ImageAspectFlagBits::eDepth,
-                              source_width, source_height},
-                             w, h, ow, oh, frame_ms, false);
+            ok4 = hdr_input
+                      ? RecordDlss(cmdbuf,
+                                   {vk::Image(scene_shadow.image), *scene_shadow.view,
+                                    vk::Format::eR16G16B16A16Sfloat,
+                                    vk::ImageAspectFlagBits::eColor, source_width, source_height},
+                                   {depth_image, depth_view, depth_format,
+                                    vk::ImageAspectFlagBits::eDepth, source_width, source_height},
+                                   w, h, ow, oh, frame_ms, true)
+                      : RecordDlss(cmdbuf,
+                                   {color_image, color_view, LdrFormat(color.info.pixel_format),
+                                    vk::ImageAspectFlagBits::eColor, source_width, source_height},
+                                   {depth_image, depth_view, depth_format,
+                                    vk::ImageAspectFlagBits::eDepth, source_width, source_height},
+                                   w, h, ow, oh, frame_ms, false);
         } else {
-            ok4 = RecordFsr4(cmdbuf, {color_image, color_view, source_width, source_height},
-                            {depth_image, depth_view, source_width, source_height}, w, h, ow,
-                            oh, frame_ms);
+            // FSR 4's context is always in HDR mode (vk_fsr4.cpp).
+            ok4 = RecordFsr4(cmdbuf,
+                             hdr_input ? Fsr4Upscaler::Image{vk::Image(scene_shadow.image),
+                                                             *scene_shadow.view, source_width,
+                                                             source_height}
+                                       : Fsr4Upscaler::Image{color_image, color_view,
+                                                             source_width, source_height},
+                             {depth_image, depth_view, source_width, source_height}, w, h, ow,
+                             oh, frame_ms);
         }
+        hdr_output = hdr_input && ok4;
+        LogHdrUpscale(hdr_output);
         if (ok4) {
             if (Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa) {
                 ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
             }
-            vk::Image source = vk::Image(output_image);
-            vk::ImageLayout source_layout = vk::ImageLayout::eGeneral;
-            u32 sw = tw, sh = th;
-            if (taa && Gow3Settings::Get().fsr1 && tw < ow && th < oh) {
-                barrier(source, vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eGeneral, all, rw,
-                        vk::ImageLayout::eShaderReadOnlyOptimal,
-                        vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
-                if (!fsr1_created) {
-                    fsr1_pass.Create(instance.GetDevice(), instance.GetAllocator(), 2);
-                    fsr1_created = true;
+            // HDR10 chain: the HDR output goes to the HUD image itself (DecodeToHdrUi).
+            if (!hdr_output) {
+                vk::Image source = vk::Image(output_image);
+                vk::ImageLayout source_layout = vk::ImageLayout::eGeneral;
+                u32 sw = tw, sh = th;
+                if (taa && Gow3Settings::Get().fsr1 && tw < ow && th < oh) {
+                    barrier(source, vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eGeneral, all, rw,
+                            vk::ImageLayout::eShaderReadOnlyOptimal,
+                            vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
+                    if (!fsr1_created) {
+                        fsr1_pass.Create(instance.GetDevice(), instance.GetAllocator(), 2);
+                        fsr1_created = true;
+                    }
+                    fsr1_pass.Render(cmdbuf, *output_view, {tw, th}, {ow, oh},
+                                     {.enable = true, .use_rcas = false}, false);
+                    source = fsr1_pass.LastOutput();
+                    source_layout = vk::ImageLayout::eTransferSrcOptimal;
+                    sw = ow;
+                    sh = oh;
+                    barrier(source, vk::ImageAspectFlagBits::eColor,
+                            vk::ImageLayout::eShaderReadOnlyOptimal,
+                            vk::PipelineStageFlagBits2::eComputeShader,
+                            vk::AccessFlagBits2::eShaderStorageWrite, source_layout,
+                            vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferRead);
+                } else {
+                    barrier(source, vk::ImageAspectFlagBits::eColor,
+                            vk::ImageLayout::eGeneral, all, rw, vk::ImageLayout::eGeneral,
+                            vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferRead);
                 }
-                fsr1_pass.Render(cmdbuf, *output_view, {tw, th}, {ow, oh},
-                                 {.enable = true, .use_rcas = false}, false);
-                source = fsr1_pass.LastOutput();
-                source_layout = vk::ImageLayout::eTransferSrcOptimal;
-                sw = ow;
-                sh = oh;
-                barrier(source, vk::ImageAspectFlagBits::eColor,
-                        vk::ImageLayout::eShaderReadOnlyOptimal,
-                        vk::PipelineStageFlagBits2::eComputeShader,
-                        vk::AccessFlagBits2::eShaderStorageWrite, source_layout,
-                        vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferRead);
-            } else {
-                barrier(source, vk::ImageAspectFlagBits::eColor,
+                barrier(vk::Image(ui_image), vk::ImageAspectFlagBits::eColor,
                         vk::ImageLayout::eGeneral, all, rw, vk::ImageLayout::eGeneral,
-                        vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferRead);
+                        vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferWrite);
+                const vk::ImageBlit region{
+                    .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                    .srcOffsets = std::array{vk::Offset3D{0, 0, 0},
+                                             vk::Offset3D{s32(sw), s32(sh), 1}},
+                    .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                    .dstOffsets = std::array{vk::Offset3D{0, 0, 0},
+                                             vk::Offset3D{s32(ow), s32(oh), 1}},
+                };
+                cmdbuf.blitImage(source, source_layout, vk::Image(ui_image), vk::ImageLayout::eGeneral,
+                                 region, sw == ow && sh == oh ? vk::Filter::eNearest : vk::Filter::eLinear);
+                barrier(vk::Image(ui_image), vk::ImageAspectFlagBits::eColor,
+                        vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eBlit,
+                        vk::AccessFlagBits2::eTransferWrite, vk::ImageLayout::eGeneral,
+                        vk::PipelineStageFlagBits2::eColorAttachmentOutput, color_access);
+            } else {
+                barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
+                        vk::ImageLayout::eGeneral, all, rw, vk::ImageLayout::eGeneral,
+                        vk::PipelineStageFlagBits2::eComputeShader,
+                        vk::AccessFlagBits2::eShaderStorageRead);
             }
-            barrier(vk::Image(ui_image), vk::ImageAspectFlagBits::eColor,
-                    vk::ImageLayout::eGeneral, all, rw, vk::ImageLayout::eGeneral,
-                    vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferWrite);
-            const vk::ImageBlit region{
-                .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-                .srcOffsets = std::array{vk::Offset3D{0, 0, 0},
-                                         vk::Offset3D{s32(sw), s32(sh), 1}},
-                .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-                .dstOffsets = std::array{vk::Offset3D{0, 0, 0},
-                                         vk::Offset3D{s32(ow), s32(oh), 1}},
-            };
-            cmdbuf.blitImage(source, source_layout, vk::Image(ui_image), vk::ImageLayout::eGeneral,
-                             region, sw == ow && sh == oh ? vk::Filter::eNearest : vk::Filter::eLinear);
-            barrier(vk::Image(ui_image), vk::ImageAspectFlagBits::eColor,
-                    vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eBlit,
-                    vk::AccessFlagBits2::eTransferWrite, vk::ImageLayout::eGeneral,
-                    vk::PipelineStageFlagBits2::eColorAttachmentOutput, color_access);
             reset = false;
             dispatched_last_frame = true;
             if (const int dump = DumpFrame(); dump >= 0) {
@@ -1804,6 +1856,8 @@ void TemporalUpscaler::RunScaled() {
             ui_phase = true;
             ui_color = ldr_target;
             ui_depth = camera_motion.Depth();
+            // TAA's output is at the render size (tw x th).
+            DecodeToHdrUi(cmdbuf, hdr_output ? *output_view : vk::ImageView{}, tw, th);
         }
         return;
     }
@@ -1812,9 +1866,20 @@ void TemporalUpscaler::RunScaled() {
     FfxVkPortableUpscaleDispatchInfo info{};
     info.structSize = sizeof(info);
     info.commandBuffer = cmdbuf;
-    info.color = Describe(color_image, LdrFormat(color.info.pixel_format), source_width, source_height,
-                          color.usage_flags, vk::ImageAspectFlagBits::eColor,
-                          FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
+    // HDR10 chain: the context in HDR mode on the Scene shadow, into output_image (RGBA16F).
+    const bool fsr3_hdr = hdr_input && context_hdr;
+    info.color = fsr3_hdr
+                     ? Describe(vk::Image(scene_shadow.image), vk::Format::eR16G16B16A16Sfloat,
+                                source_width, source_height,
+                                vk::ImageUsageFlagBits::eColorAttachment |
+                                    vk::ImageUsageFlagBits::eSampled |
+                                    vk::ImageUsageFlagBits::eStorage |
+                                    vk::ImageUsageFlagBits::eTransferSrc,
+                                vk::ImageAspectFlagBits::eColor,
+                                FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ)
+                     : Describe(color_image, LdrFormat(color.info.pixel_format), source_width,
+                                source_height, color.usage_flags, vk::ImageAspectFlagBits::eColor,
+                                FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
     info.depth = Describe(depth_image, depth_format, source_width, source_height, depth.usage_flags,
                           vk::ImageAspectFlagBits::eDepth,
                           FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
@@ -1822,11 +1887,24 @@ void TemporalUpscaler::RunScaled() {
                                   vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
                                   vk::ImageAspectFlagBits::eColor,
                                   FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
-    info.output = Describe(vk::Image(ui_image), vk::Format::eR8G8B8A8Unorm, ow, oh,
-                           vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
-                               vk::ImageUsageFlagBits::eColorAttachment,
-                           vk::ImageAspectFlagBits::eColor,
-                           FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (fsr3_hdr) {
+        barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
+                vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
+                vk::ImageLayout::eGeneral, all, rw);
+    }
+    info.output = fsr3_hdr
+                      ? Describe(vk::Image(output_image), vk::Format::eR16G16B16A16Sfloat, ow, oh,
+                                 vk::ImageUsageFlagBits::eStorage |
+                                     vk::ImageUsageFlagBits::eSampled |
+                                     vk::ImageUsageFlagBits::eTransferSrc,
+                                 vk::ImageAspectFlagBits::eColor,
+                                 FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS)
+                      : Describe(vk::Image(ui_image), vk::Format::eR8G8B8A8Unorm, ow, oh,
+                                 vk::ImageUsageFlagBits::eStorage |
+                                     vk::ImageUsageFlagBits::eSampled |
+                                     vk::ImageUsageFlagBits::eColorAttachment,
+                                 vk::ImageAspectFlagBits::eColor,
+                                 FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS);
     info.exposure.structSize = sizeof(info.exposure);
     info.reactiveMask.structSize = sizeof(info.reactiveMask);
     if (mask_ready && ReactiveOn()) {
@@ -1867,7 +1945,15 @@ void TemporalUpscaler::RunScaled() {
         ok = true;
         reset = false;
         dispatched_last_frame = true;
-        ExtraSharpen(cmdbuf, vk::Image(ui_image), true, ow, oh);
+        hdr_output = fsr3_hdr;
+        LogHdrUpscale(hdr_output);
+        ExtraSharpen(cmdbuf, vk::Image(fsr3_hdr ? output_image : ui_image), !fsr3_hdr, ow, oh);
+        if (fsr3_hdr) {
+            barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
+                    vk::ImageLayout::eGeneral, all, rw, vk::ImageLayout::eGeneral,
+                    vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderStorageRead);
+        }
         // GOW3_DUMP_TRIGGER: the inputs, the motion with and without the characters' own and
         // the scene stencil (motion vector checks).
         if (const int dump = DumpFrame(); dump >= 0 && camera_motion.VelocityMode()) {
@@ -1898,7 +1984,259 @@ void TemporalUpscaler::RunScaled() {
         ui_phase = true;
         ui_color = ldr_target;
         ui_depth = camera_motion.Depth();
+        DecodeToHdrUi(cmdbuf, hdr_output ? *output_view : vk::ImageView{});
     }
+}
+
+
+// gow3: the first frame each upscaler (or the stretch without one) upscales the HDR scene.
+void TemporalUpscaler::LogHdrUpscale(bool hdr, const char* name) {
+    static constexpr std::array names{"off", "FSR 3", "FSR 4", "FSR 4.1.1", "TAA", "DLSS"};
+    const int upscaler = Gow3Settings::Get().upscaler.load();
+    const u32 bit = name ? 1u << names.size() : 1u << u32(upscaler);
+    if (!hdr || (hdr_logged & bit) || (!name && u32(upscaler) >= names.size())) {
+        return;
+    }
+    hdr_logged |= bit;
+    std::printf("HDR: %s upscales the HDR scene\n", name ? name : names[upscaler]);
+    std::fflush(stdout);
+}
+
+// gow3: GOW3_HDR_TRACE=1: each (use, view format) pair on the output-size images, once.
+static void HdrTraceUse(const char* use, vk::Format format) {
+    static const bool trace = [] {
+        const char* env = std::getenv("GOW3_HDR_TRACE");
+        return env && env[0] == '1';
+    }();
+    if (!trace) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::vector<std::pair<std::string, vk::Format>> seen;
+    std::scoped_lock lock{mutex};
+    for (const auto& [u, f] : seen) {
+        if (u == use && f == format) {
+            return;
+        }
+    }
+    seen.emplace_back(use, format);
+    std::printf("HDR trace: %s as %s\n", use, vk::to_string(format).c_str());
+}
+TemporalUpscaler::ShadowTarget TemporalUpscaler::HdrShadowTarget(HdrShadow which, u32 w,
+                                                                 u32 h) {
+    auto& shadow = which == HdrShadow::Tone ? tone_shadow : scene_shadow;
+    if (!shadow.image || shadow.width != w || shadow.height != h) {
+        const auto device = instance.GetDevice();
+        // Preserve the command buffer bindings and dynamic state used by the shadow redraw.
+        // Retire old resources only after their last GPU use.
+        if (shadow.image) {
+            scheduler.DeferOperation([image = std::move(shadow.image),
+                                      view = std::move(shadow.view)]() mutable { view.reset(); });
+        }
+        shadow.image = VideoCore::UniqueImage(device, instance.GetAllocator());
+        shadow.image.Create(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = vk::Format::eR16G16B16A16Sfloat,
+            .extent = {w, h, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled |
+                     vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        shadow.view = Check(device.createImageViewUnique({
+            .image = vk::Image(shadow.image),
+            .viewType = vk::ImageViewType::e2D,
+            .format = vk::Format::eR16G16B16A16Sfloat,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+        shadow.width = w;
+        shadow.height = h;
+        std::printf("HDR: %s shadow %ux%u\n", which == HdrShadow::Tone ? "tone" : "scene", w, h);
+    }
+    return {vk::Image(shadow.image), *shadow.view};
+}
+
+void TemporalUpscaler::RecordHdrTransfer(vk::CommandBuffer cmd, HdrTransfer mode,
+                                          vk::ImageView source, vk::ImageView target, u32 w,
+                                          u32 h, float stored_scale, u32 source_w,
+                                          u32 source_h) {
+    struct Composition {
+        float stored_scale;
+        u32 source_width, source_height;
+    };
+    if (!hdr_decode_pipeline) {
+        const auto device = instance.GetDevice();
+        std::array<vk::DescriptorSetLayoutBinding, 2> bindings{};
+        for (u32 i = 0; i < bindings.size(); ++i) {
+            bindings[i] = {.binding = i,
+                           .descriptorType = vk::DescriptorType::eStorageImage,
+                           .descriptorCount = 1,
+                           .stageFlags = vk::ShaderStageFlagBits::eCompute};
+        }
+        hdr_transfer_desc_layout = Check(device.createDescriptorSetLayoutUnique({
+            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+            .bindingCount = u32(bindings.size()),
+            .pBindings = bindings.data(),
+        }));
+        const vk::PushConstantRange composition_range{
+            .stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0,
+            .size = sizeof(Composition)};
+        hdr_transfer_pipeline_layout = Check(device.createPipelineLayoutUnique({
+            .setLayoutCount = 1,
+            .pSetLayouts = &*hdr_transfer_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &composition_range,
+        }));
+        const auto compute = [&](const auto& code) {
+            const auto module = CompileSPV(code, device);
+            auto pipeline = Check(device.createComputePipelineUnique(
+                {}, vk::ComputePipelineCreateInfo{
+                        .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                                  .module = module,
+                                  .pName = "main"},
+                        .layout = *hdr_transfer_pipeline_layout,
+                    }));
+            device.destroyShaderModule(module);
+            return pipeline;
+        };
+        hdr_decode_pipeline = compute(HDR_DECODE_COMP);
+        hdr_encode_pipeline = compute(HDR_ENCODE_COMP);
+        hdr_from_linear_pipeline = compute(HDR_FROM_LINEAR_COMP);
+    }
+    const std::array infos{
+        vk::DescriptorImageInfo{.imageView = source, .imageLayout = vk::ImageLayout::eGeneral},
+        vk::DescriptorImageInfo{.imageView = target, .imageLayout = vk::ImageLayout::eGeneral},
+    };
+    const std::array writes{
+        vk::WriteDescriptorSet{.dstBinding = 0,
+                               .descriptorCount = 1,
+                               .descriptorType = vk::DescriptorType::eStorageImage,
+                               .pImageInfo = &infos[0]},
+        vk::WriteDescriptorSet{.dstBinding = 1,
+                               .descriptorCount = 1,
+                               .descriptorType = vk::DescriptorType::eStorageImage,
+                               .pImageInfo = &infos[1]},
+    };
+    cmd.bindPipeline(vk::PipelineBindPoint::eCompute,
+                     mode == HdrTransfer::Decode   ? *hdr_decode_pipeline
+                     : mode == HdrTransfer::Encode ? *hdr_encode_pipeline
+                                                   : *hdr_from_linear_pipeline);
+    cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *hdr_transfer_pipeline_layout, 0,
+                             writes);
+    const Composition composition{stored_scale, source_w ? source_w : w, source_h ? source_h : h};
+    cmd.pushConstants(*hdr_transfer_pipeline_layout, vk::ShaderStageFlagBits::eCompute,
+                       0, sizeof(composition), &composition);
+    cmd.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+}
+
+void TemporalUpscaler::DecodeToHdrUi(vk::CommandBuffer cmd, vk::ImageView hdr_scene,
+                                     u32 scene_w, u32 scene_h) {
+    if (!hdr_chain) {
+        return;
+    }
+    const auto& settings = Gow3Settings::Get();
+    hdr_ui_white = float(settings.hdr_ui_nits.load());
+    const float stored_scale = std::pow(float(settings.hdr_game_nits.load()) / hdr_ui_white,
+                                        1.0f / 2.2f);
+    // The decode reads ui_image's bytes through an RGBA8 UNORM storage view (it is mutable).
+    if (!hdr_scene && ui_format != vk::Format::eR8G8B8A8Unorm &&
+        ui_format != vk::Format::eR8G8B8A8Srgb) {
+        hdr_chain = false;
+        return;
+    }
+    const auto device = instance.GetDevice();
+    if (!ui_hdr_image || ui_hdr_width != ui_width || ui_hdr_height != ui_height) {
+        // The caller has already recorded into cmd. Finish would submit it and leave this
+        // function writing to an ended command buffer. Retain old resources through this
+        // submission instead, keeping cmd and the caller's bindings intact.
+        if (ui_hdr_image) {
+            scheduler.DeferOperation([image = std::move(ui_hdr_image),
+                                      views = std::move(ui_hdr_views),
+                                      storage = std::move(ui_hdr_storage_view)]() mutable {
+                views.clear();
+                storage.reset();
+            });
+        }
+        ui_hdr_image = VideoCore::UniqueImage(device, instance.GetAllocator());
+        ui_hdr_image.Create(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = vk::Format::eR16G16B16A16Sfloat,
+            .extent = {ui_width, ui_height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                     vk::ImageUsageFlagBits::eColorAttachment |
+                     vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        ui_hdr_storage_view = Check(device.createImageViewUnique({
+            .image = vk::Image(ui_hdr_image),
+            .viewType = vk::ImageViewType::e2D,
+            .format = vk::Format::eR16G16B16A16Sfloat,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+        ui_hdr_width = ui_width;
+        ui_hdr_height = ui_height;
+    }
+    if (!hdr_scene && !ui_decode_view) {
+        const vk::ImageViewUsageCreateInfo usage{.usage = vk::ImageUsageFlagBits::eStorage};
+        ui_decode_view = Check(device.createImageViewUnique({
+            .pNext = &usage,
+            .image = vk::Image(ui_image),
+            .viewType = vk::ImageViewType::e2D,
+            .format = vk::Format::eR8G8B8A8Unorm,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+    }
+    const std::array to_decode{
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = vk::Image(ui_image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        },
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = vk::Image(ui_hdr_image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        },
+    };
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_decode.size()),
+                          .pImageMemoryBarriers = to_decode.data()});
+    if (hdr_scene) {
+        RecordHdrTransfer(cmd, HdrTransfer::FromLinear, hdr_scene, *ui_hdr_storage_view, ui_width,
+                          ui_height, stored_scale, scene_w, scene_h);
+    } else {
+        RecordHdrTransfer(cmd, HdrTransfer::Decode, *ui_decode_view, *ui_hdr_storage_view,
+                          ui_width, ui_height, stored_scale);
+    }
+    const vk::ImageMemoryBarrier2 decoded{
+        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentRead |
+                         vk::AccessFlagBits2::eColorAttachmentWrite |
+                         vk::AccessFlagBits2::eShaderRead,
+        .oldLayout = vk::ImageLayout::eGeneral,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = vk::Image(ui_hdr_image),
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    };
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &decoded});
 }
 
 vk::ImageView TemporalUpscaler::Mirror(vk::Image image, std::vector<MirrorView>& views,
@@ -1921,12 +2259,34 @@ vk::ImageView TemporalUpscaler::Mirror(vk::Image image, std::vector<MirrorView>&
     }));
     const vk::ImageView handle = *view;
     views.push_back({format, mapping, std::move(view)});
+    // gow3: GOW3_HDR_TRACE=1 lists the view formats the HUD and display passes use on the
+    // output-size images (HDR10 planning).
+    static const bool trace = [] {
+        const char* env = std::getenv("GOW3_HDR_TRACE");
+        return env && env[0] == '1';
+    }();
+    if (trace) {
+        const char* kind = image == vk::Image(ui_image) ? "ui_image" : "display";
+        std::printf("HDR trace: new %s view %s (identity mapping %d), ui_phase=%d\n", kind,
+                    vk::to_string(format).c_str(), int(mapping == vk::ComponentMapping{}),
+                    int(ui_phase));
+    }
     return handle;
 }
 
 bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
                                      const VideoCore::ImageViewInfo& view_info, Target& target) {
+    redirected_float = false;
     if (ui_phase && color == ui_color) {
+        if (hdr_chain && ui_hdr_image) {
+            HdrTraceUse("HUD draw into ui_hdr_image", view_info.format);
+            target = {Mirror(vk::Image(ui_hdr_image), ui_hdr_views,
+                             vk::Format::eR16G16B16A16Sfloat, {}),
+                      vk::ImageLayout::eGeneral, ui_width, ui_height, true};
+            redirected_float = true;
+            return true;
+        }
+        HdrTraceUse("HUD draw into ui_image", view_info.format);
         target = {Mirror(vk::Image(ui_image), ui_views, view_info.format, {}),
                   vk::ImageLayout::eGeneral, ui_width, ui_height, true};
         return true;
@@ -1942,7 +2302,8 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
         displays[address].valid = false; // not upscaled: the presenter shows the guest buffer
         return false;
     }
-    auto& display = HostDisplay(address, image.info.pixel_format);
+    auto& display = HostDisplay(address, hdr_chain ? vk::Format::eR16G16B16A16Sfloat
+                                                    : image.info.pixel_format);
     scheduler.EndRendering();
     // OnComposite has written the upscaled frame into it: the HUD draws keep it (no discard).
     const vk::ImageMemoryBarrier2 b{
@@ -1960,7 +2321,10 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
         cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
     });
     display.valid = true;
-    target = {Mirror(vk::Image(display.image), display.views, view_info.format, {}),
+    HdrTraceUse("draw into display buffer", view_info.format);
+    redirected_float = display.format == vk::Format::eR16G16B16A16Sfloat;
+    target = {Mirror(vk::Image(display.image), display.views,
+                     redirected_float ? display.format : view_info.format, {}),
               vk::ImageLayout::eGeneral, ui_width, ui_height};
     return true;
 }
@@ -1972,6 +2336,8 @@ TemporalUpscaler::DisplayImage& TemporalUpscaler::HostDisplay(VAddr address, vk:
         const auto device = instance.GetDevice();
         scheduler.Finish();
         display.views.clear();
+        display.storage_view.reset(); // destroy every view before replacing its image
+        display.white_nits = 0.0f;
         std::printf("Display: host buffer %ux%u (live)\n", ui_width, ui_height);
         display.format = format;
         display.width = ui_width;
@@ -1987,10 +2353,13 @@ TemporalUpscaler::DisplayImage& TemporalUpscaler::HostDisplay(VAddr address, vk:
             .samples = vk::SampleCountFlagBits::e1,
             .tiling = vk::ImageTiling::eOptimal,
             .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled |
-                     vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst,
+                     vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst |
+                     (format == vk::Format::eR16G16B16A16Sfloat ? vk::ImageUsageFlagBits::eStorage
+                                                                : vk::ImageUsageFlags{}),
             .initialLayout = vk::ImageLayout::eUndefined,
         });
         display.views.clear();
+        display.storage_view.reset();
     }
     return display;
 }
@@ -2090,6 +2459,13 @@ void TemporalUpscaler::UpscaleToUi(VideoCore::ImageId source) {
         ui_phase = true;
         ui_color = ldr_target;
         ui_depth = {};
+        // HDR10 chain: the Scene shadow of this frame, stretched (bilinear) like the 8-bit one.
+        if (HdrSceneInput(ldr.info.size.width, ldr.info.size.height)) {
+            LogHdrUpscale(true, "the stretch");
+            DecodeToHdrUi(cmd, *scene_shadow.view, w, h);
+        } else {
+            DecodeToHdrUi(cmd);
+        }
     }
 }
 
@@ -2128,9 +2504,68 @@ bool TemporalUpscaler::OnComposite(u64 ps_hash, VideoCore::ImageId color) {
     // sRGB-encoded values its composite writes through an sRGB buffer unchanged (a blit would
     // encode them a second time: a washed-out picture).
     std::scoped_lock lock{display_mutex};
-    auto& display = HostDisplay(address, target.info.pixel_format);
+    const bool hdr = hdr_chain && ui_hdr_image;
+    auto& display =
+        HostDisplay(address, hdr ? vk::Format::eR16G16B16A16Sfloat : target.info.pixel_format);
     scheduler.EndRendering();
     const auto cmd = scheduler.CommandBuffer();
+    if (hdr) {
+        display.white_nits = hdr_ui_white;
+        // gow3: HDR10 chain: the linear frame with its HUD, encoded to the stored values the
+        // display pass's UNORM views blend (the copy below, without the 8-bit limit).
+        if (!display.storage_view) {
+            const vk::ImageViewUsageCreateInfo usage{.usage = vk::ImageUsageFlagBits::eStorage};
+            display.storage_view = Check(instance.GetDevice().createImageViewUnique({
+                .pNext = &usage,
+                .image = vk::Image(display.image),
+                .viewType = vk::ImageViewType::e2D,
+                .format = vk::Format::eR16G16B16A16Sfloat,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            }));
+        }
+        const std::array to_encode{
+            vk::ImageMemoryBarrier2{
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead,
+                .oldLayout = vk::ImageLayout::eGeneral,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .image = vk::Image(ui_hdr_image),
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            },
+            vk::ImageMemoryBarrier2{
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+                .oldLayout = vk::ImageLayout::eUndefined,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .image = vk::Image(display.image),
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            },
+        };
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_encode.size()),
+                              .pImageMemoryBarriers = to_encode.data()});
+        RecordHdrTransfer(cmd, HdrTransfer::Encode, *ui_hdr_storage_view, *display.storage_view,
+                          ui_width, ui_height);
+        const vk::ImageMemoryBarrier2 encoded{
+            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentRead |
+                             vk::AccessFlagBits2::eColorAttachmentWrite |
+                             vk::AccessFlagBits2::eShaderRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = vk::Image(display.image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &encoded});
+        display.valid = true;
+        composite_done = true;
+        return true;
+    }
     const std::array before{
         vk::ImageMemoryBarrier2{
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -2203,14 +2638,18 @@ bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
             .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
             .oldLayout = vk::ImageLayout::eGeneral,
             .newLayout = vk::ImageLayout::eGeneral,
-            .image = vk::Image(ui_image),
+            .image = hdr_chain && ui_hdr_image ? vk::Image(ui_hdr_image) : vk::Image(ui_image),
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         };
         scheduler.Record([b](vk::CommandBuffer cmd) {
             cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
         });
     }
-    view = Mirror(vk::Image(ui_image), ui_views, info.format, info.mapping);
+    HdrTraceUse("sampled read of ui_image", info.format);
+    view = hdr_chain && ui_hdr_image
+               ? Mirror(vk::Image(ui_hdr_image), ui_hdr_views, vk::Format::eR16G16B16A16Sfloat,
+                        info.mapping)
+               : Mirror(vk::Image(ui_image), ui_views, info.format, info.mapping);
     layout = vk::ImageLayout::eGeneral;
     return true;
 }
@@ -2221,7 +2660,8 @@ bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
     if (it == displays.end() || !it->second.valid) {
         return false;
     }
-    display = {vk::Image(it->second.image), it->second.format, it->second.width, it->second.height};
+    display = {vk::Image(it->second.image), it->second.format, it->second.width, it->second.height,
+               it->second.white_nits};
     // Diagnostic capture of the actual completed display buffer, including native UI.
     // GOW3_PRESENT_DUMP_COUNT=N: the trigger dumps N consecutive frames (temporal stability).
     static const char* dump = std::getenv("GOW3_PRESENT_DUMP_TRIGGER");
