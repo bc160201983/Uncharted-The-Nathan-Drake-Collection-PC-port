@@ -68,6 +68,9 @@ enum : std::uint64_t {
     // On by default (bit set: off): history of a thin feature this jitter phase missed is kept
     // when nothing moves. Static-camera flicker of railings/window bars p99.9 -45% (2026-10-03).
     TaaKeepNearerHistory = 1ull << 55,
+    /// gow3 25 Oct 2026 (GOW3_COALESCE_FENCES=1, off by default): deferred compute-release and
+    /// end-of-pipe fences are recorded in batches instead of one record and one kick each.
+    CoalescedFences = 1ull << 56,
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
     /// One upscaler frame start per frame (Uncharted draws twice into its display buffer).
     OneFrameStart = 1ull << 59,

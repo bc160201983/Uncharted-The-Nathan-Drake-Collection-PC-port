@@ -856,6 +856,17 @@ public:
     /// it to the copy threads' completion (Gow3Copy::AfterCopies).
     void SignalAfterHostCopies(std::function<void()> signal);
 
+    /// gow3 25 Oct 2026 (GOW3_COALESCE_FENCES=1): records the signals handed to
+    /// SignalAfterHostCopies since the last call as one command. Each still runs in order after
+    /// the copies queued before it, but the record, the chunk handoff and the copy-thread epoch
+    /// are shared (Uncharted 2 hands over ~45k compute release fences a second, each with its own
+    /// record and forced kick). The draw pipe calls this when it runs dry, so a Drain never
+    /// leaves a signal unrecorded; a batch of 64 records itself.
+    void FlushDeferredSignals();
+    /// The calling thread's unrecorded signals (see FlushDeferredSignals). Thread-local: the
+    /// command thread (A) and the draw recording thread (B) each own their own.
+    static std::vector<std::function<void()>>& PendingSignals();
+
     /// gow3: before a guest-visible write that is not deferred (WriteData, end-of-shader
     /// fences, flip): waits until every signal handed to SignalAfterHostCopies ran, so that
     /// the write cannot overtake an earlier fence. Otherwise the guest, seeing the later value,

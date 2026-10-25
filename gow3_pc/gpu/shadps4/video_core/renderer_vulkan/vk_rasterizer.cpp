@@ -159,7 +159,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     GpuProfiler::Init(instance, scheduler);
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
-        draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
+        draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this, &FlushDrawPipeSignals, this);
     }
     // gow3: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
@@ -1799,6 +1799,10 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
     std::memcpy(out + sizeof(TaskPacket), data, size);
     draw_pipe->Commit(total);
     return true;
+}
+
+void Rasterizer::FlushDrawPipeSignals(void* rasterizer) {
+    static_cast<Rasterizer*>(rasterizer)->scheduler.FlushDeferredSignals();
 }
 
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {

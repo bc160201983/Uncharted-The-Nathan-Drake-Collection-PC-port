@@ -191,11 +191,43 @@ std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
     return chunk;
 }
 
+namespace {
+/// gow3 25 Oct 2026: GOW3_COALESCE_FENCES=1 (unvalidated; default off): batch deferred fences.
+bool CoalesceFences() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_COALESCE_FENCES");
+        return env && env[0] == '1';
+    }();
+    return enabled && !Gow3Toggle::Disabled(Gow3Toggle::CoalescedFences);
+}
+
+/// Fences held before a batch records itself: at Uncharted 2's ~45k compute releases a second
+/// this is ~1.5 ms of delay, far below a frame, while cutting the records and forced kicks by
+/// 64x. A drain or a wait records the batch earlier.
+constexpr size_t MaxPendingSignals = 64;
+} // namespace
+
+std::vector<std::function<void()>>& Scheduler::PendingSignals() {
+    static thread_local std::vector<std::function<void()>> signals;
+    return signals;
+}
+
 void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
     guest_write_epoch.fetch_add(1, std::memory_order_relaxed);
     if (!IsRecordingDeferred()) {
         WaitHostCopies();
         signal();
+        return;
+    }
+    if (CoalesceFences()) {
+        // The fence write and its interrupt stay in order; only the record, the chunk handoff
+        // and the copy-thread epoch are shared with the signals queued next to it.
+        deferred_signals_issued.fetch_add(1, std::memory_order_relaxed);
+        auto& pending = PendingSignals();
+        pending.push_back(std::move(signal));
+        if (pending.size() >= MaxPendingSignals) {
+            FlushDeferredSignals();
+        }
         return;
     }
     Gow3Copy::FlushBatch();
@@ -209,8 +241,32 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
     KickRecording(true);
 }
 
+void Scheduler::FlushDeferredSignals() {
+    auto& pending = PendingSignals();
+    if (pending.empty()) {
+        return;
+    }
+    auto signals = std::move(pending);
+    pending.clear();
+    const u64 count = signals.size();
+    Gow3Copy::FlushBatch();
+    Record([signals = std::move(signals), done = deferred_signals_done, count](
+               vk::CommandBuffer) mutable {
+        Gow3Copy::AfterCopies([signals = std::move(signals), done = std::move(done), count] {
+            for (auto& signal : signals) {
+                signal();
+            }
+            done->fetch_add(count, std::memory_order_release);
+        });
+    });
+    KickRecording(true);
+}
+
 void Scheduler::WaitDeferredSignals() {
     guest_write_epoch.fetch_add(1, std::memory_order_relaxed);
+    // gow3 25 Oct 2026: a batch this thread holds has not been recorded yet, so its fences are
+    // missing from `issued`'s count of completed ones: record it before waiting for it.
+    FlushDeferredSignals();
     const u64 issued = deferred_signals_issued.load(std::memory_order_relaxed);
     if (deferred_signals_done->load(std::memory_order_acquire) >= issued ||
         Gow3Toggle::Disabled(Gow3Toggle::OrderedGuestWrites)) {
@@ -288,6 +344,9 @@ void Scheduler::SyncRecording() {
     if (!recording_threaded) {
         return;
     }
+    // gow3 25 Oct 2026: a batched fence must be in the queue before the caller believes every
+    // earlier command is recorded (CommandBuffer() then records directly, in order with it).
+    FlushDeferredSignals();
     KickRecording(true);
     Gow3Stats::WaitTimer timer{Gow3Stats::sync_recording_ns};
     std::unique_lock lk{recorder_mutex};

@@ -277,6 +277,8 @@ private:
     /// The compute registers of the dispatch being recorded.
     const AmdGpu::ComputeProgram& CsRegs() const;
     static void RunDrawPacket(void* rasterizer, const u8* packet, u32 size);
+    /// DrawPipe flush hook: records the fences stage B batched (Scheduler::FlushDeferredSignals).
+    static void FlushDrawPipeSignals(void* rasterizer);
     struct RingBinding;
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);

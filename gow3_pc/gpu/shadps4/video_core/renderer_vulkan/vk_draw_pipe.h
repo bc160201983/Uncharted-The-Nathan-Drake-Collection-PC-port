@@ -33,8 +33,13 @@ class DrawPipe {
 public:
     /// Runs a packet on stage B.
     using Handler = void (*)(void* context, const u8* packet, u32 size);
+    /// Stage B: records the fences the packets just run left batched (GOW3_COALESCE_FENCES).
+    using FlushHandler = void (*)(void* context);
 
-    DrawPipe(Handler handler_, void* context_) : handler{handler_}, context{context_} {
+    DrawPipe(Handler handler_, void* context_, FlushHandler flush_handler_ = nullptr,
+             void* flush_context_ = nullptr)
+        : handler{handler_}, context{context_}, flush_handler{flush_handler_},
+          flush_context{flush_context_} {
         ring = std::make_unique<u8[]>(Capacity);
         thread = std::jthread([this](std::stop_token stop) { Run(stop); });
     }
@@ -199,6 +204,7 @@ private:
             const auto* header = reinterpret_cast<const Header*>(ring.get() + at % Capacity);
             if (header->size == 0) {
                 at += Capacity - at % Capacity;
+                FlushIfCaughtUp(at);
                 consumed.store(at, std::memory_order_release);
                 continue;
             }
@@ -221,13 +227,28 @@ private:
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
+            FlushIfCaughtUp(at);
             consumed.store(at, std::memory_order_release);
         }
+    }
+
+    /// Stage B: records the fences the packets run so far left batched once no further packet is
+    /// published, *before* the position is published. Stage A's Drain() returns when `consumed`
+    /// reaches `head`, so afterwards every fence the drained packets queued is recorded: a
+    /// WaitDeferredSignals() that follows a Drain() cannot wait for a batch still held here.
+    void FlushIfCaughtUp(u64 at) {
+        if (flush_handler == nullptr ||
+            published.load(std::memory_order_acquire) != at) {
+            return;
+        }
+        flush_handler(flush_context);
     }
 
     static inline thread_local bool on_stage_b = false;
     Handler handler;
     void* context;
+    FlushHandler flush_handler;
+    void* flush_context;
     std::unique_ptr<u8[]> ring;
     u64 head = 0; ///< stage A's write position
     u32 pending_size = 0;
