@@ -649,6 +649,7 @@ static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t 
             address - segments[i].address <= segments[i].size - bytes) return 1;
     return 0;
 }
+#include "uc2mp_menu_bridge.h"
 extern ABI float gow3_orbs_gain(void *player, float requested);
 extern void gow3_orbs_status(int supported);
 extern uintptr_t gow3_cheat_flag(unsigned id);
@@ -800,6 +801,30 @@ static unsigned char *allocate_near_image(uint64_t size) {
     return allocate(page_size);
 #endif
 }
+#include "uc2mp_spawn_bridge.h"
+#include "uc2mp_game_frame_bridge.h"
+#include "uc2mp_text_bridge.h"
+#include "uc2mp_match_info.h"
+
+/* uc2mp: the overlay's multiplayer loading screen while a match map loads, hidden once the
+ * hero exists. The map picture comes from the first UNCHARTED_MOD_DIR folder. */
+static void uc2mp_hide_match_loading(void) {
+    gow3gpu_match_loading(0, NULL, NULL, NULL, NULL);
+}
+static void uc2mp_show_match_loading(const char *map) {
+    Uc2mpMatchInfo info;
+    uc2mp_match_info_read(map, &info);
+    char picture[1024] = "";
+    const char *mods = getenv("UNCHARTED_MOD_DIR");
+    if (mods && *mods) {
+        size_t first = strcspn(mods, ";");
+        snprintf(picture, sizeof(picture), "%.*s/uc2mp/loading/%s.png", (int)first, mods, map);
+    }
+    gow3gpu_match_loading(1, info.mode, info.name, info.rules, *picture ? picture : NULL);
+    uc2mp_spawn_on_spawned = uc2mp_hide_match_loading;
+    printf("UC2MP: match loading screen: %s, %s (%s)\n", info.mode, info.name, *picture ? picture : "no picture");
+}
+
 /* Mouse look stub (src/runtime_mouselook.h): saves rax, rcx, rdx, rsi, rdi, r8-r11 and xmm0-7
  * (the entry's argument and scratch registers; rsp stays 16-byte aligned at the call), calls the
  * handler with rdi/rsi/rdx unchanged, stores a non-NULL result over the saved rdx, restores them,
@@ -982,6 +1007,7 @@ int main(int argc, char **argv) {
     runtime_thread_tcb_offset();
 #endif
     int cpu_only = 0, strict_imports = 0, check_imports = 0, game_hooks = 1, low_image = 0;
+    int validate_uc2mp = 0;
     /* Guest argv: --guest-path is argv[0], then --guest-arg values. The Collection menu's
      * LoadExec argv for Uncharted 2/3 is the complete argv: "eboot.bin" "ispartofuccollection". */
     const char *guest_argv[17]={"/app0/eboot.bin"};
@@ -993,6 +1019,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
         else if (!strcmp(argv[i], "--check-imports")) check_imports = 1;
+        else if (!strcmp(argv[i], "--validate-uc2mp")) { validate_uc2mp = 1; cpu_only = 1; }
         else if (!strcmp(argv[i], "--no-game-hooks")) game_hooks = 0;
         else if (!strcmp(argv[i], "--low-image")) low_image = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
@@ -1012,7 +1039,7 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--no-game-hooks] [--content-profile file] [--app0 dir] [--app0-overlay dir]... [--user dir] [--patches file] [--timeout seconds] [--guest-path /app0/file] [--guest-arg value]... | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--validate-uc2mp] [--no-game-hooks] [--content-profile file] [--app0 dir] [--app0-overlay dir]... [--user dir] [--patches file] [--timeout seconds] [--guest-path /app0/file] [--guest-arg value]... | --vulkan-only\n", argv[0]);
         return 1;
     }
     /* The guest code needs the PS4's instruction sets (#33, #66); GOW3_CPU_CHECK=0 skips this. */
@@ -1216,6 +1243,18 @@ int main(int argc, char **argv) {
         }
         memcpy(image + relocs[i].target, &value, 8);
     }
+    if (validate_uc2mp) {
+        /* Check the complete bridge against the actual relocated image without
+         * starting Vulkan, module initializers or any guest code. Mutations are
+         * confined to this process's disposable image. Explicit opt-in remains
+         * required, exactly as for the game. */
+        install_uc2mp_menu_bridge(segments, ns, size);
+        const int matched = uc2mp_menu_image == image;
+        printf("UC2MP validation: %s; no guest instructions executed\n",
+               matched ? "all signatures and relocated tables matched" : "bridge rejected");
+        fflush(NULL);
+        _exit(matched ? 0 : 1);
+    }
     if (check_imports) {
         /* Lists every import the game would stop at, without running it (needs the GPU
          * library: without --cpu-only its symbols are registered above). */
@@ -1235,6 +1274,14 @@ int main(int argc, char **argv) {
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    if (gpu_enabled) install_uc2mp_menu_bridge(segments, ns, size);
+    if (gpu_enabled && install_uc2mp_spawn_bridge(segments, ns, size, guest_argc, guest_argv) == 1 &&
+        (uc2mp_spawn_catalog || uc2mp_spawn_stage))
+        uc2mp_show_match_loading(uc2mp_spawn_catalog ? uc2mp_spawn_catalog->level_name : "stage-multi");
+    if (gpu_enabled) install_uc2mp_text_bridge(segments, ns, size);
+    if (gpu_enabled && install_uc2mp_game_frame_bridge(segments, ns, size)<0) {
+        fputs("STOP: UC2MP game frame signatures rejected\n",stderr); return 1;
+    }
     if (gpu_enabled) install_mouse_look(segments, ns, size);
     /* gow3 24 Oct 2026: co-op research console (runtime_coop.c; GOW3_COOP_CMD / GOW3_COOP_BOOT, off by default). */
     { extern void runtime_coop_install(unsigned char *, uint64_t); runtime_coop_install(image, size); }

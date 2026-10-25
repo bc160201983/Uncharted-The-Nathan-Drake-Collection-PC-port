@@ -67,6 +67,16 @@ void runtime_set_main_tls(const void *data,uint64_t filesz,uint64_t memsz,uint64
     tls_template=data; tls_filesz=filesz; tls_memsz=memsz; tls_align=align ? align : 16;
 }
 static uint64_t tls_offset(void) { return (tls_memsz+tls_align-1)&~(tls_align-1); }
+int runtime_thread_read_tls_u64(int64_t offset, uint64_t *value) {
+    if (!value || !current || !current->tcb) return 0;
+    const uint64_t before = tls_offset();
+    if (offset < 0) {
+        const uint64_t distance = (uint64_t)(-(offset+1))+1;
+        if (distance > before) return 0;
+    } else if ((uint64_t)offset > 256-sizeof(*value)) return 0;
+    memcpy(value, (const unsigned char *)current->tcb+offset, sizeof(*value));
+    return 1;
+}
 #ifdef _WIN32
 /* TEB TlsSlots[64] start at gs:0x1480; slots 64+ live elsewhere and cannot be used. */
 static DWORD tls_slot=TLS_OUT_OF_INDEXES;

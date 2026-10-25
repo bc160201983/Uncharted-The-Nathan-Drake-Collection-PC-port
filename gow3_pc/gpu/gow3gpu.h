@@ -37,6 +37,10 @@ int gow3gpu_choice_poll(void);
  * number 1-3; 128 earned flags), then each newly earned trophy, shown as a popup. */
 void gow3gpu_trophy_list(const char *pack_path, int list, const uint32_t earned[4]);
 void gow3gpu_trophy_earned(int id);
+/* uc2mp: the multiplayer match loading screen drawn over the game (title: mode, map: its name,
+ * rules: one line, picture: a PNG path or NULL), until called with active 0. */
+void gow3gpu_match_loading(int active, const char *title, const char *map, const char *rules,
+                           const char *picture);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int gow3gpu_overlay_captures_input(void);
 /* Mouse movement since the last call (pixels) and held sources (bit 0 left, 1 middle, 2 right,

@@ -39,6 +39,8 @@ uintptr_t runtime_thread_resolve(const char *name);
 void runtime_thread_report(void);
 void runtime_set_main_tls(const void *data, uint64_t filesz, uint64_t memsz, uint64_t align);
 void runtime_thread_attach_main(void);
+/* Read existing current-thread static TLS without attaching a guest thread. */
+int runtime_thread_read_tls_u64(int64_t offset, uint64_t *value);
 int32_t *runtime_errno(void);
 uintptr_t runtime_sema_resolve(const char *name);
 void runtime_sema_report(void);
@@ -54,6 +56,7 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
 uintptr_t runtime_kernel_resolve(const char *name);
 uintptr_t runtime_file_resolve(const char *name);
 uintptr_t runtime_services_resolve(const char *name);
+int32_t runtime_load_exec(const char *path, const char *const *argv);
 void runtime_file_report(void);
 void runtime_file_configure(const char *app0, const char *user);
 int runtime_file_mount(const char *guest, const char *host);

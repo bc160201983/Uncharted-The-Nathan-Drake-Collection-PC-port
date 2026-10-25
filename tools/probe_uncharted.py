@@ -1160,9 +1160,9 @@ def net_game_env(env, user, roots):
 def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=()):
     """game: the folder the prepare scripts read; app0 (default: game) with overlays laid over
     it is what the game sees as /app0."""
-    out = ROOT / "analysis" / (("uncharted" if executable == "eboot.bin" else Path(executable).stem)
-                               + instance_suffix())
-    user = user_dir()
+    stem = "uncharted" if executable == "eboot.bin" else Path(executable).stem
+    out = args.analysis_root / stem if args.analysis_root else ROOT / "analysis" / (stem + instance_suffix())
+    user = args.user_dir
     user.mkdir(parents=True, exist_ok=True)
     scripts = ROOT / "gow3_pc/scripts"
     for script in ("prepare.py", "link_modules.py", "content_profile.py"):
@@ -1546,7 +1546,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     window_icon = game_window_icon(game)
     if window_icon:
         env.setdefault("GOW3_WINDOW_ICON", str(window_icon))
-    command = [str(game_executable()), str(out / "boot-linked.bin"),
+    command = [str(args.runtime_executable or game_executable()), str(out / "boot-linked.bin"),
                "--no-game-hooks", "--low-image", "--content-profile", str(out / "content.bin"),
                "--app0", str(app0 or game), "--user", str(user)]
     # gow3 24 Oct 2026, co-op research: UNCHARTED_COOP_OVERLAY=<dir> lays one more folder over
@@ -1556,7 +1556,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         command += ["--app0-overlay", coop_overlay]
     if executable == "big2-ps4_Shipping.elf" and net_mode():
         command += ["--app0-overlay", str(net_game_env(env, user, [*overlays, app0 or game]))]
-    for overlay in overlays:
+    # UNCHARTED_MOD_DIR: folders laid over the game before the update (the first holding a file
+    # wins), e.g. the multiplayer menu built by tools/uc2mp_menu.py.
+    mods = [m for m in os.environ.get("UNCHARTED_MOD_DIR", "").split(os.pathsep) if m]
+    for overlay in [*mods, *overlays]:
         command += ["--app0-overlay", str(overlay)]
     # guest_args is the game's complete argv; argv[0] is the program name.
     command += ["--guest-path", guest_args[0] if guest_args else "/app0/" + executable]
@@ -1590,6 +1593,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     start = time.monotonic()
     with (out / (name + ".log")).open("wb") as log:
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        result["process_id"] = process.pid
+        running = {"pid": process.pid, "runtime": str(Path(command[0]).resolve()),
+                   "started_unix_ns": time.time_ns(), "active": True}
+        (out / (name + ".running.json")).write_text(json.dumps(running, indent=2), encoding="utf-8")
         # Freeze watchdog (needs the Frame stats lines, i.e. diagnostics on). UNCHARTED_HANG_SECONDS
         # sets its wait (30 s), 0 turns it off.
         hang_seconds = int(os.environ.get("UNCHARTED_HANG_SECONDS", "30") or 0)
@@ -1617,6 +1624,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             result["exit_code"] = process.wait()
             result["timed_out"] = True
     result["elapsed_seconds"] = round(time.monotonic() - start, 3)
+    running.update(active=False, exit_code=result["exit_code"])
+    (out / (name + ".running.json")).write_text(json.dumps(running, indent=2), encoding="utf-8")
     (out / (name + ".json")).write_text(json.dumps(result, indent=2), encoding="utf-8")
     # The game has ended: the log can take the freeze reports' names (the launcher looks there).
     if args.boot and hang_reports:
@@ -1637,6 +1646,12 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game", type=Path, default=ROOT / "game/CUSA02344/uroot")
+    parser.add_argument("--analysis-root", type=Path,
+                        help="Separate build/log directory for isolated experiments")
+    parser.add_argument("--user-dir", type=Path,
+                        help="Separate player-data directory for isolated experiments")
+    parser.add_argument("--runtime-executable", type=Path,
+                        help="Run this runtime directly without replacing the installed executable")
     parser.add_argument("--boot", action="store_true", help="Execute guest code after preparation")
     parser.add_argument("--executable", choices=EXECUTABLES, default="eboot.bin")
     parser.add_argument("--guest-arg", action="append", default=None,
@@ -1648,9 +1663,16 @@ def main():
     parser.add_argument("--capture", action="store_true", help="Request a renderer frame dump every three seconds")
     parser.add_argument("--seconds", type=int, default=30, help="External process time limit; 0 disables it")
     args = parser.parse_args()
+    if args.runtime_executable:
+        args.runtime_executable = args.runtime_executable.resolve()
+        if not args.runtime_executable.is_file():
+            parser.error("--runtime-executable must name an existing file")
     if args.seconds < 0:
         parser.error("--seconds must be nonnegative")
-    user = user_dir()
+    user = args.user_dir.resolve() if args.user_dir else user_dir()
+    args.user_dir = user
+    if args.analysis_root:
+        args.analysis_root = args.analysis_root.resolve()
     user.mkdir(parents=True, exist_ok=True)
     loadexec = user / "loadexec.txt"
     executable = args.executable

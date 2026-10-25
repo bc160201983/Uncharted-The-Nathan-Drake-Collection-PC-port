@@ -144,6 +144,9 @@ static ABI int32_t load_exec(const char *path,const char *const *argv) {
     fflush(NULL);
     _exit(LOADEXEC_EXIT); /* no destructors: GPU, audio and guest threads are still running */
 }
+/* The same switch requested by the runtime itself (uc2mp_menu_bridge.h: a multiplayer match
+ * restarts the game on its map). Does not return when the launcher handoff exists. */
+int32_t runtime_load_exec(const char *path,const char *const *argv) { return load_exec(path,argv); }
 
 /* ---- NetCtl / Net / Http / Ssl: no network ---- */
 /* POSIX sockets (Uncharted 2/3 through libScePosix): the cable is unplugged. */
@@ -842,7 +845,80 @@ static const RuntimeExport exports[]={
     {"sceDiscMapIsRequestOnHDD",discmap_on_hdd}, {"sceDiscMap_8A828CAEE7EDD5E9",discmap_8a82},
     {"sceVoiceInit",ok_void}, {"sceVoiceEnd",ok_void},
 };
+/* ---- Network trace (GOW3_NET_TRACE=1) ----
+ * Wraps every sceNet/sceNetCtl/sceNp (except trophies) and sceVoice import in a thunk that
+ * prints its name, first four arguments and result: the map of what the game asks the network
+ * and PSN for. The first NET_TRACE_CALLS calls of each function are printed. The thunks pass
+ * six integer registers through, which covers every contract above (none takes stack
+ * arguments or floating-point values). */
+#define NET_TRACE_SLOTS 256
+#define NET_TRACE_CALLS 20
+typedef ABI uint64_t (*TraceTarget)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+static struct { const char *name; TraceTarget target; unsigned calls; } traced[NET_TRACE_SLOTS];
+static int traced_count;
+static void *trace_thunks[NET_TRACE_SLOTS];
+/* 24 Oct 2026: trace_thunk_<digits> used to hand its digit suffix to trace_call as a plain
+ * literal (e.g. trace_call(0010,...)); a leading-zero C literal is octal, so most thunks passed
+ * a slot far from their real position in trace_thunks[] and ended up reading an unregistered
+ * traced[] entry (null target), crashing the game on the first such call entering Uncharted 2
+ * multiplayer. Thunks now pass their own address; trace_call finds its slot by searching
+ * trace_thunks[] for it (256 entries at most, and only while net tracing is on). */
+static uint64_t trace_call(void *self,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e,uint64_t f) {
+    int slot=-1;
+    for (int i=0;i<traced_count;++i) if (trace_thunks[i]==self) { slot=i; break; }
+    if (slot<0) { printf("Net trace: unregistered thunk called; call skipped\n"); return 0; }
+    TraceTarget target=traced[slot].target;
+    if (!target) {
+        printf("Net trace: slot %d (%s) has no bound target; call skipped\n",slot,
+               traced[slot].name ? traced[slot].name : "?");
+        return 0;
+    }
+    uint64_t result=target(a,b,c,d,e,f);
+    unsigned n=__atomic_add_fetch(&traced[slot].calls,1,__ATOMIC_RELAXED);
+    if (n<=NET_TRACE_CALLS)
+        printf("Net trace: %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%08x%s\n",traced[slot].name,
+               (unsigned long long)a,(unsigned long long)b,(unsigned long long)c,(unsigned long long)d,
+               (uint32_t)result,n==NET_TRACE_CALLS ? " (further calls not printed)" : "");
+    return result;
+}
+#define TRACE_THUNK(i) static ABI uint64_t trace_thunk_##i(uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e,uint64_t f) \
+    { return trace_call((void *)trace_thunk_##i,a,b,c,d,e,f); }
+#define TRACE_THUNK4(i) TRACE_THUNK(i##0) TRACE_THUNK(i##1) TRACE_THUNK(i##2) TRACE_THUNK(i##3)
+#define TRACE_THUNK16(i) TRACE_THUNK4(i##0) TRACE_THUNK4(i##1) TRACE_THUNK4(i##2) TRACE_THUNK4(i##3)
+#define TRACE_THUNK64(i) TRACE_THUNK16(i##0) TRACE_THUNK16(i##1) TRACE_THUNK16(i##2) TRACE_THUNK16(i##3)
+TRACE_THUNK64(0) TRACE_THUNK64(1) TRACE_THUNK64(2) TRACE_THUNK64(3)
+#define TRACE_REF(i) trace_thunk_##i,
+#define TRACE_REF4(i) TRACE_REF(i##0) TRACE_REF(i##1) TRACE_REF(i##2) TRACE_REF(i##3)
+#define TRACE_REF16(i) TRACE_REF4(i##0) TRACE_REF4(i##1) TRACE_REF4(i##2) TRACE_REF4(i##3)
+#define TRACE_REF64(i) TRACE_REF16(i##0) TRACE_REF16(i##1) TRACE_REF16(i##2) TRACE_REF16(i##3)
+static void *const trace_thunks_init[NET_TRACE_SLOTS]={ TRACE_REF64(0) TRACE_REF64(1) TRACE_REF64(2) TRACE_REF64(3) };
+static int net_traced(const char *symbol) {
+    static int enabled=-1;
+    if (enabled<0) {
+        const char *v=getenv("GOW3_NET_TRACE");
+        enabled=v && v[0]=='1';
+        memcpy(trace_thunks,trace_thunks_init,sizeof(trace_thunks));
+    }
+    if (!enabled || !symbol) return 0;
+    if (!strncmp(symbol,"sceNpTrophy",11)) return 0;
+    if (!strcmp(symbol,"sceNetHtons") || !strcmp(symbol,"sceNetNtohs") ||
+        !strcmp(symbol,"sceNetHtonl") || !strcmp(symbol,"sceNetNtohl")) return 0;
+    return !strncmp(symbol,"sceNet",6) || !strncmp(symbol,"sceNp",5) || !strncmp(symbol,"sceVoice",8);
+}
+static uintptr_t net_trace_wrap(const char *nid,uintptr_t function) {
+    const char *symbol=runtime_symbol(nid);
+    if (!function || !net_traced(symbol)) return function;
+    pthread_mutex_lock(&lock);
+    for (int i=0;i<traced_count;++i)
+        if (!strcmp(traced[i].name,symbol)) { pthread_mutex_unlock(&lock); return (uintptr_t)trace_thunks[i]; }
+    if (traced_count==NET_TRACE_SLOTS) { pthread_mutex_unlock(&lock); return function; }
+    int slot=traced_count++;
+    traced[slot].name=symbol; traced[slot].target=(TraceTarget)function;
+    pthread_mutex_unlock(&lock);
+    printf("Net trace: bound %s\n",symbol);
+    return (uintptr_t)trace_thunks[slot];
+}
 uintptr_t runtime_services_resolve(const char *name) {
     if (!strcmp(name,"k1SwgkMSOM8#libSceRemoteplay")) return (uintptr_t)remoteplay_initialize;
-    return RUNTIME_LOOKUP(exports,name);
+    return net_trace_wrap(name,RUNTIME_LOOKUP(exports,name));
 }
