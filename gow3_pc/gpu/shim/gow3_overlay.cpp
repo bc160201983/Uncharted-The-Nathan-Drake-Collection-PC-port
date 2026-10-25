@@ -535,7 +535,7 @@ void OverlayTab() {
     if (ImGui::BeginTable("##overlay_items", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableNextColumn();
         static const char* const names[] = {"FPS", "Frametime", "Upscaler", "GPU (use and temperature)",
-                                            "CPU (game use and temperature)", "RAM (game)",
+                                            "CPU (game use and temperature)", "RAM (system)",
                                             "VRAM (used / available)"};
         for (unsigned item = 0; item < 7; ++item) {
             const unsigned bit = 1u << item;

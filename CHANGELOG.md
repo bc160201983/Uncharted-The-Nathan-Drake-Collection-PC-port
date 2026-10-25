@@ -4,6 +4,31 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 25 October 2026 (unreleased)
+
+- **The performance counter starts with FPS, frame time, GPU and CPU use (with their temperatures)
+  and RAM** on one line, top right. Its RAM item is the system's memory in use - what Task Manager
+  calls "In use" - not the game's own working set, and the in-game Overlay tab now says so
+  ("RAM (system)"). Change the items, corner, size or opacity on the launcher's Display tab or in
+  the game's Overlay tab.
+- **IGPU preset for Intel and AMD integrated graphics**: a fifth card on Quick Setup, picked
+  automatically when the game's log reports an integrated GPU (`GPU_Integrated: Yes`) or the card
+  name is an APU (Radeon 610M-890M, Vega, "Radeon Graphics", Iris Xe, UHD, integrated Arc). It sets
+  1080p output with FSR 1, one frame queued, VSync, background shaders, RCAS 75% and no
+  anti-aliasing, and tunes itself by class: 640x360 at 30 FPS on Vega and 2-CU Radeon, 960x540 at
+  60 on Radeon 680M/780M and Iris Xe, 1280x720 at 60 on Radeon 880M/890M and Intel Arc.
+  Multithreaded rendering is on for Uncharted 2 and 3 and stays off in Drake's Fortune. The card
+  states what it gives (30-60 FPS at 540-720p); the command-thread work that lifts a 780M from
+  ~45 to 60 FPS is a separate change, not the preset alone.
+- **Quick Setup lays the five cards out 3 + 2** so every description stays readable at the
+  launcher's width; **LOW** now says "older graphics cards" (integrated GPUs take IGPU).
+- **Batched GPU fences (Performance, experimental, off by default)**: with multithreaded rendering
+  Uncharted 2 hands the GPU command thread up to ~45,000 compute completion signals a second, and
+  each was recorded and handed over on its own. They are now recorded in groups, which takes that
+  bookkeeping off the thread that limits the frame rate on integrated graphics. The IGPU preset
+  turns it on; leave it off (or turn it off) if a game hangs or stutters. It needs multithreaded
+  rendering, so Drake's Fortune is unaffected. First measurements on integrated GPUs are pending.
+
 ## 25 October 2026 (0.6.2)
 
 - **The launcher did not open after updating to 0.6.1** (#208): the launcher's new network search

@@ -34,8 +34,8 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
 - **Weakest GPU tested: the integrated AMD Radeon graphics of a Ryzen 7000/9000 desktop CPU**
   (2 compute units, about a quarter of a PS4's GPU). At **720p**: Uncharted 3 27-39 FPS,
   Uncharted 2 27 FPS, Drake's Fortune 24 FPS; at **540p** Uncharted 3 33 FPS. Playable, not
-  smooth. Settings: preset **Low**, or resolution **1080p** with upscaling **FSR 1** at
-  **Performance** (the game draws 960x540) or **Ultra Performance**, anti-aliasing off.
+  smooth. Settings: the **IGPU** preset (it draws 640x360 on this class and upscales to 1080p),
+  anti-aliasing off.
 - **4 CPU cores:** 60 FPS in Drake's Fortune and Uncharted 3 (title screen and in play; a 4-core
   test with a fast GPU), with **Idle game threads: Sleep** (the default). On a 4-6 core CPU also
   try **Multithreaded rendering** (per game) and keep **Frames queued at 1**.
@@ -49,7 +49,8 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
 
   | Preset | Resolution | Frame rate | For |
   |---|---|---|---|
-  | Low | 1080p, FSR 1 Performance (draws 960x540) | 60 | weak GPUs |
+  | IGPU | 1080p, FSR 1 (draws 960x540; 640x360 on weak iGPUs, 1280x720 on the strongest) | 60 (30 on weak iGPUs) | Intel and AMD integrated graphics |
+  | Low | 1080p, FSR 1 Performance (draws 960x540) | 60 | older graphics cards |
   | Medium | 1080p (as on PS4) | 60 | most PCs |
   | High | 1440p | 60 | fast GPUs |
   | Ultra | 4K (Drake's Fortune draws 1620p, upscaled) | up to 120 (experimental) | very fast GPUs |
@@ -63,8 +64,9 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
   nearly all of it (a 4-core test: 19-27 FPS on the title screen, 60 with Sleep). Also turn on **Multithreaded rendering** (per game) and keep **Frames queued at 1**. The PS4's
   GPU commands are otherwise processed on one CPU core, which limits slower CPUs; with this option
   the Vulkan command recording runs on a second core. On fast desktop CPUs it makes no difference.
-  If a game hangs while loading, turn that option off again. With a weak GPU also pick the **Low**
-  preset (FSR 1 Performance at 1080p); integrated GPUs: FSR 1 **Ultra Performance**.
+  If a game hangs while loading, turn that option off again. With an integrated GPU pick the
+  **IGPU** preset: it detects the class and draws 640x360 (weak iGPUs), 960x540 (Radeon 680M/780M,
+  Iris Xe) or 1280x720 (Radeon 880M/890M, Intel Arc), always upscaled to 1080p with FSR 1.
 
 - **Display:** windowed, borderless or exclusive fullscreen; resolution 540p, 720p, 900p, 1080p,
   1440p, 1620p or 4K; aspect ratio 16:10, 16:9, 21:9, 32:9; **upscaling** FSR 1, FSR 3.1, FSR 4

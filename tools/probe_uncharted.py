@@ -1297,6 +1297,12 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     if multithreaded is not None:
         env["GOW3_DRAW_PIPE"] = multithreaded
         env["GOW3_VK_RECORD_THREAD"] = multithreaded
+    # Batched deferred fences (launcher Performance, 25 Oct 2026, GOW3_COALESCE_FENCES): Uncharted 2
+    # hands the GPU thread ~45,000 compute completion signals a second, each with its own recording
+    # batch and forced handoff; recording them in groups takes that off the command thread. Only does
+    # anything with the draw pipeline (multithreaded rendering), and an explicit GOW3_* value wins.
+    if os.environ.get("UNCHARTED_COALESCE_FENCES") == "1":
+        env.setdefault("GOW3_COALESCE_FENCES", "1")
     # Keyboard and mouse (launcher Controls tab, per game; explicit GOW3_* values win).
     for launcher_key, runtime_key in (("KEY_MAP", "GOW3_KEY_MAP"), ("MOUSE_MAP", "GOW3_MOUSE_MAP"),
                                       ("MOUSE", "GOW3_MOUSE"), ("MOUSE_SENS", "GOW3_MOUSE_SENS"),

@@ -235,10 +235,10 @@ INI_DEFAULTS = {
     "upscaler": "off",
     # The performance counter (Display tab): the items on its line, its corner, layout, text size
     # and background opacity. The runtime's defaults; the in-game Overlay tab writes them too.
-    # Items as the runtime starts (DefaultItems: FPS, frame time, upscaler) until the game has
-    # written its ini once.
-    "overlay_fps": "1", "overlay_frametime": "1", "overlay_gpu": "0", "overlay_cpu": "0",
-    "overlay_ram": "0", "overlay_vram": "0", "overlay_upscaler": "1", "overlay_corner": "1",
+    # Items as the runtime starts (DefaultItems: FPS, frame time, GPU and CPU use with their
+    # temperatures, system RAM) until the game has written its ini once.
+    "overlay_fps": "1", "overlay_frametime": "1", "overlay_gpu": "1", "overlay_cpu": "1",
+    "overlay_ram": "1", "overlay_vram": "0", "overlay_upscaler": "0", "overlay_corner": "1",
     "overlay_layout": "0", "overlay_scale": "100", "overlay_opacity": "50",
 }
 # Cheats (Advanced page): name, title, hint. tools/probe_uncharted.py turns on the games' own
@@ -249,7 +249,7 @@ CHEATS = (("invincible", "Invincible", "Nate takes no damage. All three games.")
           ("grenades", "Infinite grenades", "Grenades never run out. Uncharted 3."),
           ("onehit", "One-hit kills", "Enemies go down with one hit. Uncharted 3."))
 LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True, "language": "1",
-                     "unlock": False}
+                     "unlock": False, "coalesce_fences": False}
 
 # The PS4's system language (its id, as sceSystemServiceParamGetInt reports it) for the 22 languages
 # the Collection has text for (all three games; text1/ps4/<n>.common in core.psarc). Each game's main
@@ -901,10 +901,20 @@ def resolution_options(aspect):
 # render resolution is new (October 2026): confirm in play. All three games draw at 4K
 # natively except Drake's Fortune, which stops at 1620p (its memory layout) and upscales.
 PRESETS = {
+    "igpu": {
+        "title": "IGPU", "summary": "30–60 FPS  •  540–720p, FSR 1",
+        "detail": "Intel and AMD integrated graphics: the game draws at 540p (720p on the strongest "
+                  "iGPUs, 360p on the weakest) and FSR 1 upscales it to 1080p. About 30 FPS on Vega "
+                  "and 2-CU Radeon, 60 on Radeon 680M/780M and Iris Xe. No anti-aliasing; the "
+                  "lowest memory use.",
+        "resolution": "1920x1080", "upscale": "performance",
+        "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
+                   "fsr1": "1", "rcas": "1", "rcas_strength": "75", "upscaler": "off"},
+    },
     "low": {
         "title": "LOW", "summary": "60 FPS  •  1080p, FSR 1",
-        "detail": "For integrated and older graphics cards: the game draws at half of 1080p and FSR 1 "
-                  "upscales it; the HUD stays sharp.",
+        "detail": "For older graphics cards: the game draws at half of 1080p and FSR 1 upscales it; "
+                  "the HUD stays sharp.",
         "resolution": "1920x1080", "upscale": "performance",
         "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
                    "fsr1": "1", "rcas": "1", "rcas_strength": "75"},
@@ -932,7 +942,7 @@ PRESETS = {
                    "fsr1": "0", "rcas": "1", "rcas_strength": "50"},
     },
 }
-PRESET_ORDER = ("low", "medium", "high", "ultra")
+PRESET_ORDER = ("igpu", "low", "medium", "high", "ultra")
 
 
 def upscaling_options():
@@ -951,19 +961,39 @@ def preset_values(name):
     return dict(PRESETS[name]["values"])
 
 
-def gpu_names():
-    """The graphics cards: the one the game used last (its log names it), else Windows' list."""
+def gpu_log_info():
+    """The graphics card the game used last, as its log names it: {"name", "integrated"}.
+    None when no log has it. The log lists every card as "GPU 0: <name> (DiscreteGpu)" and the one
+    chosen as "GPU: using <name>"; the kind is None when the log predates that line."""
     logs = [ROOT / "analysis" / g["log"] / "boot.log" for g in GAMES]
     for log in sorted((log for log in logs if log.exists()), key=lambda p: p.stat().st_mtime, reverse=True):
+        name, kinds = None, {}
         try:
             with open(log, encoding="utf-8", errors="replace") as lines:
                 for number, line in enumerate(lines):
                     if line.startswith("GPU: using "):
-                        return [line[len("GPU: using "):].strip()]
+                        name = line[len("GPU: using "):].strip()
+                    elif line.startswith("GPU ") and ": " in line:
+                        head, _, card = line.partition(": ")
+                        if head[4:].strip().isdigit() and card.rstrip().endswith(")"):
+                            model, _, kind = card.rstrip().rpartition(" (")
+                            kinds[model] = kind[:-1]
                     if number > 400:
                         break
         except OSError:
-            pass
+            continue
+        if name:
+            kind = kinds.get(name)
+            return {"name": name, "integrated": True if kind == "IntegratedGpu"
+                    else False if kind == "DiscreteGpu" else None}
+    return None
+
+
+def gpu_names():
+    """The graphics cards: the one the game used last (its log names it), else Windows' list."""
+    info = gpu_log_info()
+    if info:
+        return [info["name"]]
     try:
         result = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
                                 capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW)
@@ -972,12 +1002,54 @@ def gpu_names():
         return []
 
 
+# Integrated graphics by model name: the log says it exactly (GPU_Integrated, "(IntegratedGpu)"),
+# but Windows' list and older logs only give the name. AMD APUs: Vega, the 610M-890M Radeon and the
+# unnamed "Radeon Graphics"; Intel: Iris Xe, UHD/HD and the integrated Arc (130V-150V, "Arc
+# Graphics"). A discrete Arc A/B, a Radeon RX, Vega 56/64 and Radeon VII are separate cards.
+INTEGRATED_AMD = re.compile(
+    r"\b(?:radeon\s*)?(?:610m|640m|660m|680m|740m|760m|780m|860m|880m|890m)\b"
+    r"|\bradeon\s+graphics\b|\bradeon\s+vega\b|\bvega\s*(?:3|6|8|11)\b"
+    r"|\bryzen\s+.*\bgraphics\b")
+
+
+def gpu_integrated(name):
+    """True for integrated graphics, from the model name."""
+    n = (name or "").lower().replace("(tm)", "").replace("(r)", "")
+    if not n:
+        return False
+    if "vega 56" in n or "vega 64" in n or "radeon vii" in n:
+        return False
+    if re.search(r"\barc\s*[ab]\d{3}\b", n):
+        return False
+    if "intel" in n:
+        return True
+    return bool(INTEGRATED_AMD.search(n))
+
+
+def igpu_class(name):
+    """How strong an integrated GPU is, for the IGPU preset's own defaults: "weak" (30 FPS: Vega,
+    the 2-CU Radeon, older Intel UHD/HD), "mainstream" (60 FPS at 540p: Radeon 680M/780M, Iris Xe)
+    or "strong" (60 FPS at 720p: Radeon 880M/890M, integrated Arc)."""
+    n = (name or "").lower().replace("(tm)", "").replace("(r)", "")
+    if ("intel" in n and "arc" in n) or re.search(r"\b(880m|890m)\b", n):
+        return "strong"
+    if re.search(r"\b(680m|780m|860m)\b", n) or ("intel" in n and "iris xe" in n):
+        return "mainstream"
+    if "intel" in n or "vega" in n or re.search(r"\b(610m|640m|660m|740m|760m)\b", n) \
+            or "radeon graphics" in n:
+        return "weak"
+    return "mainstream"
+
+
 def gpu_tier(name):
     """The Quick Setup preset for a graphics card, from its model name; None when not known.
-    Rough classes: Low = integrated and older entry cards, Medium = 1080p cards (GTX 1060-1660,
-    RTX x060, RX 580-7600), High = 1440p cards, Ultra = 4K cards (RTX x080/x090,
-    RTX 4070 Ti and up, RX 6800 XT/7900/9070). High and Ultra laptop chips count one class lower."""
+    Integrated graphics take IGPU (30-60 FPS below 1080p with FSR 1); the others: Low = older
+    entry cards, Medium = 1080p cards (GTX 1060-1660, RTX x060, RX 580-7600), High = 1440p cards,
+    Ultra = 4K cards (RTX x080/x090, RTX 4070 Ti and up, RX 6800 XT/7900/9070). High and Ultra
+    laptop chips count one class lower."""
     n = (name or "").lower().replace("(tm)", "").replace("(r)", "")
+    if gpu_integrated(n):
+        return "igpu"
     nvidia = re.search(r"\b(rtx|gtx|gt|mx)\s*(\d{3,4})\s*(ti)?\s*(super)?", n)
     amd = re.search(r"\brx\s*(\d{3,4})\s*(xtx|xt|gre)?", n)
     arc = re.search(r"\barc\s*([ab])(\d{3})", n)
@@ -1028,7 +1100,7 @@ def gpu_tier(name):
     elif arc:
         tier = "medium" if int(arc.group(2)) >= 500 else "low"
     elif "intel" in n or ("radeon" in n and "graphics" in n):
-        tier = "low"  # integrated graphics
+        tier = "igpu"  # integrated graphics that the name check above did not catch
     else:
         return None
     if "laptop" in n or "max-q" in n or "mobile" in n or re.search(r"\d{3,4}m\b", n):
@@ -1422,6 +1494,7 @@ class Launcher:
         self.images = []
         # The graphics card (as last detected; detect_gpu checks again) for the Quick Setup advice.
         self.gpu_name = self.config.get("gpu")
+        self.gpu_is_integrated = gpu_integrated(self.gpu_name)
         self.recommended = gpu_tier(self.gpu_name)
         self.fonts()
         root.title(f"{APP_TITLE} - Launcher by BilalReloaded")
@@ -1476,20 +1549,25 @@ class Launcher:
 
     def detect_gpu(self):
         """Finds the graphics card in the background (Windows' list takes a moment) and marks the
-        Quick Setup preset that suits it."""
+        Quick Setup preset that suits it. The game log's "(IntegratedGpu)" is exact; the model name
+        is the fallback, and all there is when the card has never run the game."""
         found = []
-        threading.Thread(target=lambda: found.append(gpu_names()), daemon=True).start()
+        threading.Thread(target=lambda: found.append((gpu_log_info(), gpu_names())), daemon=True).start()
 
         def done():
             if not found:
                 self.root.after(200, done)
                 return
-            names = found[0]
+            info, names = found[0]
             if not names:
                 return
             known = [name for name in names if gpu_tier(name)]
             name = max(known, key=lambda n: PRESET_ORDER.index(gpu_tier(n))) if known else names[0]
-            self.gpu_name, self.recommended = name, gpu_tier(name)
+            integrated = info.get("integrated") if info and info.get("name") == name else None
+            if integrated is None:
+                integrated = gpu_integrated(name)
+            self.gpu_name, self.gpu_is_integrated = name, integrated
+            self.recommended = "igpu" if integrated else gpu_tier(name)
             if self.config.get("gpu") != name:
                 self.config["gpu"] = name
                 write_config(self.config)
@@ -1922,11 +2000,15 @@ class Launcher:
         grid.pack(side="top", fill="x")
         self.preset_cards = {}
         gap = self.px(16)
-        card_w = (self.width - 2 * self.px(40) - 3 * gap) // 4
-        card_h = self.px(150)
+        # Five presets in 3 + 2: five in one row would squeeze the descriptions at this width.
+        columns = 3
+        card_w = (self.width - 2 * self.px(40) - (columns - 1) * gap) // columns
+        card_h = self.px(170)
         for i, name in enumerate(PRESET_ORDER):
+            row, column = divmod(i, columns)
             canvas = tk.Canvas(grid, width=card_w, height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
-            canvas.grid(row=0, column=i, padx=(0 if i == 0 else gap, 0))
+            canvas.grid(row=row, column=column, padx=(0 if column == 0 else gap, 0),
+                        pady=(0 if row == 0 else gap, 0), sticky="w")
             canvas.bind("<Button-1>", lambda e, n=name: self.apply_preset(n))
             canvas.bind("<Enter>", lambda e, n=name: self.draw_preset(n, hover=True))
             canvas.bind("<Leave>", lambda e, n=name: self.draw_preset(n))
@@ -1961,9 +2043,9 @@ class Launcher:
         for name in self.preset_cards:
             self.draw_preset(name)
         if self.recommended:
-            self.setup_intro.config(text=f"Recommended for your graphics card ({self.gpu_name}): "
-                                         f"{PRESETS[self.recommended]['title'].title()}. Every setting can still be "
-                                         "changed in Display and Performance.")
+            label = "iGPU" if self.recommended == "igpu" else PRESETS[self.recommended]["title"].title()
+            self.setup_intro.config(text=f"Recommended for your graphics card ({self.gpu_name}): {label}. "
+                                         "Every setting can still be changed in Display and Performance.")
         else:
             self.setup_intro.config(text="Pick a quality level. Every setting can still be changed in Display "
                                          "and Performance.")
@@ -1974,17 +2056,42 @@ class Launcher:
 
     def apply_preset(self, name):
         settings = self.game_settings()
-        settings["resolution"] = PRESETS[name]["resolution"]
-        settings["upscale"] = PRESETS[name]["upscale"]
+        resolution = PRESETS[name]["resolution"]
+        upscale = PRESETS[name]["upscale"]
+        values = preset_values(name)
+        if name == "igpu":
+            # One card for every integrated GPU: its class chooses how far below 1080p the game
+            # draws and the frame limit (measured: Vega and the 2-CU Radeon need 30 at 360p;
+            # Radeon 680M/780M and Iris Xe reach 60 at 540p; Radeon 880M/890M and Arc at 720p).
+            kind = igpu_class(self.gpu_name)
+            if kind == "weak":
+                upscale, values["fps_limit"] = "ultra", "30"
+            elif kind == "strong":
+                upscale = "quality"
+        settings["resolution"] = resolution
+        settings["upscale"] = upscale
         if "resolution" in self.widgets:
-            self.widgets["resolution"].set(settings["resolution"])
-        for key, value in preset_values(name).items():
+            self.widgets["resolution"].set(resolution)
+        for key, value in values.items():
             self.ini[key] = value
             widget = self.widgets.get(key)
             if isinstance(widget, Toggle):
                 widget.set(value == "1")
             elif isinstance(widget, Segmented):
                 widget.set(value)
+        if name == "igpu":
+            # The command thread is the limit on an integrated GPU, and multithreaded rendering
+            # takes part of it. Drake's Fortune keeps it off (its gun and camera misbehave with it).
+            settings["multithreaded"] = self.current_game()["key"] != "u1"
+            if isinstance(self.widgets.get("multithreaded"), Toggle):
+                self.widgets["multithreaded"].set(settings["multithreaded"])
+            settings["aa"] = "off"
+            # Part of what keeps an integrated GPU under 60 FPS is the command thread's per-fence
+            # bookkeeping (analysis/STATUS.md, 25 Oct 2026): batch it. Other presets keep the
+            # launcher default (off) until this has been measured on the integrated GPUs.
+            self.config["coalesce_fences"] = True
+            if isinstance(self.widgets.get("coalesce_fences"), Toggle):
+                self.widgets["coalesce_fences"].set(True)
         self.sync_sharpening()
         settings["preset"] = name
         write_config(self.config)
@@ -2150,6 +2257,16 @@ class Launcher:
             "in Uncharted 2 and 3 (on by default in Uncharted 3; keep Frames queued at 1 with it). "
             "Turn it off if a game hangs while loading. Drake's Fortune always runs without it.",
             multithreaded)
+
+        def batched_fences(parent):
+            return Toggle(parent, self.s, bool(self.config.get("coalesce_fences", False)),
+                          lambda v: self.change_config("coalesce_fences", v))
+        self.widgets["coalesce_fences"] = self.row(
+            page, "Batch GPU fences (experimental)",
+            "Multithreaded rendering makes the GPU thread hand over up to ~45,000 completion signals a "
+            "second in Uncharted 2; recording them in groups takes that bookkeeping off the CPU. Needs "
+            "Multithreaded rendering (Drake's Fortune never uses it). The IGPU preset turns it on; turn it "
+            "off if a game hangs or stutters.", batched_fences)
 
         def job_threads(parent):
             value = "off" if self.config.get("job_sleep", "auto") == "off" else "on"
@@ -3107,6 +3224,7 @@ class Launcher:
         env["UNCHARTED_DIAGNOSTICS"] = "1" if self.config.get("diagnostics", True) else "0"
         env["UNCHARTED_TORCH_FORWARD"] = "1" if self.config.get("torch_forward", True) else "0"
         env["UNCHARTED_JOB_SLEEP"] = "0" if self.config.get("job_sleep", "auto") == "off" else "1"
+        env["UNCHARTED_COALESCE_FENCES"] = "1" if self.config.get("coalesce_fences", False) else "0"
         env["UNCHARTED_LANGUAGE"] = str(self.config.get("language", "1"))
         env["UNCHARTED_SPEAKERS"] = str(self.config.get("speakers", "auto"))
         env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"

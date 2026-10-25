@@ -47,7 +47,9 @@ struct Values {
     /// Performance overlay (gow3_perf_stats.h): items shown, font size and background opacity
     /// in percent, corner (0 top left, 1 top right, 2 bottom left, 3 bottom right), layout
     /// (0 one line, 1 one item per line). menu_tab: the menu's last tab.
-    std::atomic<unsigned> overlay_items{7};
+    // 25 Oct 2026: FPS, frametime, GPU and CPU use with their temperatures, RAM (one line, top
+    // right) by default: the counter wanted on the launcher's Performance overlay panel.
+    std::atomic<unsigned> overlay_items{59};
     std::atomic<int> overlay_scale{100}, overlay_corner{1}, overlay_opacity{50}, overlay_layout{0};
     std::atomic<int> menu_tab{0};
     std::atomic<float> red_orb_multiplier{1.0f};

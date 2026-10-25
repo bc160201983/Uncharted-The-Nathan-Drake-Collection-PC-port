@@ -1764,3 +1764,74 @@ folder, the layout of #43/#29/#58/#73).
   chime, menu Trophies tab; label 1/2/3 = trophy01/02/03.trp, 54/53/59 trophies; names are in
   encrypted ESFM and the dump has no npbind.dat, so not shown). Tests: services-test (trophy
   logic), GOW3_TEST_TROPHY screenshots in all three games, audio dumps.
+
+## 25 October 2026: IGPU preset, and Phase 1 of the command-thread plan (coalesced fences)
+
+- **The performance counter's defaults changed** (`gow3_settings.h` `overlay_items` 7 -> 59,
+  `gow3_perf_stats.h` `DefaultItems`, launcher `INI_DEFAULTS`): FPS, frame time, GPU and CPU use
+  with temperatures, and RAM on one line, top right. RAM is again the system's memory in use
+  (`ullTotalPhys - ullAvailPhys`, what Task Manager calls "In use") rather than the game's working
+  set, which 0.6.0 had chosen; the Overlay tab's item says "RAM (system)" so the two readings
+  cannot be confused. The launcher's items stay the runtime's defaults until the game writes its
+  ini once (the two are kept equal, as in 51377ce).
+- **IGPU preset (launcher only).** Fifth Quick Setup card, picked automatically from the newest
+  `boot.log` (`GPU_Integrated: Yes`, else the card name: Radeon 610M-890M, Vega, "Radeon Graphics",
+  Iris Xe, UHD, integrated Arc). It writes an explicit settings set (1080p output, FSR 1, one frame
+  queued, VSync, background shaders, RCAS 75%, no AA) and tunes itself by class: weak (Vega,
+  2-CU Radeon) 640x360 at 30 FPS, mainstream (680M/780M, Iris Xe) 960x540 at 60, strong (880M/890M,
+  Arc) 1280x720 at 60. Multithreaded rendering is on for U2/U3 and stays off in U1 (U1's ray-cast
+  readback path is not MT-safe). The card is a settings preset: the 780M's 44-55 FPS at 1080p and
+  ~47 at 720p (18 Oct) become playable with the preset, not 60. Reaching 60 needs the command
+  thread work below; the card says so. Existing per-game settings are untouched until the card is
+  clicked. Cards are laid out 3 + 2 because five do not fit at 1180 px.
+- **Where the command thread's time goes** (U3 level, single-threaded recording, 18 Oct profile):
+  compute 54% (dispatch binding 28%, compute release fences 19% - of which the fence write,
+  interrupt and event wakeup are ~16% and waiting for deferred signals 7%), draws 30%,
+  BindBuffers/ObtainBuffer 24%, AMD driver ~10%. A 60 FPS frame needs ~91k draws/s on the command
+  thread; it does ~54k single-threaded and ~68k with the draw pipeline.
+- **Phase 1 item 1, deferred fences in batches (`GOW3_COALESCE_FENCES=1`, off by default,
+  unvalidated).** Each compute release (liverpool.cpp `RunComputeReleaseMem`) and end-of-pipe
+  fence on the draw recording thread was recorded on its own: `Gow3Copy::FlushBatch()`, one
+  `Record()`, one forced `KickRecording(true)`. Uncharted 2 hands over ~45k compute releases a
+  second, so that is ~45k chunk handoffs and copy-thread epochs. With the toggle,
+  `Scheduler::SignalAfterHostCopies` appends the signal to a thread-local batch and records it
+  with its neighbours:
+  - Every signal still runs in stream order, after every copy queued before the batch, and the
+    batch is conservative (an earlier fence now also waits for the copies of later fences in the
+    same batch - never the reverse).
+  - `Scheduler::WaitDeferredSignals` and `Scheduler::SyncRecording` record the calling thread's
+    batch first: `deferred_signals_issued` counts fences when they are queued, so a wait that did
+    not record them would wait for a command that does not exist yet. `SyncRecording` also has to
+    flush before `CommandBuffer()` starts recording directly, or a later direct command would
+    overtake the batched fences.
+  - The batch is thread-local: the GPU command thread (stage A) and the draw recording thread
+    (stage B) never share one. With the draw pipeline only stage B queues signals, so the wait
+    paths above always see the right list.
+  - The draw pipeline records the batch when it runs dry: `DrawPipe::FlushIfCaughtUp` calls the
+    new `FlushHandler` when `published == at`, *before* it publishes `consumed`. Stage A's
+    `Drain()` returns when `consumed` reaches `head`, so after a drain every fence the drained
+    packets queued is recorded - which is what makes the stage A callers of `WaitDeferredSignals`
+    (liverpool.cpp: non-pipelined opcodes, after `DrainDrawPipe`) safe. The `DrawPipe` constructor
+    takes the hook; `Rasterizer::FlushDrawPipeSignals` forwards to
+    `Scheduler::FlushDeferredSignals`.
+  - A batch of 64 records itself (~1.5 ms at 45k/s, below a frame), so fences cannot be held
+    behind a long stream of draws. `Gow3Toggle::CoalescedFences` (bit 56) turns the batching off
+    at runtime through `GOW3_TOGGLE_FILE`; without the environment variable the old per-fence path
+    runs unchanged.
+  - **The launcher exposes it**: Performance has "Batch GPU fences (experimental)", stored as
+    `coalesce_fences` in `launcher.json` and passed as `UNCHARTED_COALESCE_FENCES`, which
+    tools/probe_uncharted.py turns into `GOW3_COALESCE_FENCES=1` (an explicit `GOW3_*` value still
+    wins). It is off for every existing player and every other preset; clicking **IGPU** turns it
+    on, since that is the card whose 60 FPS target depends on this work. Turning it off afterwards
+    keeps the IGPU settings.
+  - What it saves: the record, the chunk handoff, the copy-thread epoch and the copy pool's mutex
+    per fence. It does **not** reduce the fence write, the interrupt or the event-queue wakeup
+    (~16% of the command thread), which need interrupt coalescing or a cheaper `IrqC::SignalAsync`
+    - the next Phase 1 step.
+- **How to validate it** (needs the desktop Radeon iGPU or an Intel laptop; this machine is a
+  Ryzen 7 7435HS + RTX 4060 Laptop, no integrated GPU): U3 Cartagena with multithreaded
+  rendering, `GOW3_COALESCE_FENCES=1` (or the Performance toggle / the IGPU card, which turns it
+  on), median 60 FPS at 720p/900p and draws/s +40% against the
+  same build with the variable unset; 30-minute soak for the `m_gfxEopTick` / floating-NPC class
+  of ordering bug; U2 NPCs and the U1 title as regression. The RTX 4060 can show the record/kick
+  saving on the command thread even though it is not GPU-bound.

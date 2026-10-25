@@ -36,8 +36,9 @@ int main() {
     s.ram_total_gb = 31.9;
     s.vram_used_gb = 5.4;
     s.vram_total_gb = 12.0;
-    assert(P::Format(s, P::DefaultItems, true) == "238 FPS   4.2 ms   FSR 3.1");
     // The card shows as "GPU" and its use carries the temperature (24 Oct 2026).
+    assert(P::Format(s, P::DefaultItems, true) ==
+           "238 FPS   4.2 ms   GPU 87% 61\xc2\xb0" "C   CPU 34% 64\xc2\xb0" "C   RAM 6.1 GB");
     assert(P::Format(s, P::AllItems, false) ==
            "238 FPS\n4.2 ms\nFSR 3.1\nGPU 87% 61\xc2\xb0" "C\nCPU 34% 64\xc2\xb0" "C\nRAM 6.1 GB\n"
            "VRAM 5.4 / 12.0 GB");

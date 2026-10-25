@@ -341,13 +341,12 @@ void Run(const Vulkan::Instance* instance) {
             last_process = process;
             last_wall = wall;
         }
-        // The game's own memory (its working set), not the whole system's (24 Oct 2026).
-        PROCESS_MEMORY_COUNTERS memory{};
-        if (K32GetProcessMemoryInfo(GetCurrentProcess(), &memory, sizeof(memory))) {
-            s.ram_used_gb = double(memory.WorkingSetSize) / GiB;
-        }
+        // The system's memory, not the game's working set: what Task Manager calls "In use"
+        // (total minus what Windows can still hand out), which is what a player expects from
+        // a RAM readout (25 Oct 2026).
         MEMORYSTATUSEX system{.dwLength = sizeof(MEMORYSTATUSEX)};
         if (GlobalMemoryStatusEx(&system)) {
+            s.ram_used_gb = double(system.ullTotalPhys - system.ullAvailPhys) / GiB;
             s.ram_total_gb = double(system.ullTotalPhys) / GiB;
         }
         if (instance->CanReportMemoryUsage()) {
