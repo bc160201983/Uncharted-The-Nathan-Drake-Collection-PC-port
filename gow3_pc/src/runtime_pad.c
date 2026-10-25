@@ -119,7 +119,15 @@ static void play_click(PadData *d) {
 }
 
 static void apply_light_bar(SDL_Gamepad *g);
-/* Opens the first gamepad SDL knows about; called under lock. */
+/* GOW3_PAD_INDEX=<n> (gow3 25 Oct 2026, local co-op: two game windows on one PC, one controller
+ * each): this game reads only the n-th controller SDL lists (1 = the first), none while fewer are
+ * connected; window.cpp then lets controller input in without the focus. Unset: the first one. */
+static int pad_index(void) {
+    static int index=-1;
+    if (index<0) { const char *e=getenv("GOW3_PAD_INDEX"); index=e && atoi(e)>0 ? atoi(e) : 0; }
+    return index;
+}
+/* Opens the first gamepad SDL knows about (or the GOW3_PAD_INDEX-th); called under lock. */
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
@@ -127,12 +135,17 @@ static SDL_Gamepad *current_gamepad(void) {
     if (!gamepad) {
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        if (ids && count>0) {
-            gamepad=SDL_OpenGamepad(ids[0]);
+        const int want=pad_index() ? pad_index()-1 : 0;
+        if (ids && count>want) {
+            gamepad=SDL_OpenGamepad(ids[want]);
             if (gamepad) {
-                ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad));
+                ++connected_count; printf("Runtime: gamepad connected: %s%s\n",SDL_GetGamepadName(gamepad),
+                                          pad_index() ? " (GOW3_PAD_INDEX)" : "");
                 apply_light_bar(gamepad);
             }
+        } else if (pad_index()) {
+            static int told=-1;
+            if (told!=count) { told=count; printf("Runtime: GOW3_PAD_INDEX=%d: %d controller(s) connected, waiting\n",pad_index(),count); fflush(stdout); }
         }
         SDL_free(ids);
     }
@@ -527,7 +540,11 @@ static int sample_mouse(PadData *d) {
     const unsigned calls=gow3gpu_mouse_look_calls();
     history=((history<<1)|(calls!=seen_calls ? 1u : 0u))&15u;
     seen_calls=calls;
-    const int direct=!aiming && history==15u;
+    /* gow3 24 Oct 2026: while aiming only the aim cameras' hooks count (Uncharted 2 and 3, see
+     * runtime_mouselook.c; the follow hooks neither take nor count then), so direct while aiming
+     * means an aim hook took the mouse at every pad read. Without one (Uncharted 1, the hook off, the
+     * game putting the direction back while it zooms in) the mouse is the stick, as before. */
+    const int direct=history==15u;
     gow3gpu_mouse_look_pause(!direct);
     if (mouse_look_debug()) {
         static uint64_t debug_last; static unsigned reads, direct_reads;
@@ -843,7 +860,10 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (!param) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
-    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    /* gow3 24 Oct 2026 (GitHub #166): Controls -> Controller vibration off stops every rumble
+     * (a zero rumble also ends one that was running when the option was turned off). */
+    const int on=gow3gpu_controls_vibration();
+    if (g) SDL_RumbleGamepad(g,on ? (uint16_t)(param[0]*257) : 0,on ? (uint16_t)(param[1]*257) : 0,1000);
     pthread_mutex_unlock(&lock);
     return 0;
 }

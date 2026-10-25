@@ -4,6 +4,89 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 25 October 2026 (0.6.2)
+
+- **The launcher did not open after updating to 0.6.1** (#208): the launcher's new network search
+  for the coming Uncharted 2 multiplayer is in a separate file, `launcher/net_lan.py`, which the
+  launcher loaded at start. The package build copied only the launcher's two older files, so 0.6.1
+  shipped without it and the launcher stopped before its window appeared. The package now copies
+  every launcher file, and the launcher opens even when that optional file is missing.
+
+## 25 October 2026 (0.6.1)
+
+- **Fewer random crashes in all three games** (crashes like "execute access to 0" or a sudden
+  close to the desktop, possibly also #205): the games' PS4 code keeps some values in the 128
+  bytes just below the stack pointer, a space the PS4's calling rules leave alone. Windows does
+  not: when it handles a page fault (the port uses them to track memory the GPU writes) it builds
+  its exception record right there and can overwrite those values. We had fixed two such routines
+  by hand (the shader constant tables in 0.4.1, the particle grouping in 0.6.0). Now the port finds
+  every routine that keeps values below the stack when a game starts (162 in Drake's Fortune, 144
+  in Uncharted 2, 153 in Uncharted 3) and runs each of their memory accesses that can fault with
+  the stack moved out of the way first. In a test that overwrites that space after every fault,
+  as Windows 10 does, the games now run instead of crashing at start, and the frame rate is
+  unchanged (Uncharted 2 uncapped: 96.6 vs 96.8 FPS). GOW3_RED_ZONE=0 turns it off.
+- **Drake's Fortune: mouse aiming without the "stick" feel** (#190): the aim camera's remembered
+  direction is now turned directly by the mouse, as in Uncharted 2 and 3 since 0.6.0: the same
+  movement turns the same angle, slow or fast (about 260 degrees for a fast swipe in our test, as
+  in Uncharted 2), with no speed cap and no acceleration. The game makes new aim cameras during
+  one press (after a roll), and each gets every mouse turn exactly once.
+- **RivaTuner's on-screen display flickered** (#127, #128): since 0.5.0 the game presents its frames
+  on a queue of its own, and RivaTuner missed some of them (its overlay was missing from 5 of 60
+  captures in Uncharted 3 with DLSS at a 120 FPS limit). With RivaTuner running, frames are
+  presented on the graphics queue again (60 of 60).
+- **Uncharted 2 ultrawide: shadows at the sides of the screen** came and went as the camera turned
+  at 21:9 and 32:9: the sun, rain and lamp shadows decided what casts a shadow with the 16:9 view.
+  They now use the full width (thanks to Ferosnow95, #192).
+
+## 24 October 2026 (0.6.0)
+
+- **Uncharted 3 too bright in sunny areas** (#140): the glow around bright light (bloom) was
+  drawn into a separate image the game never read, so the final picture used stale data from
+  memory instead, a haze that washed out sunlit places like Cartagena and the Chateau. The bloom
+  now goes into the right texture and shows as a soft glow.
+- **Mouse aiming and camera without the "stick" feel** (#190, #86, #141, #158, #170): aiming in
+  Uncharted 2 and 3, and the camera in Drake's Fortune, now turn directly from the mouse instead
+  of through an emulated right stick, which had a speed cap and a ramp that felt like
+  acceleration. The same mouse movement now turns the same angle, slow or fast (about 63 degrees
+  per 1,000 counts at sensitivity 1). Windows' pointer acceleration is kept out, and the
+  sensitivity goes up to 5x in the launcher (10x in the in-game menu).
+- **Uncharted 2: the most common crash, "read access to 0 at guest offset 0xd09665"** (#61 #113
+  #115 #164 #181 #187; often around trains, where particle effects are heavy): a particle routine
+  kept two loop values just below the stack pointer. When Windows handled a page fault in the
+  middle of it, it wrote over one of them, and the loop read one entry past the end of its list.
+  The routine now takes those values from registers it never changes (a 10-byte patch, also in
+  Uncharted 1 and 3, which share the routine).
+- **Save profiles** (#66): launcher Advanced -> Save profile gives each game three separate
+  save profiles, each with its own progress and in-game settings, like separate PS4 users.
+  Profile 1 holds the saves from earlier versions; switching never moves or deletes a save.
+- **Controller vibration on/off** (#166): launcher Controls and the in-game Controls tab.
+- **Games that stopped at start with update 1.02 in a separate folder** ("files.json -> not
+  found", "ASSERTION: root"; #43 #73 #139 #151 #153 #165 and others): where Windows allows
+  symbolic links (Developer Mode, a launcher run as administrator), the game read the update's
+  linked archives as empty files. The port now reads a linked file's real size, and the update
+  folder links files as hard links first.
+- **Updating keeps your own files** (#134): files you put into the port's folders (ReShade,
+  notes, a game folder) are no longer removed by the launcher's update.
+- **The update download continues after a stall** (#150) instead of failing.
+- **Mouse side buttons can be bound in the launcher** (#152).
+- A crash message now says when the game is version 1.00 without update 1.02.
+- Device-lost crash logs now include the graphics driver's fault report.
+- **Half the RAM and faster shader loading** (#186): the port no longer saves "pipeline binaries"
+  (about 2 MB for each of thousands of shader pipelines). Each pipeline loaded from one kept its
+  2 MB in memory: Uncharted 2 used 15.5 GB of RAM with them and 7.0 GB without, and shader
+  loading at the start took 40 s instead of about 10 s. The graphics driver's own shader cache
+  does the same job. The old folder (up to 20 GB) is deleted at the first start.
+- **Multi-second shader-compile freezes that 0.5.0 still had** (#144, #132, #142, #117): one
+  effect shader still built a new version for every broken buffer slot whose address is 0 or
+  whose size wraps to 0. Those slots now count as empty, as they are drawn.
+- **Uncharted 2: crash on a garbage texture with an unknown format** (#144, "pixel_format.cpp
+  NumBitsPerBlock"): such textures are now skipped like other broken ones.
+- **Temperatures in the performance counter** (#178, thanks to memeguyoffical): the graphics
+  card's temperature (NVIDIA, from its driver) and the processor's where Windows reports one,
+  next to their use. RAM shows the game's own memory.
+- **The performance counter's settings in the launcher** (#179, thanks to memeguyoffical):
+  Display tab, what it shows, its corner, layout, size and background.
+
 ## 21 October 2026 (0.5.0)
 
 - **Wrong-looking surfaces from a damaged shader cache are repaired**: in Uncharted 3's museum the

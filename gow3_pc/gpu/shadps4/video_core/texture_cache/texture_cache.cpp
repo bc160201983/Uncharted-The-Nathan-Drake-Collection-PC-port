@@ -32,6 +32,51 @@ namespace VideoCore {
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
 
+// gow3 24 Oct 2026 (GitHub #140): GOW3_MIP_TRACE=1 logs, once per image and case (400 at most),
+// single-level images inside a mip chain that are not taken as one of its mips (with the chain's
+// layout), and with GOW3_MIP_TARGETS=1 the render targets moved into a mip and the mips kept over a
+// later chance overlap.
+static bool MipTraceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_MIP_TRACE");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+static void TraceMip(const char* what, const ImageInfo& image, const ImageInfo& chain, s32 mip,
+                     s32 slice) {
+    {
+        static std::mutex trace_mutex;
+        static std::unordered_set<u64> seen;
+        const u64 key = reinterpret_cast<u64>(what) ^ image.guest_address * 31 ^
+                        u64{image.size.width} << 48 ^ u64{image.size.height} << 32 ^
+                        chain.guest_address * 0x9E3779B97F4A7C15ull;
+        std::scoped_lock lock{trace_mutex};
+        if (seen.size() >= 400 || !seen.insert(key).second) {
+            return;
+        }
+    }
+    char layout[384] = {};
+    size_t used = 0;
+    for (u32 m = 0; m < chain.resources.levels && m < 7 && used + 48 < sizeof(layout); ++m) {
+        const auto& level = chain.mips_layout[m];
+        const int n = std::snprintf(layout + used, sizeof(layout) - used,
+                                    " [%u +%#x pitch %u size %#x]", m, level.offset, level.pitch,
+                                    level.size);
+        used += n > 0 ? size_t(n) : 0;
+    }
+    std::printf("Mip trace: %s: %#llx %ux%u %s pitch %u tile %u layers %u bytes %#x; chain %#llx "
+                "%ux%u pitch %u tile %u pow2 %u levels %u layers %u; mip %d slice %d;%s\n",
+                what, static_cast<unsigned long long>(image.guest_address), image.size.width,
+                image.size.height, vk::to_string(image.pixel_format).c_str(), image.pitch,
+                u32(image.tile_mode), image.resources.layers, image.guest_size,
+                static_cast<unsigned long long>(chain.guest_address), chain.size.width,
+                chain.size.height, chain.pitch, u32(chain.tile_mode), u32(chain.props.is_pow2),
+                chain.resources.levels, chain.resources.layers, mip, slice, layout);
+    std::fflush(stdout);
+}
+
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                            Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
                            BufferCache& buffer_cache_, PageManager& tracker_)
@@ -43,6 +88,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     std::printf("GPU: deferred image readback %s (64 copies, 64 MiB pending limit)%s\n",
                 deferred_readbacks ? "enabled" : "disabled",
                 stale_readbacks ? "; CPU reads use the previous frame's copy" : "");
+    if (ImageInfo::MipTargetsEnabled()) {
+        std::printf("GPU: render targets at a mip of a larger image draw into that mip "
+                    "(GOW3_MIP_TARGETS)\n");
+    }
 
     u32 max_samplers = instance.GetMaxSamplerAllocationCount();
     trigger_gc_samplers = max_samplers * 3 / 4;
@@ -927,6 +976,13 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                 return {cache_image_id, mip, slice};
             }
         }
+        // gow3 24 Oct 2026 (GitHub #140): GOW3_MIP_TRACE=1.
+        if (MipTraceEnabled() && image_info.resources.levels == 1 &&
+            cache_image.info.resources.levels > 1 && image_info.IsCompatible(cache_image.info)) {
+            const s32 mip = image_info.MipOf(cache_image.info);
+            TraceMip("not a mip of its chain", image_info, cache_image.info, mip,
+                     mip >= 0 ? image_info.SliceOf(cache_image.info, mip) : -1);
+        }
 
         // Image isn't a subresource but a chance overlap.
         if (safe_to_delete) {
@@ -936,6 +992,16 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         return {{}, -1, -1};
     } else {
         // Left overlap, the image from cache is a possible subresource of the image requested
+        // gow3 24 Oct 2026 (GitHub #140): GOW3_MIP_TRACE=1 (here: the image may be freed below).
+        if (MipTraceEnabled() && cache_image.info.resources.levels == 1 &&
+            image_info.resources.levels > 1 && cache_image.info.IsCompatible(image_info)) {
+            const s32 mip = cache_image.info.MipOf(image_info);
+            const s32 slice = mip >= 0 ? cache_image.info.SliceOf(image_info, mip) : -1;
+            if (slice < 0) {
+                TraceMip("inside a new chain, not a mip of it", cache_image.info, image_info, mip,
+                         slice);
+            }
+        }
         if (auto mip = cache_image.info.MipOf(image_info); mip >= 0) {
             if (auto slice = cache_image.info.SliceOf(image_info, mip); slice >= 0) {
                 // We have a larger image created and a separate one, representing a subres of it
@@ -1057,8 +1123,63 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // Try to resolve overlaps (if any)
     int view_mip{-1};
     int view_slice{-1};
-    if (!image_id) {
+    // gow3 24 Oct 2026 (GitHub #140, GOW3_MIP_TARGETS=1): a render target that already has an
+    // image of its own (made before MipOf took such targets) while it is exactly one mip of a
+    // larger image goes into that mip: its contents are copied there and it is dropped, so this
+    // draw and the later ones write the mip the game's shaders sample (Uncharted 3 bloom mip 1).
+    // Tiny targets keep their own image (QueueTinyReadback copies it back for the CPU); a chain
+    // with pending uploads is taken at a later draw, once its next use has refreshed it.
+    if (image_id && desc.type == BindingType::RenderTarget && info.resources.levels == 1 &&
+        (ImageInfo::MipTargetsEnabled() || MipTraceEnabled())) {
         for (const auto& cache_id : image_ids) {
+            Image& chain = slot_images[cache_id];
+            if (cache_id == image_id || chain.info.resources.levels <= 1 ||
+                chain.info.guest_address > info.guest_address || !info.IsCompatible(chain.info) ||
+                (exact_fmt && chain.info.pixel_format != info.pixel_format)) {
+                continue;
+            }
+            const s32 mip = info.MipOf(chain.info);
+            const s32 slice = mip >= 0 ? info.SliceOf(chain.info, mip) : -1;
+            if (slice < 0 || !ImageInfo::MipTargetsEnabled()) {
+                if (MipTraceEnabled()) {
+                    TraceMip(slice < 0 ? "target with an image of its own, not a mip of"
+                                       : "target with an image of its own, at a mip of",
+                             info, chain.info, mip, slice);
+                }
+                continue;
+            }
+            Image& target = slot_images[image_id];
+            if (IsTinyReadbackImage(target) || True(chain.flags & ImageFlagBits::Dirty)) {
+                break;
+            }
+            const bool copy = target.SafeToDownload();
+            if (copy) {
+                runtime.CopyMip(&target, &chain, mip, slice);
+            }
+            if (target.binding.is_bound || target.binding.is_target) {
+                target.binding.needs_rebind = 1u;
+            }
+            if (MipTraceEnabled()) {
+                TraceMip(copy ? "target moved (contents copied) into" : "target moved into", info,
+                         chain.info, mip, slice);
+            }
+            FreeImage(image_id);
+            image_id = cache_id;
+            view_mip = mip;
+            view_slice = slice;
+            break;
+        }
+    }
+    if (!image_id) {
+        // gow3 24 Oct 2026 (GitHub #140, GOW3_MIP_TARGETS=1): a later image that only overlaps by
+        // chance leaves the image found as it is, without a view, and that reset the mip found
+        // before: the target was drawn into the corner of mip 0 (Uncharted 3: a 512x512 light
+        // table at 0x1145620000 shares memory with bloom mips 1 and 2). That mip is kept now.
+        const bool keep_view = ImageInfo::MipTargetsEnabled();
+        for (const auto& cache_id : image_ids) {
+            const ImageId found_id = image_id;
+            const int found_mip = view_mip;
+            const int found_slice = view_slice;
             view_mip = -1;
             view_slice = -1;
 
@@ -1069,6 +1190,15 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                 image_id = overlap_image_id;
                 view_mip = overlap_view_mip;
                 view_slice = overlap_view_slice;
+            }
+            if (keep_view && found_id && image_id == found_id && view_mip < 0 &&
+                view_slice < 0 && (found_mip > 0 || found_slice > 0)) {
+                view_mip = found_mip;
+                view_slice = found_slice;
+                if (MipTraceEnabled()) {
+                    TraceMip("mip kept over a chance overlap, in", info,
+                             slot_images[image_id].info, view_mip, view_slice);
+                }
             }
         }
     }
@@ -1083,6 +1213,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             FreeImage(image_id);
             image_id = {};
             LOG_WARNING(Render_Vulkan, "Image overlap resolve failed");
+        }
+        // gow3 24 Oct 2026: the new image made below has no mip or slice of the one dropped here.
+        if (!image_id) {
+            view_mip = -1;
+            view_slice = -1;
         }
     }
     // Create and register a new image

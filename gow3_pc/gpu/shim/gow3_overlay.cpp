@@ -554,8 +554,9 @@ void OverlayTab() {
     ImGui::SeparatorText("What to show");
     if (ImGui::BeginTable("##overlay_items", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableNextColumn();
-        static const char* const names[] = {"FPS", "Frametime", "Upscaler", "GPU (name and use)", "CPU (game)",
-                                            "RAM (game / total)", "VRAM (used / available)"};
+        static const char* const names[] = {"FPS", "Frametime", "Upscaler", "GPU (use and temperature)",
+                                            "CPU (game use and temperature)", "RAM (game)",
+                                            "VRAM (used / available)"};
         for (unsigned item = 0; item < 7; ++item) {
             const unsigned bit = 1u << item;
             bool on = (s.overlay_items & bit) != 0;
@@ -817,6 +818,7 @@ void ResetControls() {
     s.mouse_sens = 1.0f;
     s.mouse_invert = false;
     s.mouse_invert_x = false;
+    s.vibration = true;
     s.mouse_aim_sens = 1.0f;
     s.mouse_vertical = 1.0f;
     s.prompts = -1;
@@ -1076,7 +1078,7 @@ void ControlsTab() {
         Help("The mouse turns the camera and presses its buttons' actions. Off: the mouse is left alone.");
         ImGui::PopID();
         ImGui::BeginDisabled(!s.mouse);
-        changed |= PercentRow("Mouse sensitivity", s.mouse_sens, 25, 500, "How far the camera turns per mouse movement.");
+        changed |= PercentRow("Mouse sensitivity", s.mouse_sens, 25, 1000, "How far the camera turns per mouse movement.");
         changed |= PercentRow("Mouse aim sensitivity", s.mouse_aim_sens, 25, 1000,
                               "While aiming (the aim button held): the mouse sensitivity times this. Below 100% "
                               "makes aiming finer.");
@@ -1099,6 +1101,14 @@ void ControlsTab() {
         Help("Moving the mouse left turns right.");
         ImGui::PopID();
         ImGui::EndDisabled();
+        Row("Controller vibration");
+        bool vibration = s.vibration;
+        if (ImGui::Checkbox("##value", &vibration)) {
+            s.vibration = vibration;
+            changed = true;
+        }
+        Help("Off: the controller never rumbles.");
+        ImGui::PopID();
         static const char* const icon_labels[] = {"Auto (the device you use)", "Keyboard and mouse", "PlayStation",
                                                   "Xbox"};
         static const int icon_values[] = {-1, 1, 0, 2};

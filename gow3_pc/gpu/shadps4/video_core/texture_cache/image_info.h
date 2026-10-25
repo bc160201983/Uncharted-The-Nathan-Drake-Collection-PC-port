@@ -55,6 +55,12 @@ struct ImageInfo {
     s32 MipOf(const ImageInfo& info) const;
     s32 SliceOf(const ImageInfo& info, s32 mip) const;
 
+    /// gow3 24 Oct 2026 (GitHub #140): GOW3_MIP_TARGETS=1 (tools/probe_uncharted.py turns it on
+    /// for Uncharted 3). A single-layer image starting exactly at a mip of a larger image is that
+    /// mip also when its pitch is wider or its size does not divide the padded mip (MipOf,
+    /// SliceOf), and TextureCache::FindImage draws such render targets into that mip.
+    static bool MipTargetsEnabled();
+
     bool IsCompatible(const ImageInfo& info) const;
     void UpdateSize();
 

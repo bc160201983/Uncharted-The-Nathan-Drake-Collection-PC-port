@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // gow3: numbers for the performance overlay (gow3_overlay.cpp). A thread started once samples
-// CPU, RAM, GPU use (Windows counters) and VRAM (VK_EXT_memory_budget) once a second while the
-// overlay shows one of them (20 Oct 2026; GOW3_PERF_SAMPLER_PAUSE=0: twice a second, always);
-// a value that cannot be measured stays negative and shows as "n/a".
+// CPU, RAM, GPU use and their temperatures (Windows counters, NVIDIA's driver) and VRAM
+// (VK_EXT_memory_budget) once a second while the overlay shows one of them (20 Oct 2026;
+// GOW3_PERF_SAMPLER_PAUSE=0: twice a second, always); a value that cannot be measured stays
+// negative and shows as "n/a".
+//
+// 24 Oct 2026: GPU and CPU temperatures next to their use (nvml.dll for the graphics card, the
+// ACPI thermal zone for the processor), and the graphics card shows as "GPU" instead of its
+// full name so the counter fits one line.
+//
+// 24 Oct 2026: RAM is the game's own memory (its working set), shown without the system's total
+// ("RAM 6.1 GB") so the line stays short.
 
 #pragma once
 
@@ -35,6 +43,8 @@ struct Sample {
     std::string upscaler;
     std::string gpu_name;
     float gpu_percent = -1.0f, cpu_percent = -1.0f;
+    float gpu_temp_c = -1.0f, cpu_temp_c = -1.0f;
+    // RAM is the whole system (not this process); VRAM is the card's memory budget.
     double ram_used_gb = -1.0, ram_total_gb = -1.0, vram_used_gb = -1.0, vram_total_gb = -1.0;
 };
 
@@ -65,6 +75,8 @@ inline std::string Format(const Sample& s, unsigned mask, bool row) {
             std::snprintf(to, size, "%s %.1f / %.1f GB", label, used, total);
         }
     };
+    // "°C" as UTF-8; the overlay's DejaVu Sans font has it.
+    constexpr const char* degree = "\xc2\xb0" "C";
     if (mask & Fps) {
         std::snprintf(part, sizeof(part), "%.0f FPS", s.fps);
         add();
@@ -77,25 +89,30 @@ inline std::string Format(const Sample& s, unsigned mask, bool row) {
         std::snprintf(part, sizeof(part), "%s", s.upscaler.empty() ? "Native" : s.upscaler.c_str());
         add();
     }
+    // The card's name is not shown (24 Oct 2026): "GPU" keeps the one-line counter short.
     if (mask & Gpu) {
-        const char* name = s.gpu_name.empty() ? "GPU" : s.gpu_name.c_str();
         if (s.gpu_percent < 0.0f) {
-            std::snprintf(part, sizeof(part), "%s n/a", name);
+            std::snprintf(part, sizeof(part), "GPU n/a");
+        } else if (s.gpu_temp_c < 0.0f) {
+            std::snprintf(part, sizeof(part), "GPU %.0f%%", s.gpu_percent);
         } else {
-            std::snprintf(part, sizeof(part), "%s %.0f%%", name, s.gpu_percent);
+            std::snprintf(part, sizeof(part), "GPU %.0f%% %.0f%s", s.gpu_percent, s.gpu_temp_c, degree);
         }
         add();
     }
     if (mask & Cpu) {
         if (s.cpu_percent < 0.0f) {
             std::snprintf(part, sizeof(part), "CPU n/a");
-        } else {
+        } else if (s.cpu_temp_c < 0.0f) {
             std::snprintf(part, sizeof(part), "CPU %.0f%%", s.cpu_percent);
+        } else {
+            std::snprintf(part, sizeof(part), "CPU %.0f%% %.0f%s", s.cpu_percent, s.cpu_temp_c, degree);
         }
         add();
     }
     if (mask & Ram) {
-        pair(part, sizeof(part), "RAM", s.ram_used_gb, s.ram_total_gb);
+        // The system's RAM in use, without the total (24 Oct 2026).
+        pair(part, sizeof(part), "RAM", s.ram_used_gb, -1.0);
         add();
     }
     if (mask & Vram) {
@@ -108,7 +125,8 @@ inline std::string Format(const Sample& s, unsigned mask, bool row) {
 /// Starts the sampling thread the first time. Every call also keeps it sampling: it sleeps
 /// once no call came for 2 s (the overlay calls it on each frame that shows a sampled item).
 void Start(const Vulkan::Instance& instance);
-/// The latest CPU, RAM, GPU and VRAM values (the caller fills FPS, frametime and upscaler).
+/// The latest CPU, RAM, GPU and VRAM values, with their temperatures (the caller fills FPS,
+/// frametime and upscaler).
 Sample Latest();
 
 } // namespace Gow3PerfStats

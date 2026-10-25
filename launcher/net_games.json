@@ -1,0 +1,23 @@
+{
+ "note": "Net games the launcher's Multiplayer page offers (Map and mode). index = the game's *net-games* entry (dc1/ps4/net.bin); only entries with complete = true are listed. The runtime picks each game's settings itself from the index (runtime_coop_mp.c, at netinit), so host and joiners need nothing else. Full table and test notes: analysis/triage-1022/coop-work/net-games.json.",
+ "games": [
+  {
+   "index": 114,
+   "map": "The Village",
+   "mode": "Co-op",
+   "kind": "coop",
+   "players": "2-3",
+   "complete": true,
+   "tested": "25 Oct: pair over LAN reaches Playing, both players see each other (runs vis14, L2, f1)"
+  },
+  {
+   "index": 124,
+   "map": "Fort",
+   "mode": "Deathmatch",
+   "kind": "competitive",
+   "players": "1-10",
+   "complete": true,
+   "tested": "25 Oct: pair over LAN reaches Playing on the Fort with the runtime's own settings (runs f2-f4); characters per player (f4)"
+  }
+ ]
+}

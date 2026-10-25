@@ -830,6 +830,26 @@ bool PlausibleTSharp(const AmdGpu::Image& tsharp) {
     if (!tsharp.Valid() || tsharp.tiling_index > 26 || tsharp.last_level < tsharp.base_level) {
         return false; // 27-30 reserved, 31 (linear general) unhandled
     }
+    // gow3 24 Oct 2026 (GitHub #144, Uncharted 2, RTX 4090): data formats above BC7 (FMask and
+    // packed formats 44-63) have no entry in the size tables; a garbage T# with format 63 and
+    // number format 7 stopped the game in ImageInfo (pixel_format.cpp NumBitsPerBlock). No texture
+    // the games sample uses them (real FMask reads become FMaskResource, never stage.images).
+    // GOW3_TSHARP_FORMAT_CHECK=0 (tests): without these two checks.
+    static const bool format_check = [] {
+        const char* env = std::getenv("GOW3_TSHARP_FORMAT_CHECK");
+        return !(env && env[0] == '0');
+    }();
+    if (format_check && u32(tsharp.data_format) > u32(AmdGpu::DataFormat::FormatBc7)) {
+        return false;
+    }
+    // MSAA types keep log2(samples) in last_level: more than 8 samples stops the macro-tile size
+    // code (tile.h GetMacroTileExtents, ASSERT(num_samples <= 8)).
+    const auto type = static_cast<AmdGpu::ImageType>(u64(tsharp.type));
+    if (format_check &&
+        (type == AmdGpu::ImageType::Color2DMsaa || type == AmdGpu::ImageType::Color2DMsaaArray) &&
+        tsharp.last_level > 3) {
+        return false;
+    }
     for (const u32 swizzle : {u32(tsharp.dst_sel_x), u32(tsharp.dst_sel_y),
                               u32(tsharp.dst_sel_z), u32(tsharp.dst_sel_w)}) {
         if (swizzle == 2 || swizzle == 3) {
@@ -884,10 +904,15 @@ bool PlausibleTarget(const VideoCore::ImageInfo& info, u32 max_layers, const cha
 /// the first texture bind, the next <count> T#s (default 600) become the garbage one that stopped
 /// Uncharted 2 on a laptop (BC2, number format 13, a macro-tiled mode; image_info.cpp UpdateSize
 /// asserted), to check that such a T# is dropped. Off by default.
+/// 24 Oct 2026: a third field picks another garbage kind: fmt<N> = data format N with number
+/// format 7 (fmt63 stopped Uncharted 2 in NumBitsPerBlock, GitHub #144), msaa16 = an MSAA image
+/// of 16 samples (tile.h GetMacroTileExtents asserts above 8).
 void TestGarbageTSharp(AmdGpu::Image& tsharp) {
     struct Params {
         double delay_s = -1.0;
         u32 count = 600;
+        int format = -1;
+        bool msaa16 = false;
     };
     static const Params params = [] {
         Params p;
@@ -895,6 +920,13 @@ void TestGarbageTSharp(AmdGpu::Image& tsharp) {
             p.delay_s = std::atof(env);
             if (const char* comma = std::strchr(env, ',')) {
                 p.count = static_cast<u32>(std::strtoul(comma + 1, nullptr, 10));
+                if (const char* mode = std::strchr(comma + 1, ',')) {
+                    if (std::strncmp(mode + 1, "fmt", 3) == 0) {
+                        p.format = static_cast<int>(std::strtol(mode + 4, nullptr, 10));
+                    } else if (std::strcmp(mode + 1, "msaa16") == 0) {
+                        p.msaa16 = true;
+                    }
+                }
             }
         }
         return p;
@@ -909,18 +941,33 @@ void TestGarbageTSharp(AmdGpu::Image& tsharp) {
         injected.load(std::memory_order_relaxed) >= params.count) {
         return;
     }
-    tsharp.data_format = u64(AmdGpu::DataFormat::FormatBc2);
-    tsharp.num_format = 13;
-    for (u32 index = 0; index <= 26; ++index) {
-        tsharp.tiling_index = index;
-        if (AmdGpu::IsMacroTiled(AmdGpu::GetArrayMode(tsharp.GetTileMode()))) {
-            break;
+    if (params.format >= 0) {
+        tsharp.data_format = u64(params.format);
+        tsharp.num_format = 7;
+    } else {
+        if (params.msaa16) {
+            tsharp.type = u64(AmdGpu::ImageType::Color2DMsaa);
+            tsharp.base_level = 0;
+            tsharp.last_level = 4;
+            tsharp.data_format = u64(AmdGpu::DataFormat::Format8_8_8_8);
+            tsharp.num_format = 0;
+        } else {
+            tsharp.data_format = u64(AmdGpu::DataFormat::FormatBc2);
+            tsharp.num_format = 13;
+        }
+        for (u32 index = 0; index <= 26; ++index) {
+            tsharp.tiling_index = index;
+            if (AmdGpu::IsMacroTiled(AmdGpu::GetArrayMode(tsharp.GetTileMode()))) {
+                break;
+            }
         }
     }
     const u32 n = injected.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n == 1 || n == params.count) {
-        std::printf("GPU test: garbage T# %u of %u (BC2, number format 13, tile mode %u) at %#llx\n",
-                    n, params.count, u32(tsharp.tiling_index),
+        std::printf("GPU test: garbage T# %u of %u (data format %u, number format %u, type %u, "
+                    "last level %u, tile mode %u) at %#llx\n",
+                    n, params.count, u32(tsharp.data_format), u32(tsharp.num_format),
+                    u32(tsharp.type), u32(tsharp.last_level), u32(tsharp.tiling_index),
                     static_cast<unsigned long long>(tsharp.Address()));
         std::fflush(stdout);
     }

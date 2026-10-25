@@ -36,11 +36,14 @@ done
 mkdir -p "$stage/gow3_pc/out/hdr"
 cp gow3_pc/hdr/*.spv "$stage/gow3_pc/out/hdr/"
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
-cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/install_update.py "$stage/tools/"
+cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/install_update.py \
+    tools/net_overlay.py "$stage/tools/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
 mkdir -p "$stage/tools/pkgtool"
 cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool/"
-cp launcher/uncharted_launcher.pyw launcher/updater.py "$stage/launcher/"
+# Every launcher module and data file (0.6.1 shipped without net_lan.py, which the launcher
+# imported at start: it did not open, GitHub #208).
+cp launcher/*.py launcher/*.pyw launcher/*.json "$stage/launcher/"
 # The package's version (tools/VERSION; the launcher's updates compare it with the releases).
 cp tools/VERSION "$stage/VERSION"
 cp launcher/assets/uncharted.ico launcher/assets/icon.png "$stage/launcher/assets/"

@@ -19,7 +19,19 @@
 #include <arpa/inet.h>
 #endif
 
-#define USER_ID 1
+/* gow3 24 Oct 2026 (GitHub #66, save profiles): the PS4 user the games play as. Their saves live
+ * in <user>/savedata/<user id>/, so each launcher save profile is a user of its own
+ * (GOW3_USER_ID, 1-16; default 1, the folder every earlier version used). */
+static int32_t user_id(void) {
+    static int32_t id;
+    if (!id) {
+        const char *v=getenv("GOW3_USER_ID");
+        const int n=v ? atoi(v) : 1;
+        id=n>=1 && n<=16 ? n : 1;
+    }
+    return id;
+}
+#define USER_ID user_id()
 #define ORBIS_OK 0
 #define USER_INVALID_ARGUMENT ((int32_t)0x80960005)
 #define USER_NO_EVENT ((int32_t)0x80960007)

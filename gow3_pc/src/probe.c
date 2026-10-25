@@ -45,6 +45,9 @@ static uint64_t module_count;
 static int entered_game;
 static int gpu_enabled;
 int vulkan_smoke(void);
+/* runtime_redzone.c: guest leaf functions' red zones kept clear of exception frames. */
+uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint64_t *segments, uint64_t count);
+void runtime_redzone_after_fault(void *context);
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
@@ -475,7 +478,11 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
             ++handler_depth;
             const int handled=gow3gpu_handle_fault(info,(void *)record->ExceptionInformation[1]);
             --handler_depth;
-            if (handled) return EXCEPTION_CONTINUE_EXECUTION;
+            if (handled) {
+                /* GOW3_RED_ZONE_SCRIBBLE=1 (test): the red zone overwritten as Windows may do. */
+                runtime_redzone_after_fault(info->ContextRecord);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
         }
         if (runtime_fault_recover) {
             /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
@@ -1229,6 +1236,8 @@ int main(int argc, char **argv) {
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
     if (gpu_enabled) install_mouse_look(segments, ns, size);
+    /* gow3 24 Oct 2026: co-op research console (runtime_coop.c; GOW3_COOP_CMD / GOW3_COOP_BOOT, off by default). */
+    { extern void runtime_coop_install(unsigned char *, uint64_t); runtime_coop_install(image, size); }
     runtime_gamesettings_set_image(image, size);
     if (gpu_enabled && game_hooks) {
         install_orb_multiplier(segments, ns, size);
@@ -1238,6 +1247,20 @@ int main(int argc, char **argv) {
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
+    /* gow3 25 Oct 2026: accesses that can fault in functions keeping data below rsp run with rsp
+     * 128 lower (runtime_redzone.c; GitHub #205). After every other code change: it skips code
+     * our hooks and the eboot patches changed. GOW3_RED_ZONE=0: off. */
+    {
+        uint64_t *triples = calloc(ns ? ns * 3 : 3, sizeof(*triples));
+        if (!triples) fail("allocation failed");
+        for (uint64_t i = 0; i < ns; ++i) {
+            triples[3 * i] = segments[i].address;
+            triples[3 * i + 1] = segments[i].size;
+            triples[3 * i + 2] = segments[i].flags;
+        }
+        runtime_redzone_install(image, size, triples, ns);
+        free(triples);
+    }
 #endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);

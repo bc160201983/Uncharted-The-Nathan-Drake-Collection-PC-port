@@ -22,9 +22,29 @@
 #endif
 #ifdef _WIN32
 #include <windows.h>
+#include <io.h>
 /* 64-bit sizes and times; directories are never opened as CRT descriptors. */
 typedef struct _stat64 HostStat;
-#define host_stat(path,s) _stat64(path,s)
+/* gow3 24 Oct 2026 (GitHub #43, #73, #139, #151, #153, #165 ...): the UCRT of Windows 11 24H2
+ * and later stats a name without following it, so a file symbolic link reports its own size, 0.
+ * The update view links the update's files with symbolic links where Windows allows them
+ * (Developer Mode, a launcher run as administrator): the games saw bin.psarc as empty, mounted
+ * nothing and stopped at files.json ("ASSERTION: root"). A file that is a reparse point is
+ * stat'ed through an open descriptor, which follows the link. */
+static int host_stat(const char *path,HostStat *s) {
+    if (_stat64(path,s)) return -1;
+    const DWORD attributes=GetFileAttributesA(path);
+    if (attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_REPARSE_POINT) &&
+        !(attributes&FILE_ATTRIBUTE_DIRECTORY)) {
+        const int fd=_open(path,_O_RDONLY|_O_BINARY);
+        if (fd>=0) {
+            HostStat target;
+            if (!_fstat64(fd,&target)) *s=target;
+            _close(fd);
+        }
+    }
+    return 0;
+}
 #define host_fstat(fd,s) _fstat64(fd,s)
 #define host_lseek _lseeki64
 #define O_DIRECTORY 0x40000000 /* gow3 marker, removed before _open */

@@ -29,15 +29,19 @@ int main() {
     s.upscaler = "FSR 3.1";
     s.gpu_name = "RTX 4070";
     s.gpu_percent = 87.2f;
+    s.gpu_temp_c = 61.4f;
     s.cpu_percent = 34.0f;
+    s.cpu_temp_c = 64.2f;
     s.ram_used_gb = 6.12;
     s.ram_total_gb = 31.9;
     s.vram_used_gb = 5.4;
     s.vram_total_gb = 12.0;
     assert(P::Format(s, P::DefaultItems, true) == "238 FPS   4.2 ms   FSR 3.1");
+    // The card shows as "GPU" and its use carries the temperature (24 Oct 2026).
     assert(P::Format(s, P::AllItems, false) ==
-           "238 FPS\n4.2 ms\nFSR 3.1\nRTX 4070 87%\nCPU 34%\nRAM 6.1 / 31.9 GB\nVRAM 5.4 / 12.0 GB");
-    assert(P::Format(s, P::Cpu | P::Vram, true) == "CPU 34%   VRAM 5.4 / 12.0 GB");
+           "238 FPS\n4.2 ms\nFSR 3.1\nGPU 87% 61\xc2\xb0" "C\nCPU 34% 64\xc2\xb0" "C\nRAM 6.1 GB\n"
+           "VRAM 5.4 / 12.0 GB");
+    assert(P::Format(s, P::Cpu | P::Vram, true) == "CPU 34% 64\xc2\xb0" "C   VRAM 5.4 / 12.0 GB");
     assert(P::Format(s, 0, true).empty());
 
     P::Sample unknown;
@@ -46,6 +50,10 @@ int main() {
            "Native\nGPU n/a\nCPU n/a\nRAM n/a\nVRAM n/a");
     unknown.ram_used_gb = 2.0;
     assert(P::Format(unknown, P::Ram, true) == "RAM 2.0 GB");
+    // No sensor: the use alone, without a made-up temperature.
+    unknown.gpu_percent = 12.0f;
+    unknown.cpu_percent = 5.0f;
+    assert(P::Format(unknown, P::Gpu | P::Cpu, true) == "GPU 12%   CPU 5%");
 
     const char* path = "perf-overlay-test.ini";
     {

@@ -5,6 +5,9 @@
 #include <mutex>
 #include <vector>
 #include <cstdlib>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -325,9 +328,11 @@ std::string Instance::GetDriverVersionName() {
 }
 
 namespace {
+// gow3 24 Oct 2026: off unless GOW3_PIPELINE_BINARIES=1. A pipeline made from a binary kept the
+// binary's ~2 MB in memory: Uncharted 2 used 15.5 GB of RAM with them, 7.0 GB without.
 bool PipelineBinaryCacheRequested() {
     const char* setting = std::getenv("GOW3_PIPELINE_BINARIES");
-    return !setting || *setting != '0';
+    return setting && *setting && *setting != '0';
 }
 }
 
@@ -335,7 +340,7 @@ bool InitializePipelineBinaryCache(vk::Device device, bool supported,
                                    vk::PipelineBinaryKeyKHR& global_key) {
     global_key = vk::PipelineBinaryKeyKHR{};
     if (!PipelineBinaryCacheRequested()) {
-        LOG_INFO(Render_Vulkan, "Pipeline binary cache disabled by settings; using normal compilation");
+        LOG_INFO(Render_Vulkan, "Pipeline binary cache off (GOW3_PIPELINE_BINARIES=1 turns it on); using normal compilation");
         return false;
     }
     if (!supported) {
@@ -431,12 +436,19 @@ bool Instance::CreateDevice() {
                "Required Vulkan feature unavailable: nullDescriptor");
 
     // Optional
-    if (const char* diag=std::getenv("GOW3_GPU_CHECKPOINTS"); diag && (diag[0]=='1' || diag[0]=='2')) {
+    const char* diag=std::getenv("GOW3_GPU_CHECKPOINTS");
+    const bool diag_on=diag && (diag[0]=='1' || diag[0]=='2');
+    if (diag_on) {
         gpu_checkpoints=add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
         std::printf("GPU checkpoints enabled: %d\n",int(gpu_checkpoints));
-        device_fault=add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         address_binding_report=add_extension(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
-        std::printf("GPU device fault reports enabled: %d\n",int(device_fault));
+    }
+    // gow3 24 Oct 2026: players' device-loss logs (#130, #132, #142) said nothing about the
+    // fault. The report costs nothing until the device is lost: on whenever the driver has it
+    // (GOW3_DEVICE_FAULT=0: off).
+    if (const char* env=std::getenv("GOW3_DEVICE_FAULT"); diag_on || !(env && env[0]=='0')) {
+        device_fault=add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        std::printf("GPU device fault reports: %s\n",device_fault ? "on" : "not supported");
     }
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&
@@ -597,9 +609,23 @@ bool Instance::CreateDevice() {
     // every submission of the GPU command thread: 0.3-0.8 s freezes in Uncharted 1 and 3, the
     // thread neither idle nor in any counted wait. GOW3_PRESENT_QUEUE=0: presents on the
     // graphics queue, as before.
+    // gow3 25 Oct 2026 (GitHub #127, #128): RivaTuner's on-screen display flickers with presents on
+    // their own queue: in gameplay with DLSS at a 120 FPS limit it was missing from 5 of 60
+    // window captures, against 0 of 60 on the graphics queue. With its hooks in the process
+    // (RTSSHooks64.dll) presents stay on the graphics queue; GOW3_PRESENT_QUEUE=1 keeps the own
+    // queue anyway.
     static const bool present_queue_wanted = [] {
         const char* env = std::getenv("GOW3_PRESENT_QUEUE");
-        return !(env && env[0] == '0');
+        if (env && env[0]) {
+            return env[0] != '0';
+        }
+#ifdef _WIN32
+        if (GetModuleHandleW(L"RTSSHooks64.dll")) {
+            std::fputs("GPU: RivaTuner overlay found: presents on the graphics queue\n", stdout);
+            return false;
+        }
+#endif
+        return true;
     }();
     static constexpr std::array queue_priorities = {1.0f, 1.0f, 1.0f};
     const u32 queue_count =

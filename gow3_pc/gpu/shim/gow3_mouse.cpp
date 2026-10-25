@@ -37,6 +37,16 @@ void Update(SDL_Window* window, bool may_capture) {
         return;
     }
     captured = want;
+    if (want) {
+        // gow3 24 Oct 2026: raw, linear counts. SDL3 relative mode reads raw input and leaves the
+        // system acceleration curve off by default; the hints and a user's SDL_* environment
+        // variables could switch a curve or a scale on, so they are pinned here (override
+        // priority beats the environment); nothing sets a motion transform. The counts then only
+        // get the sensitivity: no acceleration or smoothing anywhere on the mouse-look path.
+        SDL_SetHintWithPriority(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "0", SDL_HINT_OVERRIDE);
+        SDL_SetHintWithPriority(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, "1", SDL_HINT_OVERRIDE);
+        SDL_SetHintWithPriority(SDL_HINT_MOUSE_RELATIVE_WARP_MOTION, "0", SDL_HINT_OVERRIDE);
+    }
     SDL_SetWindowRelativeMouseMode(window, want);
     std::scoped_lock lock{mutex};
     acc_x = acc_y = 0;

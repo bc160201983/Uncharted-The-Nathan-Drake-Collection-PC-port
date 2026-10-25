@@ -13,12 +13,14 @@ copy run from the source tree has none and is never updated. An update:
 UNCHARTED_UPDATE_API points the check at another releases list (tests; http only on 127.0.0.1).
 """
 import hashlib
+import http.client
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -100,8 +102,11 @@ def update_dir(root):
     return Path(root) / "update"
 
 
-def download(release, root, progress=None, cancelled=None):
-    """Downloads the release's zip into update\\ and checks its size and SHA-256."""
+def download(release, root, progress=None, cancelled=None, attempts=8, timeout=60, pause=2.0):
+    """Downloads the release's zip into update\\ and checks its size and SHA-256. A connection that
+    stalls or breaks (slow or busy networks: "The read operation timed out", #149/#150) is opened
+    again and the download goes on where it stopped (HTTP Range; GitHub's file host supports it),
+    up to `attempts` times in a row without progress."""
     if not allowed_url(release["url"]):
         raise UpdateError(f"Refusing a non-HTTPS download: {release['url']}")
     folder = update_dir(root)
@@ -110,19 +115,45 @@ def download(release, root, progress=None, cancelled=None):
     partial = folder / (ASSET + ".part")
     digest = hashlib.sha256()
     done = 0
-    request = urllib.request.Request(release["url"], headers={"User-Agent": "Uncharted-Launcher"})
-    with urllib.request.urlopen(request, timeout=30) as response, partial.open("wb") as out:
-        while True:
-            if cancelled and cancelled():
-                raise UpdateError("Cancelled.")
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
-            digest.update(chunk)
-            done += len(chunk)
-            if progress:
-                progress(done, release["size"])
+    failures = 0
+    size = release["size"]
+    with partial.open("wb") as out:
+        while not size or done < size:
+            headers = {"User-Agent": "Uncharted-Launcher"}
+            if done:
+                headers["Range"] = f"bytes={done}-"
+            request = urllib.request.Request(release["url"], headers=headers)
+            start = done
+            try:
+                # Each try asks github.com again: its redirect to the file host is signed and expires.
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    if done and response.status != 206:  # the range was ignored: from the start
+                        out.seek(0)
+                        out.truncate()
+                        digest, done = hashlib.sha256(), 0
+                    while True:
+                        if cancelled and cancelled():
+                            raise UpdateError("Cancelled.")
+                        chunk = response.read(1 << 16)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        digest.update(chunk)
+                        done += len(chunk)
+                        if progress:
+                            progress(done, size)
+                if not size:
+                    break
+                if done < size:
+                    raise ConnectionError(f"the connection closed after {done} of {size} bytes")
+            except (OSError, http.client.HTTPException) as error:  # timeouts, resets, URLError, HTTPError
+                failures = 0 if done - start >= (1 << 20) else failures + 1
+                if failures >= attempts:
+                    raise UpdateError(
+                        f"The download from GitHub keeps stopping ({error or error.__class__.__name__}).\n\n"
+                        "Try UPDATE again later, or download Uncharted-windows.zip from the releases page and "
+                        "extract it over this folder (saves and settings in analysis\\ are kept).") from error
+                time.sleep(min(pause * max(failures, 1), 15.0))
     if release["size"] and done != release["size"]:
         partial.unlink(missing_ok=True)
         raise UpdateError(f"The download is incomplete ({done} of {release['size']} bytes).")

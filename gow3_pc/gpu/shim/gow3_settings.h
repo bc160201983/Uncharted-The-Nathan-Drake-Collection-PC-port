@@ -123,6 +123,8 @@ struct Values {
     /// ControlsMutex(); a change calls ControlsChanged() so the pad reapplies them.
     std::string pad_map, key_map, mouse_map;
     std::atomic<bool> mouse{true}, mouse_invert{false}, mouse_invert_x{false};
+    // Controller vibration (GitHub #166, 24 Oct 2026): off stops every rumble the game asks for.
+    std::atomic<bool> vibration{true};
     std::atomic<float> mouse_sens{1.0f}, stick_speed{1.0f};
     /// gow3 20 Oct 2026: mouse sensitivity while aiming (times mouse_sens) and up/down speed
     /// compared with left/right.

@@ -123,6 +123,15 @@ LINKED = {}
 
 
 def make_link(link, target):
+    # gow3 24 Oct 2026 (#43 ...): files as hard links first (same drive, no privilege needed, and
+    # every stat sees the real size; a file symlink stats as 0 bytes in Windows 11's UCRT).
+    if os.name == 'nt' and target.is_file():
+        try:
+            os.link(target, link)
+            LINKED[str(link)] = target
+            return
+        except OSError:
+            pass  # another drive: a symbolic link (runtime_file.c follows it) or a copy
     try:
         link.symlink_to(target, target_is_directory=target.is_dir())
         return

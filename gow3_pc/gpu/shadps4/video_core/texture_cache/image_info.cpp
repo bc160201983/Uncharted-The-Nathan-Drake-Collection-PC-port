@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "gow3_movie.h"
 #include "common/assert.h"
 #include "core/libraries/kernel/process.h"
@@ -223,6 +225,26 @@ void ImageInfo::UpdateSize() {
     }
 }
 
+// gow3 24 Oct 2026 (GitHub #140, Uncharted 3 washed out in sunny areas): Uncharted 3 draws its
+// bloom into mips 0, 1 and 2 of a 7-level, pow2-padded 480x270 RGBA16F texture, and its tonemap
+// (ps 3371ae8d) reads mip 2 (analysis/triage-1022/u3-exposure.md). The render target of a mip has
+// the mip's own size (240x135 in a 256x256 mip), so the checks below rejected it: it became an
+// image of its own, and the tonemap read a mip nothing wrote (skipping every bloom pass from the
+// level start left the picture unchanged). GOW3_MIP_TARGETS=1 accepts a single-layer image that
+// starts exactly at a mip as slice 0 of that mip, also with a wider pitch.
+bool ImageInfo::MipTargetsEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_MIP_TARGETS");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+static bool AtMipBase(const ImageInfo& image, const ImageInfo& chain, s32 mip) {
+    return ImageInfo::MipTargetsEnabled() && image.resources.layers == 1 &&
+           image.guest_address == chain.guest_address + chain.mips_layout[mip].offset;
+}
+
 s32 ImageInfo::MipOf(const ImageInfo& info) const {
     if (!IsCompatible(info)) {
         return -1;
@@ -247,9 +269,13 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
         const VAddr mip_base = info.guest_address + mip_ofs;
         const VAddr mip_end = mip_base + mip_size;
         const u32 slice_size = mip_size / info.resources.layers;
+        const u32 this_pitch = pitch >> this_dim;
+        const u32 that_pitch = mip_pitch >> info_dim;
+        // gow3 24 Oct 2026 (GOW3_MIP_TARGETS): exactly at the mip, a wider pitch is the mip too.
+        const bool pitch_ok =
+            this_pitch == that_pitch || (AtMipBase(*this, info, m) && this_pitch > that_pitch);
         if (guest_address >= mip_base && guest_address < mip_end &&
-            (guest_address - mip_base) % slice_size == 0 &&
-            (pitch >> this_dim) == (mip_pitch >> info_dim)) {
+            (guest_address - mip_base) % slice_size == 0 && pitch_ok) {
             mip = m;
             break;
         }
@@ -303,8 +329,15 @@ s32 ImageInfo::SliceOf(const ImageInfo& info, s32 mip) const {
     const auto this_w = std::max(size.width >> this_dim, 1u);
     const auto this_h = std::max(size.height >> this_dim, 1u);
     const auto this_p = std::max(pitch >> this_dim, 1u);
-    if ((this_w != mip_w) || (this_h != mip_h) || (this_p != mip_p)) {
+    // gow3 24 Oct 2026 (GOW3_MIP_TARGETS): an image starting exactly at the mip is its slice 0,
+    // also with a wider pitch or a size that does not divide the padded mip (U3 bloom mip 1).
+    const bool at_mip = AtMipBase(*this, info, mip);
+    if ((this_w != mip_w) || (this_h != mip_h) ||
+        (this_p != mip_p && !(at_mip && this_p > mip_p))) {
         return -1;
+    }
+    if (at_mip) {
+        return 0;
     }
 
     // Check for size alignment.
