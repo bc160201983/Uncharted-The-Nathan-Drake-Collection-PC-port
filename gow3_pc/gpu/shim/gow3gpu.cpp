@@ -655,6 +655,16 @@ extern "C" void gow3gpu_trophy_earned(int id) {
     Gow3Trophies::Earned(id);
 }
 
+extern "C" void gow3gpu_match_loading(int active, const char* title, const char* map,
+                                      const char* rules, const char* picture) {
+    Gow3Png::Image image;
+    if (active && picture && !Gow3Png::LoadRgba(picture, image)) {
+        LOG_WARNING(Render, "match loading: no picture from {}", picture);
+    }
+    Gow3Overlay::SetMatchLoading(active != 0, title ? title : "", map ? map : "", rules ? rules : "",
+                                 std::move(image));
+}
+
 extern "C" int gow3gpu_choice_poll(void) {
     if (g_test_choice >= 0) {
         const int pick = g_test_choice;

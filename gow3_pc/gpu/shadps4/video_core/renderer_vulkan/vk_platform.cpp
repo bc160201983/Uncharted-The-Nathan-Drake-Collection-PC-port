@@ -66,9 +66,14 @@ vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& e
 
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     if (window_info.type == Frontend::WindowSystemType::Windows) {
+        const auto hwnd = static_cast<HWND>(window_info.render_surface);
+        // Win32 WSI requires the instance that owns this window, not a null
+        // placeholder (VUID-VkWin32SurfaceCreateInfoKHR-hinstance-01307).
+        const auto hinstance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+        ASSERT_MSG(hwnd && hinstance, "Invalid Win32 window or instance for Vulkan surface");
         const vk::Win32SurfaceCreateInfoKHR win32_ci = {
-            .hinstance = nullptr,
-            .hwnd = static_cast<HWND>(window_info.render_surface),
+            .hinstance = hinstance,
+            .hwnd = hwnd,
         };
 
         if (instance.createWin32SurfaceKHR(&win32_ci, nullptr, &surface) != vk::Result::eSuccess) {

@@ -34,6 +34,7 @@
  * bit offset 0 (remote player x stuck near -192, run vis13).
  */
 #include "runtime.h"
+#include "runtime_uc2mp_netmaps.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -633,6 +634,9 @@ void runtime_coop_mp_netinit(unsigned char *base, long game) {
     const int competitive = competitive_mode(mode);
     const char *levels = getenv("GOW3_COOP_MP_LEVELS");
     if (!levels && competitive) levels = default_levels(game);
+    /* the classic maps: their main level and the PS3 online spawners (runtime_uc2mp_netmaps.c) */
+    const char *classic = !levels && competitive ? runtime_uc2mp_netmaps_levels(image, game) : NULL;
+    if (classic) levels = classic;
     const char *skin = getenv("GOW3_COOP_MP_SKIN");
     if (!skin_name_ok(skin)) skin = competitive || game == 113 ? "hero-default" : "hero-parka";
     const int teams = knob_set("GOW3_COOP_MP_TEAMS") >= 0 ? knob_set("GOW3_COOP_MP_TEAMS") : competitive;
@@ -648,6 +652,7 @@ void runtime_coop_mp_netinit(unsigned char *base, long game) {
     if (teams)
         printf("CoopMP: team games: local rank source %s\n", install_teams() ? "on (0x640588, 0x1065b08+0xb0c)" : "NOT installed");
     apply_levels(game, levels);
+    if (classic) runtime_uc2mp_netmaps_install(image);
     install_skins(skin);
     {
         const char *v = getenv("GOW3_COOP_MP_RESULTS_SECONDS");

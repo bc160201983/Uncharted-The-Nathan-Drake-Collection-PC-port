@@ -19,6 +19,8 @@
 #include "runtime.h"
 #include "gpu/gow3gpu.h"
 #include "runtime_gamesettings.h"
+#include "runtime_uc2mp_diag.h"
+#include "runtime_uc2mp_tick.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -814,6 +816,7 @@ static ABI int32_t pad_close(int32_t handle) {
     opened=0; return 0;
 }
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
+    UC2MP_THREAD_OBSERVE(UC2MP_DIAG_PAD_READ_STATE);
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
@@ -833,6 +836,7 @@ static int buffered_report(PadData *out,const PadData *sampled) {
     return 1;
 }
 static ABI int32_t pad_read(int32_t handle, PadData *data, int32_t count) {
+    UC2MP_THREAD_OBSERVE(UC2MP_DIAG_PAD_READ);
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data || count<1 || count>64) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
@@ -840,6 +844,9 @@ static ABI int32_t pad_read(int32_t handle, PadData *data, int32_t count) {
     sample(&sampled); ++reads;
     int result=buffered_report(data,&sampled);
     pthread_mutex_unlock(&lock);
+    /* Observed UC2 v1.02 caller shares the lobby's game thread. TLS dispatch
+     * rejects all other callers; never perform network IO under pad lock. */
+    runtime_uc2mp_tick_run();
     return result;
 }
 static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {

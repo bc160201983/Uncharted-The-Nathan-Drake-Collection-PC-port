@@ -173,6 +173,14 @@ struct TrophyPopupItem {
     std::chrono::steady_clock::time_point shown{};
 };
 std::deque<TrophyPopupItem> trophy_popups;
+
+// Multiplayer match loading screen (SetMatchLoading, uc2mp): full screen over the game while a
+// match map loads, guarded by imgui_mutex. The map picture becomes a texture before a frame.
+std::atomic<bool> match_loading{false};
+std::string match_title, match_map, match_rules;
+Gow3Png::Image match_picture;
+ImTextureData* match_tex = nullptr;
+u32 match_frames = 0; // frames drawn while active (logged when it closes)
 std::vector<ImTextureData*> trophy_retired;
 std::map<int, ImTextureData*> trophy_tab_textures; // by trophy id, of trophy_tab_list
 int trophy_tab_list = 0;
@@ -1461,6 +1469,45 @@ void LoadingScreen() {
     ImGui::End();
 }
 
+void MatchLoadingScreen() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(viewport->WorkSize, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.04f, 0.03f, 1.0f));
+    ImGui::Begin("##match_loading", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 origin = viewport->WorkPos, size = viewport->WorkSize;
+    const float centre = origin.x + size.x * 0.5f;
+    const ImU32 gold = IM_COL32(222, 196, 140, 255), pale = IM_COL32(200, 190, 170, 255);
+    auto centred = [&](const std::string& text, float y, float font_scale, ImU32 colour) {
+        ImFont* font = ImGui::GetFont();
+        const float px = ImGui::GetFontSize() * font_scale;
+        const ImVec2 extent = font->CalcTextSizeA(px, FLT_MAX, 0.0f, text.c_str());
+        draw->AddText(font, px, ImVec2(centre - extent.x * 0.5f, y), colour, text.c_str());
+        return extent.y;
+    };
+    float y = origin.y + size.y * 0.08f;
+    y += centred(match_title, y, 2.4f, gold) + size.y * 0.02f;
+    if (match_tex) {
+        // The Collection's 1024x512 map card (net.pak), its transparent border included.
+        const float width = std::min(size.x * 0.62f, size.y * 1.1f), height = width * 0.5f;
+        draw->AddImage(match_tex->GetTexRef(), ImVec2(centre - width * 0.5f, y),
+                       ImVec2(centre + width * 0.5f, y + height));
+        y += height + size.y * 0.02f;
+    }
+    y += centred(match_map, y, 2.0f, gold) + size.y * 0.015f;
+    if (!match_rules.empty()) {
+        centred(match_rules, y, 1.3f, pale);
+    }
+    centred("Chargement de la carte...", origin.y + size.y * 0.9f, 1.4f, pale);
+    ++match_frames;
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+
 void FpsCounter() {
     const auto& s = Gow3Settings::Get();
     const std::string text = OverlayText();
@@ -1669,6 +1716,14 @@ ImTextureData* NewTexture(const Gow3Png::Image& picture) {
 
 // imgui_mutex held, before NewFrame: popup pictures and (a few per frame) the Trophies tab's
 // become textures; retired ones are freed once the backend let them go.
+// imgui_mutex held, before NewFrame: the match loading picture becomes a texture.
+void UpdateMatchTexture() {
+    if (match_loading && !match_tex && !match_picture.rgba.empty()) {
+        match_tex = NewTexture(match_picture);
+        match_picture.rgba.clear();
+    }
+}
+
 void UpdateTrophyTextures() {
     for (TrophyPopupItem& item : trophy_popups) {
         if (!item.tex && !item.picture.rgba.empty()) {
@@ -1904,7 +1959,7 @@ void SetLoading(bool active, u32 done, u32 total) {
 
 bool Visible() {
     const auto& s = Gow3Settings::Get();
-    return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
+    return initialized && (loading || match_loading || background_total || menu_open || text_entry_active || choice_active ||
                            choice_retiring || s.show_fps || trophy_showing);
 }
 
@@ -1946,6 +2001,31 @@ int PollChoice() {
         }
     }
     return choice_result;
+}
+
+void SetMatchLoading(bool active, const std::string& title, const std::string& map,
+                     const std::string& rules, Gow3Png::Image picture) {
+    std::scoped_lock lock{imgui_mutex};
+    if (active) {
+        match_title = title;
+        match_map = map;
+        match_rules = rules;
+        if (!match_tex) {
+            match_picture = std::move(picture);
+        }
+    } else if (match_loading) {
+        std::fprintf(stderr, "UC2MP: match loading screen closed after %u frames (%s)\n", match_frames,
+                     match_tex ? "with the map picture" : "without picture");
+        match_frames = 0;
+    }
+    if (!active && match_tex) {
+        // The backend frees it once it let the texture go (as retired save pictures).
+        match_tex->WantDestroyNextFrame = true;
+        choice_retired.push_back(match_tex);
+        choice_retiring = true;
+        match_tex = nullptr;
+    }
+    match_loading = active;
 }
 
 void ShowTrophy(Gow3Png::Image picture, const std::string& title, const std::string& text) {
@@ -2014,8 +2094,12 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
 
     UpdateChoiceTextures();
     UpdateTrophyTextures();
+    UpdateMatchTexture();
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+    if (match_loading && !loading) {
+        MatchLoadingScreen();
+    }
     if (loading) {
         LoadingScreen();
     }
