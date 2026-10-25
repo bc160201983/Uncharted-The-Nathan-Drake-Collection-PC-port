@@ -57,7 +57,7 @@ int main(void) {
     uc2mp_net_close(&lobby); assert(!lobby.open);
     assert(!runtime_uc2mp_tick_is_owner());
     env("UC2MP_LAN_CONNECT","127.0.0.1");
-    env("UC2MP_LAN_TOKEN","48ac526fbde943ef98c3410b7a4bc118");
+    env("UC2MP_LAN_TOKEN","00112233445566778899aabbccddeeff");
     env("UC2MP_LAN_PORT","65536"); assert(uc2mp_net_open(&lobby)==UC2MP_INVALID && !lobby.open);
     assert(!runtime_uc2mp_tick_is_owner());
     Uc2mpProfile host_profile;
