@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <limits>
 #include <string>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -55,10 +58,19 @@ static void KeepNativeCompositeOnlyWithHdr(bool hdr_output) {
 }
 
 Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
-    : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
-    FindPresentFormat();
+    : instance{instance_}, window{window_} {
+    const char* headless_env = std::getenv("GOW3_HEADLESS");
+    headless = headless_env && headless_env[0] == '1' && headless_env[1] == '\0';
+    if (headless) {
+        surface_format = {vk::Format::eR8G8B8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear};
+        std::printf("GPU: GOW3_HEADLESS=1: real offscreen rendering, no WSI surface or visible output\n");
+    } else {
+        surface = CreateSurface(instance.GetInstance(), window);
+        FindPresentFormat();
+        FindPresentMode();
+    }
+    // Headless sessions have no HDR output either (supports_hdr stays false).
     KeepNativeCompositeOnlyWithHdr(supports_hdr && Gow3Settings::Get().hdr);
-    FindPresentMode();
 
     Create(window.GetWidth(), window.GetHeight());
     ImGui::Core::Initialize(instance, window, image_count, surface_format.format);
@@ -66,7 +78,7 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
 
 Swapchain::~Swapchain() {
     Destroy();
-    instance.GetInstance().destroySurfaceKHR(surface);
+    if (surface) instance.GetInstance().destroySurfaceKHR(surface);
 }
 
 void Swapchain::Create(u32 width_, u32 height_) {
@@ -75,6 +87,13 @@ void Swapchain::Create(u32 width_, u32 height_) {
     needs_recreation = false;
 
     Destroy();
+
+    if (headless) {
+        ASSERT_MSG(width && height, "Offscreen rendering requires nonzero dimensions");
+        extent = {width, height};
+        CreateOffscreenImages();
+        return;
+    }
 
     SetSurfaceProperties();
 
@@ -134,6 +153,7 @@ void Swapchain::Recreate(u32 width_, u32 height_) {
 }
 
 void Swapchain::SetHDR(bool hdr) {
+    if (headless) return; // Diagnostic target is SDR RGBA8.
     if (needs_hdr == hdr) {
         return;
     }
@@ -146,6 +166,7 @@ void Swapchain::SetHDR(bool hdr) {
 }
 
 bool Swapchain::AcquireNextImage() {
+    if (headless) return true; // Presenter synchronously finishes each offscreen submission.
     vk::Device device = instance.GetDevice();
     vk::Result result;
     {
@@ -175,6 +196,11 @@ bool Swapchain::AcquireNextImage() {
 }
 
 bool Swapchain::Present() {
+    if (headless) {
+        image_index = (image_index + 1) % image_count;
+        frame_index = image_index;
+        return true;
+    }
     const vk::PresentInfoKHR present_info = {
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
@@ -268,6 +294,7 @@ void Swapchain::FindPresentMode() {
 }
 
 void Swapchain::UpdateVsync() {
+    if (headless) return;
     if (Gow3Settings::Get().vsync == vsync) {
         return;
     }
@@ -278,6 +305,44 @@ void Swapchain::UpdateVsync() {
 void Swapchain::SetSurfaceProperties() {
     const auto [capabilities_result, capabilities] =
         instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
+    if (capabilities_result != vk::Result::eSuccess) {
+        // Capture the actual WSI failure boundary before aborting. This is
+        // diagnostic only: no retry, window mutation, or fallback capability.
+        const auto [support_result, supported] = instance.GetPhysicalDevice().getSurfaceSupportKHR(
+            instance.GetPresentQueueFamilyIndex(), surface);
+        std::fprintf(stderr, "WSI failure: capabilities=%s present_support=%s/%u queue=%u\n",
+                     vk::to_string(capabilities_result).c_str(),
+                     vk::to_string(support_result).c_str(), static_cast<unsigned>(supported),
+                     instance.GetPresentQueueFamilyIndex());
+#ifdef _WIN32
+        const auto hwnd = static_cast<HWND>(window.GetWindowInfo().render_surface);
+        DWORD owner_pid = 0;
+        const DWORD owner_tid = GetWindowThreadProcessId(hwnd, &owner_pid);
+        RECT client{}, outer{};
+        const BOOL client_ok = GetClientRect(hwnd, &client);
+        const BOOL outer_ok = GetWindowRect(hwnd, &outer);
+        const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+        MONITORINFO monitor_info{};
+        monitor_info.cbSize = sizeof(monitor_info);
+        const BOOL monitor_ok = GetMonitorInfoW(monitor, &monitor_info);
+        STARTUPINFOW startup_info{};
+        startup_info.cb = sizeof(startup_info);
+        GetStartupInfoW(&startup_info);
+        std::fprintf(stderr,
+                     "WSI Win32: hwnd=%p valid=%d visible=%d iconic=%d owner=%lu/%lu caller=%lu/%lu "
+                     "client=%d:%ld,%ld,%ld,%ld outer=%d:%ld,%ld,%ld,%ld "
+                     "monitor=%p valid=%d remote=%d style=%llx exstyle=%llx startup_flags=%lx startup_show=%u\n",
+                     static_cast<void*>(hwnd), IsWindow(hwnd), IsWindowVisible(hwnd), IsIconic(hwnd),
+                     owner_pid, owner_tid, GetCurrentProcessId(), GetCurrentThreadId(),
+                     client_ok, client.left, client.top, client.right, client.bottom,
+                     outer_ok, outer.left, outer.top, outer.right, outer.bottom,
+                     static_cast<void*>(monitor), monitor_ok, GetSystemMetrics(SM_REMOTESESSION),
+                     static_cast<unsigned long long>(GetWindowLongPtrW(hwnd, GWL_STYLE)),
+                     static_cast<unsigned long long>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)),
+                     startup_info.dwFlags, static_cast<unsigned>(startup_info.wShowWindow));
+#endif
+        std::fflush(stderr);
+    }
     ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
                "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
 
@@ -324,8 +389,15 @@ void Swapchain::Destroy() {
     }
     images_view.clear();
 
+    for (size_t i = 0; i < offscreen_allocations.size(); ++i) {
+        vmaDestroyImage(instance.GetAllocator(), images[i], offscreen_allocations[i]);
+    }
+    offscreen_allocations.clear();
+    images.clear();
+
     if (swapchain) {
         device.destroySwapchainKHR(swapchain);
+        swapchain = nullptr;
     }
 
     for (const auto& sem : image_acquired) {
@@ -337,6 +409,48 @@ void Swapchain::Destroy() {
 
     image_acquired.clear();
     present_ready.clear();
+}
+
+void Swapchain::CreateOffscreenImages() {
+    const auto device = instance.GetDevice();
+    image_count = 3;
+    image_index = frame_index = 0;
+    images.resize(image_count);
+    images_view.resize(image_count);
+    offscreen_allocations.resize(image_count);
+    const VkImageCreateInfo ci{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = {width, height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    const VmaAllocationCreateInfo allocation_info{.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    for (u32 i = 0; i < image_count; ++i) {
+        VkImage image{};
+        const auto result = vmaCreateImage(instance.GetAllocator(), &ci, &allocation_info,
+                                           &image, &offscreen_allocations[i], nullptr);
+        ASSERT_MSG(result == VK_SUCCESS, "Failed to allocate offscreen image: {}", int(result));
+        images[i] = image;
+        const auto [view_result, view] = device.createImageView(vk::ImageViewCreateInfo{
+            .image = images[i],
+            .viewType = vk::ImageViewType::e2D,
+            .format = surface_format.format,
+            .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+                                 .levelCount = 1, .layerCount = 1},
+        });
+        ASSERT_MSG(view_result == vk::Result::eSuccess, "Failed to create offscreen view: {}",
+                   vk::to_string(view_result));
+        images_view[i] = view;
+        SetObjectName(device, images[i], "Headless diagnostic image {}", i);
+    }
 }
 
 void Swapchain::RefreshSemaphores() {

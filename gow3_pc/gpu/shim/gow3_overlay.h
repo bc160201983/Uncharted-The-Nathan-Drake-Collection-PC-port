@@ -56,5 +56,8 @@ int PollChoice();
 /// A trophy popup (gow3_trophies.cpp): at the top right for a few seconds, one after another.
 /// `text` may hold a second line after a newline.
 void ShowTrophy(Gow3Png::Image picture, const std::string& title, const std::string& text);
+/// uc2mp: the multiplayer match loading screen, full screen over the game while active.
+void SetMatchLoading(bool active, const std::string& title, const std::string& map,
+                     const std::string& rules, Gow3Png::Image picture);
 
 } // namespace Gow3Overlay

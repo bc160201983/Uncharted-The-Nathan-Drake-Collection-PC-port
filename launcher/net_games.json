@@ -18,6 +18,69 @@
    "players": "1-10",
    "complete": true,
    "tested": "25 Oct: pair over LAN reaches Playing on the Fort with the runtime's own settings (runs f2-f4); characters per player (f4)"
+  },
+  {
+   "index": 25,
+   "map": "The Village",
+   "mode": "Deathmatch",
+   "kind": "competitive",
+   "players": "2-10",
+   "complete": true,
+   "tested": "25 Oct: offscreen pair on one PC reaches Playing on the map with its companion levels; both players spawn on PS3 online spawners (runtime_uc2mp_netmaps.c), no packet dropped"
+  },
+  {
+   "index": 30,
+   "map": "The Plaza",
+   "mode": "Deathmatch",
+   "kind": "competitive",
+   "players": "2-10",
+   "complete": true,
+   "tested": "25 Oct: offscreen pair on one PC reaches Playing on the map with its companion levels; both players spawn on PS3 online spawners (runtime_uc2mp_netmaps.c), no packet dropped"
+  },
+  {
+   "index": 0,
+   "map": "The Sanctuary",
+   "mode": "Deathmatch",
+   "kind": "competitive",
+   "players": "2-10",
+   "complete": true,
+   "tested": "25 Oct: offscreen pair on one PC reaches Playing on the map with its companion levels; both players spawn on PS3 online spawners (runtime_uc2mp_netmaps.c), no packet dropped"
+  },
+  {
+   "index": 5,
+   "map": "The Ice Cave",
+   "mode": "Deathmatch",
+   "kind": "competitive",
+   "players": "2-10",
+   "complete": true,
+   "tested": "25 Oct: offscreen pair on one PC reaches Playing on the map with its companion levels; both players spawn on PS3 online spawners (runtime_uc2mp_netmaps.c), no packet dropped"
+  },
+  {
+   "index": 10,
+   "map": "The Lost City",
+   "mode": "Deathmatch",
+   "kind": "competitive",
+   "players": "2-10",
+   "complete": true,
+   "tested": "25 Oct: offscreen pair on one PC reaches Playing on the map with its companion levels; both players spawn on PS3 online spawners (runtime_uc2mp_netmaps.c), no packet dropped"
+  },
+  {
+   "index": 15,
+   "map": "The Train Wreck",
+   "mode": "Deathmatch",
+   "kind": "competitive",
+   "players": "2-10",
+   "complete": true,
+   "tested": "25 Oct: offscreen pair on one PC reaches Playing on the map with its companion levels; both players spawn on PS3 online spawners (runtime_uc2mp_netmaps.c), no packet dropped"
+  },
+  {
+   "index": 20,
+   "map": "The Temple",
+   "mode": "Deathmatch",
+   "kind": "competitive",
+   "players": "2-10",
+   "complete": true,
+   "tested": "25 Oct: offscreen pair on one PC reaches Playing on the map with its companion levels; both players spawn on PS3 online spawners (runtime_uc2mp_netmaps.c), no packet dropped"
   }
  ]
 }
