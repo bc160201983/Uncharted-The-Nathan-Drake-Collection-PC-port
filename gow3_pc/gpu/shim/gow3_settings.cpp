@@ -160,6 +160,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.rcas_strength = Gow3Graphics::ParseRcasStrength(value.empty() ? -1 : i);
     } else if (key == "frames_queued") {
         v.frames_queued = Gow3Graphics::ParseFramesQueued(value.empty() ? -1 : i);
+    } else if (key == "hdr") {
+        v.hdr = i != 0;
+    } else if (key == "hdr_peak_nits") {
+        v.hdr_peak_nits = std::clamp(i, 400, 10000);
+    } else if (key == "hdr_game_nits") {
+        v.hdr_game_nits = std::clamp(i, 80, 500);
+    } else if (key == "hdr_ui_nits") {
+        v.hdr_ui_nits = std::clamp(i, 80, 500);
     } else if (key == "render_resolution") {
         v.render_resolution = Gow3Graphics::ParseResolution(value);
     } else if (key == "engine_fps") {
@@ -270,6 +278,7 @@ void Load() {
         {"GOW3_ASYNC_SHADERS", "async_shaders"},      {"GOW3_DEFERRED_READBACK", "deferred_readback"},
         {"GOW3_STALE_READBACK", "stale_readback"},     {"GOW3_FSR1", "fsr1"},
         {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
+        {"GOW3_HDR_OUTPUT", "hdr"},
         {"GOW3_PAD_MAP", "pad_map"},                  {"GOW3_KEY_MAP", "key_map"},
         {"GOW3_MOUSE_MAP", "mouse_map"},              {"GOW3_MOUSE", "mouse"},
         {"GOW3_MOUSE_SENS", "mouse_sens"},            {"GOW3_MOUSE_INVERT", "mouse_invert"},
@@ -422,6 +431,8 @@ KeyValues Current() {
                  int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
                  int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
+    Append(text, "hdr=%d\nhdr_peak_nits=%d\nhdr_game_nits=%d\nhdr_ui_nits=%d\n", int(v.hdr.load()),
+           v.hdr_peak_nits.load(), v.hdr_game_nits.load(), v.hdr_ui_nits.load());
     // Read by run.sh at start.
     Append(text, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");

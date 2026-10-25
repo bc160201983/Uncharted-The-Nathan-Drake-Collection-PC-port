@@ -531,6 +531,15 @@ HOR_PLUS_PATCHES = {
                          [(0x10, "rbx", 4, 0), (0x267, "rbx", 4, 0), (0xb2f, "rdi", 0, 1)],
                          [(0x26, 0xb6, bytes.fromhex("488b055d16b9004885c0"))]),
     ]),
+    # The water's planar reflection camera 0xc902b4 is square (aspect 1.0, so the camera update
+    # leaves it alone) with the render camera's own zoom: it kept the 16:9 horizontal view, and
+    # past the 16:9 edges the water sampled outside the reflection (streaks). Its zoom load takes
+    # the render camera's (rdx) aspect instead; the stub goes in the dead assert branch 0xc90485.
+    ("Uncharted 2 ultrawide: water reflections as wide as the view", [
+        hor_plus_variant("c5fa108a54020000 c5f82815 ????????", 0x254, 0x250,
+                         [(0, "rdx", 1, 2)],
+                         [(0x1d1, 0x35, bytes.fromhex("488b05ecda8d004885c0"))]),
+    ]),
     # Shadows past the 16:9 area (Uncharted 2): the culling frustums of the sun, rain and local
     # (flashlight, lamp) shadows are built from the render camera's own zoom and aspect, in
     # copies of the frustum-plane code (view-frustum.cpp MakeSunShadowViewFrustum 0xcccc90,
@@ -1157,6 +1166,28 @@ def net_game_env(env, user, roots):
     return overlay
 
 
+def native_hdr_composite(env, game_key, render_size, hdr_on):
+    """HDR at the game's own size (all three games share the tone pass, gow3_pc/hdr): the scene
+    HDR and the float HUD chain live on the upscaling path, so the frame takes it at 1:1
+    (GOW3_COMPOSITE_NATIVE). The anti-aliasing then runs on the finished frame, as when upscaling.
+    Read at start: switching HDR on in the game takes a restart for the scene.
+    UNCHARTED_HDR_NATIVE=0 keeps the native path (anti-aliasing before post processing, SDR scene).
+    The launcher cannot see the display: without HDR output (no HDR display) the renderer removes
+    the variables listed in GOW3_COMPOSITE_NATIVE_ENV and the session is the native one."""
+    if ("GOW3_RENDER_RES" in env or game_key not in ("u1", "u2", "u3") or not hdr_on
+            or os.environ.get("UNCHARTED_TEMPORAL_AA", "1") == "0"
+            or os.environ.get("UNCHARTED_HDR_NATIVE", "1") == "0"):
+        return False
+    added = ["GOW3_RENDER_RES", "GOW3_OUTPUT_RES"]
+    added += [name for name in ("GOW3_UI_COMPOSITE_PS", "GOW3_UI_TONEMAP_PS") if name not in env]
+    env["GOW3_RENDER_RES"] = env["GOW3_OUTPUT_RES"] = f"{render_size[0]}x{render_size[1]}"
+    env["GOW3_COMPOSITE_NATIVE"] = "1"
+    env.setdefault("GOW3_UI_COMPOSITE_PS", "749bbec9")
+    env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")
+    env["GOW3_COMPOSITE_NATIVE_ENV"] = ",".join(added)
+    return True
+
+
 def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=()):
     """game: the folder the prepare scripts read; app0 (default: game) with overlays laid over
     it is what the game sees as /app0."""
@@ -1413,6 +1444,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             # into its target after it, so the upscale runs at the draw after it.
             env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")
             print(f"Upscaling: {render_size[0]}x{render_size[1]} -> {out_w}x{out_h}")
+    if native_hdr_composite(env, game_key, render_size,
+                            ini_value(Path(env["GOW3_CONFIG"]), "hdr", "0") == "1"):
+        print(f"HDR: {render_size[0]}x{render_size[1]} through the upscaling path at 1:1 "
+              "(scene HDR, if the display offers HDR10)")
     pad_file=user / "probe-pad.txt"
     pad_file.write_text("",encoding="ascii")
     env["GOW3_PAD_FILE"] = str(pad_file)

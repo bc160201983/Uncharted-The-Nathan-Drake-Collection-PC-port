@@ -389,6 +389,21 @@ void ImageTab() {
         ChoiceRow("Display mode", s.display_mode, G::DisplayModeNames.data(), nullptr, G::DisplayModeCount,
                   "Windowed, borderless window or exclusive fullscreen.");
         CheckRow("VSync", s.vsync, "Waits for the monitor: no tearing, a little more input delay.");
+        // Without an HDR display it can still be switched off (an ini from another display).
+        ImGui::BeginDisabled(!s.hdr_supported && !s.hdr);
+        CheckRow("HDR", s.hdr,
+                 s.hdr_supported ? "HDR10 output. Turn on HDR in Windows display settings first. "
+                                   "Restart after enabling HDR to apply it to the scene."
+                                 : "Needs a display with HDR turned on in Windows display settings.");
+        ImGui::BeginDisabled(!s.hdr);
+        SliderRow("Peak brightness", s.hdr_peak_nits, 400, 4000, "%d nits",
+                  "The brightest highlights; set it to your display's peak.");
+        SliderRow("Game brightness", s.hdr_game_nits, 80, 500, "%d nits",
+                  "The brightness of white surfaces in the game (203 = the HDR reference).");
+        SliderRow("HUD brightness", s.hdr_ui_nits, 80, 500, "%d nits",
+                  "The brightness of the HUD, menus and this overlay.");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
         ImGui::EndTable();
     }
     const int iw = s.image_width, ih = s.image_height, ww = s.window_width, wh = s.window_height;
@@ -486,11 +501,16 @@ void ImageTab() {
         InfoRow("Game image", text);
         std::snprintf(text, sizeof(text), "%d x %d", ww, wh);
         InfoRow("Window", text);
-        // The launcher's Upscaling draws the game below the output size (GOW3_RENDER_RES): FSR 1
-        // upscales it before the HUD (TemporalUpscaler::OnComposite) unless an upscaler runs.
+        // Native HDR also sets GOW3_RENDER_RES; compare sizes before claiming upscaling.
         const char* scaled = std::getenv("GOW3_RENDER_RES");
+        const char* output = std::getenv("GOW3_OUTPUT_RES");
+        int rw = 0, rh = 0, ow = 0, oh = 0;
+        const bool composite_upscaling = scaled && output &&
+            std::sscanf(scaled, "%dx%d", &rw, &rh) == 2 &&
+            std::sscanf(output, "%dx%d", &ow, &oh) == 2 &&
+            rw > 0 && rh > 0 && rw < ow && rh < oh;
         InfoRow("FSR 1", !s.fsr1 ? "off"
-                         : scaled && *scaled ? "upscales the game before the HUD"
+                         : composite_upscaling ? "upscales the game before the HUD"
                          : upscaling ? "active"
                                      : "no effect (image not smaller than window)");
         InfoRow("Sharpening", s.rcas_applied ? "applied" : "not applied");

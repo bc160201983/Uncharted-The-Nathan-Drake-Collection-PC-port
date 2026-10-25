@@ -31,6 +31,10 @@ ldd gow3_pc/out/gow3-probe.exe | awk '/clang64/ {print $3}' | sort -u | while re
     cp "$dll" "$stage/gow3_pc/out/"
 done
 
+# HDR tone replacement: only the checked-in SPIR-V (its HLSL source stays in the repository; the
+# RenoDX license goes with the others below).
+mkdir -p "$stage/gow3_pc/out/hdr"
+cp gow3_pc/hdr/*.spv "$stage/gow3_pc/out/hdr/"
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/install_update.py \
     tools/net_overlay.py "$stage/tools/"
@@ -54,6 +58,8 @@ cp tools/github/CHANGELOG.md "$stage/CHANGELOG.md"
 # among them, carry no license file).
 licenses=$stage/licenses
 mkdir -p "$licenses"
+mkdir -p "$licenses/renodx"
+cp gow3_pc/hdr/renodx/LICENSE gow3_pc/hdr/renodx/SOURCE.txt "$licenses/renodx/"
 for dir in gow3_pc/gpu/third_party/* gow3_pc/third_party/*; do
     for file in "$dir"/LICENSE* "$dir"/COPYING* "$dir"/COPYRIGHT*; do
         [[ -f $file ]] || continue

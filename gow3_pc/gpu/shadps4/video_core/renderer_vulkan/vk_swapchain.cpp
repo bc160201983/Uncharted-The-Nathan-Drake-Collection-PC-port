@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <string>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -16,7 +17,9 @@
 #include "gow3_toggles.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/hdr_session.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 namespace Vulkan {
@@ -25,6 +28,28 @@ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
     .format = vk::Format::eA2B10G10R10UnormPack32,
     .colorSpace = vk::ColorSpaceKHR::eHdr10St2084EXT,
 };
+
+// gow3: the launcher sends the game's own size through the upscaling path at 1:1 when the ini
+// has HDR on (GOW3_COMPOSITE_NATIVE, tools/probe_uncharted.py); it cannot see the display. Without
+// HDR output that path only costs: the variables it set (GOW3_COMPOSITE_NATIVE_ENV) are removed
+// before the renderer reads them (TemporalUpscaler, Gow3Settings::FixedRenderSession), so the
+// session is the native one.
+static void KeepNativeCompositeOnlyWithHdr(bool hdr_output) {
+    if (!HdrSession::DropNativeComposite(std::getenv("GOW3_COMPOSITE_NATIVE"), hdr_output)) {
+        return;
+    }
+    for (const std::string& name :
+         HdrSession::NativeCompositeVariables(std::getenv("GOW3_COMPOSITE_NATIVE_ENV"))) {
+#ifdef _WIN32
+        _putenv_s(name.c_str(), "");
+#else
+        unsetenv(name.c_str());
+#endif
+    }
+    std::printf("HDR: no HDR output (%s), the game's own size takes the native path\n",
+                Gow3Settings::Get().hdr ? "the display does not offer HDR10" : "HDR is off");
+    std::fflush(stdout);
+}
 
 Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
     : instance{instance_}, window{window_} {
@@ -38,6 +63,8 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
         FindPresentFormat();
         FindPresentMode();
     }
+    // Headless sessions have no HDR output either (supports_hdr stays false).
+    KeepNativeCompositeOnlyWithHdr(supports_hdr && Gow3Settings::Get().hdr);
 
     Create(window.GetWidth(), window.GetHeight());
     ImGui::Core::Initialize(instance, window, image_count, surface_format.format);
@@ -125,13 +152,8 @@ void Swapchain::SetHDR(bool hdr) {
         return;
     }
 
-    auto result = instance.GetDevice().waitIdle();
-    if (result != vk::Result::eSuccess) {
-        LOG_WARNING(ImGui, "Failed to wait for Vulkan device idle on mode change: {}",
-                    vk::to_string(result));
-    }
-
     needs_hdr = hdr;
+    // Recreate's Destroy waits for idle while excluding concurrent queue submissions.
     Recreate(width, height);
     ImGui::Core::OnSurfaceFormatChange(needs_hdr ? SURFACE_FORMAT_HDR.format
                                                  : surface_format.format);
@@ -222,15 +244,11 @@ void Swapchain::FindPresentFormat() {
         return;
     }
 
-    // Try to find a suitable format.
-    for (const vk::SurfaceFormatKHR& sformat : formats) {
-        vk::Format format = sformat.format;
-        if (format != vk::Format::eR8G8B8A8Unorm && format != vk::Format::eB8G8R8A8Unorm) {
-            continue;
-        }
-
-        surface_format.format = format;
-        surface_format.colorSpace = sformat.colorSpace;
+    // Try to find a suitable format: sRGB nonlinear first (HdrSession::PickSdrFormat).
+    if (const auto* sformat = HdrSession::PickSdrFormat<vk::SurfaceFormatKHR>(
+            formats, {vk::Format::eR8G8B8A8Unorm, vk::Format::eB8G8R8A8Unorm},
+            vk::ColorSpaceKHR::eSrgbNonlinear)) {
+        surface_format = *sformat;
         return;
     }
 
@@ -262,10 +280,6 @@ void Swapchain::UpdateVsync() {
     if (headless) return;
     if (Gow3Settings::Get().vsync == vsync) {
         return;
-    }
-    if (const auto result = instance.GetDevice().waitIdle(); result != vk::Result::eSuccess) {
-        LOG_WARNING(Render_Vulkan, "Failed to wait for the device before a VSync change: {}",
-                    vk::to_string(result));
     }
     FindPresentMode();
     Recreate(width, height);
@@ -344,6 +358,9 @@ void Swapchain::SetSurfaceProperties() {
 
 void Swapchain::Destroy() {
     vk::Device device = instance.GetDevice();
+    // vkDeviceWaitIdle requires host synchronization with queue submissions. The game
+    // scheduler can submit on another thread while the presentation thread resizes.
+    std::scoped_lock submit_lock{Scheduler::submit_mutex};
     const auto wait_result = device.waitIdle();
     if (wait_result != vk::Result::eSuccess) {
         LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",

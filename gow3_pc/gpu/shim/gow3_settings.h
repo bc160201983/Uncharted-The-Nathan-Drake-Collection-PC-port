@@ -76,6 +76,18 @@ struct Values {
     /// Set by the presenter: the game's image and the window it is shown in, in pixels.
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
     std::atomic<int> frames_queued{1};
+    /// HDR10 output (Rec. 2020 PQ swapchain), live. Brightness in nits: the peak the image may
+    /// reach, the game's diffuse white (SDR 1.0) and the HUD/menus.
+    std::atomic<bool> hdr{false};
+    std::atomic<int> hdr_peak_nits{1000};
+    std::atomic<int> hdr_game_nits{203};
+    std::atomic<int> hdr_ui_nits{203};
+    /// Set by the presenter: the display accepts HDR10 (the swapchain offers Rec. 2020 PQ).
+    std::atomic<bool> hdr_supported{false};
+    /// Set by the presenter at start: HDR is on and the display accepts it. Only then are the
+    /// HDR10 chain's pipelines built (float-target variants, the tone pass shadow); HDR turned on
+    /// later in the session is HDR10 output of the SDR image until a restart.
+    std::atomic<bool> hdr_pipelines{false};
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};

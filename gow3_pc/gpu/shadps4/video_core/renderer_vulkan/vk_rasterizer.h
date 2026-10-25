@@ -233,7 +233,11 @@ private:
         RenderState state;
         u32 scene_size = 0;
         std::array<float, 2> target_scale{};
+        bool float_color0 = false;
     } begin_memo;
+    /// gow3: the render state's color target 0 is an RGBA16F image of the HDR10 chain
+    /// (TemporalUpscaler::RedirectedToFloat): the draw binds GraphicsPipeline::FloatTargetHandle.
+    bool float_color0 = false;
     u64 begin_memo_hits = 0, begin_memo_misses = 0;
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
@@ -244,6 +248,10 @@ private:
     void UpdateDepthStencilState() const;
     /// gow3: the squaring pipeline of a scaled MIN/MAX blend when this draw can use it.
     vk::Pipeline SquarePass(const GraphicsPipeline& pipeline) const;
+    void SkipFloatTargetDraw(const GraphicsPipeline& pipeline) const;
+    void RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
+                         bool is_indexed, u32 num_indices, u32 num_instances, u32 first_vertex,
+                         u32 first_instance, const vk::DescriptorBufferInfo& settings);
     void UpdatePrimitiveState(bool is_indexed) const;
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;

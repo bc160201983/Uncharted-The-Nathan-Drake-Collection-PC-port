@@ -6,6 +6,7 @@
 #include "common/assert.h"
 #include "core/emulator_settings.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
+#include "video_core/host_shaders/overlay_hdr_frag.h"
 #include "video_core/host_shaders/post_process_frag.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -15,7 +16,8 @@
 
 namespace Vulkan::HostPasses {
 
-void PostProcessingPass::Create(vk::Device device, const vk::Format surface_format) {
+void PostProcessingPass::Create(vk::Device device, const vk::Format surface_format,
+                                const vk::Format hdr_format) {
     boost::container::static_vector<vk::DescriptorSetLayoutBinding, 2> bindings{
         {
             .binding = 0,
@@ -48,18 +50,9 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
     ASSERT(fs_module);
     SetObjectName(device, fs_module, "post_process.frag");
 
-    const std::array shaders_ci{
-        vk::PipelineShaderStageCreateInfo{
-            .stage = vk::ShaderStageFlagBits::eVertex,
-            .module = vs_module,
-            .pName = "main",
-        },
-        vk::PipelineShaderStageCreateInfo{
-            .stage = vk::ShaderStageFlagBits::eFragment,
-            .module = fs_module,
-            .pName = "main",
-        },
-    };
+    const auto& overlay_module = CompileSPV(OVERLAY_HDR_FRAG, device);
+    ASSERT(overlay_module);
+    SetObjectName(device, overlay_module, "overlay_hdr.frag");
 
     const vk::PipelineLayoutCreateInfo layout_info{
         .setLayoutCount = 1U,
@@ -70,14 +63,6 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
 
     pipeline_layout =
         Check<"create pp pipeline layout">(device.createPipelineLayoutUnique(layout_info));
-
-    const std::array pp_color_formats{
-        surface_format,
-    };
-    const vk::PipelineRenderingCreateInfo pipeline_rendering_ci{
-        .colorAttachmentCount = pp_color_formats.size(),
-        .pColorAttachmentFormats = pp_color_formats.data(),
-    };
 
     const vk::PipelineVertexInputStateCreateInfo vertex_input_info{
         .vertexBindingDescriptionCount = 0u,
@@ -123,22 +108,6 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
         .rasterizationSamples = vk::SampleCountFlagBits::e1,
     };
 
-    const std::array attachments{
-        vk::PipelineColorBlendAttachmentState{
-            .blendEnable = false,
-            .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
-                              vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA,
-        },
-    };
-
-    const vk::PipelineColorBlendStateCreateInfo color_blending{
-        .logicOpEnable = false,
-        .logicOp = vk::LogicOp::eCopy,
-        .attachmentCount = attachments.size(),
-        .pAttachments = attachments.data(),
-        .blendConstants = std::array{1.0f, 1.0f, 1.0f, 1.0f},
-    };
-
     const std::array dynamic_states{
         vk::DynamicState::eViewport,
         vk::DynamicState::eScissor,
@@ -149,26 +118,69 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
         .pDynamicStates = dynamic_states.data(),
     };
 
-    const vk::GraphicsPipelineCreateInfo pipeline_info{
-        .pNext = &pipeline_rendering_ci,
-        .stageCount = shaders_ci.size(),
-        .pStages = shaders_ci.data(),
-        .pVertexInputState = &vertex_input_info,
-        .pInputAssemblyState = &input_assembly,
-        .pViewportState = &viewport_info,
-        .pRasterizationState = &raster_state,
-        .pMultisampleState = &multisampling,
-        .pColorBlendState = &color_blending,
-        .pDynamicState = &dynamic_info,
-        .layout = *pipeline_layout,
+    // gow3: the same pass for the SDR swapchain format and for HDR10 (A2B10G10R10), and the
+    // overlay composite, which blends the 8-bit menu image onto the HDR10 image.
+    const auto make_pipeline = [&](vk::Format format, vk::ShaderModule fragment, bool blend) {
+        const std::array shaders_ci{
+            vk::PipelineShaderStageCreateInfo{
+                .stage = vk::ShaderStageFlagBits::eVertex,
+                .module = vs_module,
+                .pName = "main",
+            },
+            vk::PipelineShaderStageCreateInfo{
+                .stage = vk::ShaderStageFlagBits::eFragment,
+                .module = fragment,
+                .pName = "main",
+            },
+        };
+        const vk::PipelineRenderingCreateInfo pipeline_rendering_ci{
+            .colorAttachmentCount = 1,
+            .pColorAttachmentFormats = &format,
+        };
+        const std::array attachments{
+            vk::PipelineColorBlendAttachmentState{
+                .blendEnable = blend,
+                .srcColorBlendFactor = vk::BlendFactor::eSrcAlpha,
+                .dstColorBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha,
+                .colorBlendOp = vk::BlendOp::eAdd,
+                .srcAlphaBlendFactor = vk::BlendFactor::eZero,
+                .dstAlphaBlendFactor = vk::BlendFactor::eOne,
+                .alphaBlendOp = vk::BlendOp::eAdd,
+                .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+                                  vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA,
+            },
+        };
+        const vk::PipelineColorBlendStateCreateInfo color_blending{
+            .logicOpEnable = false,
+            .logicOp = vk::LogicOp::eCopy,
+            .attachmentCount = attachments.size(),
+            .pAttachments = attachments.data(),
+            .blendConstants = std::array{1.0f, 1.0f, 1.0f, 1.0f},
+        };
+        const vk::GraphicsPipelineCreateInfo pipeline_info{
+            .pNext = &pipeline_rendering_ci,
+            .stageCount = shaders_ci.size(),
+            .pStages = shaders_ci.data(),
+            .pVertexInputState = &vertex_input_info,
+            .pInputAssemblyState = &input_assembly,
+            .pViewportState = &viewport_info,
+            .pRasterizationState = &raster_state,
+            .pMultisampleState = &multisampling,
+            .pColorBlendState = &color_blending,
+            .pDynamicState = &dynamic_info,
+            .layout = *pipeline_layout,
+        };
+        return Check<"create post process pipeline">(device.createGraphicsPipelineUnique(
+            /*pipeline_cache*/ {}, pipeline_info));
     };
-
-    pipeline = Check<"create post process pipeline">(device.createGraphicsPipelineUnique(
-        /*pipeline_cache*/ {}, pipeline_info));
+    pipeline = make_pipeline(surface_format, fs_module, false);
+    hdr_pipeline = make_pipeline(hdr_format, fs_module, false);
+    overlay_pipeline = make_pipeline(hdr_format, overlay_module, true);
 
     // Once pipeline is compiled, we don't need the shader module anymore
     device.destroyShaderModule(vs_module);
     device.destroyShaderModule(fs_module);
+    device.destroyShaderModule(overlay_module);
 
     // Create sampler resource
     const vk::SamplerCreateInfo sampler_ci{
@@ -181,34 +193,19 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
     sampler = Check<"create pp sampler">(device.createSamplerUnique(sampler_ci));
 }
 
-void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
-                                vk::Extent2D input_size, Frame& frame, Settings settings) {
-    if (EmulatorSettings.IsVkHostMarkersEnabled()) {
-        cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
-            .pLabelName = "Host/Post processing",
-        });
-    }
-
-    constexpr vk::ImageSubresourceRange simple_subresource = {
-        .aspectMask = vk::ImageAspectFlagBits::eColor,
-        .levelCount = 1,
-        .layerCount = 1,
-    };
+void PostProcessingPass::Draw(vk::CommandBuffer cmdbuf, vk::Pipeline target_pipeline,
+                              vk::ImageView input, vk::ImageView output, vk::Extent2D extent,
+                              vk::AttachmentLoadOp load, const Settings& settings) {
     const std::array<vk::RenderingAttachmentInfo, 1> attachments{{
         {
-            .imageView = frame.image_view,
+            .imageView = output,
             .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
-            .loadOp = vk::AttachmentLoadOp::eClear,
+            .loadOp = load,
             .storeOp = vk::AttachmentStoreOp::eStore,
         },
     }};
     const vk::RenderingInfo rendering_info{
-        .renderArea{
-            .extent{
-                .width = frame.width,
-                .height = frame.height,
-            },
-        },
+        .renderArea{.extent = extent},
         .layerCount = 1,
         .colorAttachmentCount = attachments.size(),
         .pColorAttachments = attachments.data(),
@@ -231,24 +228,19 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
         },
     };
 
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, target_pipeline);
 
     const std::array viewports = {
         vk::Viewport{
-            .width = static_cast<float>(frame.width),
-            .height = static_cast<float>(frame.height),
+            .width = static_cast<float>(extent.width),
+            .height = static_cast<float>(extent.height),
             .minDepth = 0.0f,
             .maxDepth = 1.0f,
         },
     };
 
     cmdbuf.setViewport(0, viewports);
-    cmdbuf.setScissor(0, vk::Rect2D{
-                             .extent{
-                                 .width = frame.width,
-                                 .height = frame.height,
-                             },
-                         });
+    cmdbuf.setScissor(0, vk::Rect2D{.extent = extent});
 
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0, set_writes);
     cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(Settings),
@@ -257,6 +249,25 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
     cmdbuf.beginRendering(rendering_info);
     cmdbuf.draw(3, 1, 0, 0);
     cmdbuf.endRendering();
+}
+
+void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
+                                vk::Extent2D input_size, Frame& frame, Settings settings) {
+    if (EmulatorSettings.IsVkHostMarkersEnabled()) {
+        cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
+            .pLabelName = "Host/Post processing",
+        });
+    }
+
+    constexpr vk::ImageSubresourceRange simple_subresource = {
+        .aspectMask = vk::ImageAspectFlagBits::eColor,
+        .levelCount = 1,
+        .layerCount = 1,
+    };
+
+    // The frame image has the swapchain's format: HDR10 whenever the swapchain is.
+    Draw(cmdbuf, frame.is_hdr ? *hdr_pipeline : *pipeline, input, frame.image_view,
+         {frame.width, frame.height}, vk::AttachmentLoadOp::eClear, settings);
 
     const auto post_barrier = vk::ImageMemoryBarrier2{
         .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
@@ -277,6 +288,12 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }
+}
+
+void PostProcessingPass::RenderOverlay(vk::CommandBuffer cmdbuf, vk::ImageView overlay,
+                                       vk::ImageView target, vk::Extent2D extent,
+                                       const Settings& settings) {
+    Draw(cmdbuf, *overlay_pipeline, overlay, target, extent, vk::AttachmentLoadOp::eLoad, settings);
 }
 
 } // namespace Vulkan::HostPasses

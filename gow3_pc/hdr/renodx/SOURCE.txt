@@ -1,0 +1,4 @@
+RenoDX shader include dependency snapshot
+Source: https://github.com/clshortfuse/renodx
+Commit: b6b32f47789ff9d0e640a0e0db6c9421b5397f34
+License: MIT (see LICENSE)
