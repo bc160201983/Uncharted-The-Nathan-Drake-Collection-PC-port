@@ -20,6 +20,7 @@
 #include "gow3_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
+#include "video_core/renderer_vulkan/hdr_session.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_blend_rewrite.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -132,12 +133,12 @@ bool HdrPipelines() {
 }
 
 // The replacement is the tone pass as translated with manual interpolation (per-vertex inputs
-// through VK_KHR_fragment_shader_barycentric): the profile used on NVIDIA's driver
-// (PipelineCache, needs_manual_interpolation). Elsewhere the translated interface differs, so
-// the scene stays SDR (inside HDR10 output).
+// through VK_KHR_fragment_shader_barycentric, HdrSession::ShadowShaderUsable). Elsewhere the
+// translated interface differs, so the scene stays SDR (inside HDR10 output).
 bool HdrShadowShaderUsable(const Instance& instance) {
-    const bool usable = instance.IsFragmentShaderBarycentricSupported() &&
-                        instance.GetDriverID() == vk::DriverId::eNvidiaProprietary;
+    const bool usable = HdrSession::ShadowShaderUsable(
+        instance.IsFragmentShaderBarycentricSupported(),
+        instance.GetDriverID() == vk::DriverId::eNvidiaProprietary);
     static std::once_flag logged;
     if (!usable) {
         std::call_once(logged, [] {

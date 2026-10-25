@@ -1166,6 +1166,28 @@ def net_game_env(env, user, roots):
     return overlay
 
 
+def native_hdr_composite(env, game_key, render_size, hdr_on):
+    """HDR at the game's own size (all three games share the tone pass, gow3_pc/hdr): the scene
+    HDR and the float HUD chain live on the upscaling path, so the frame takes it at 1:1
+    (GOW3_COMPOSITE_NATIVE). The anti-aliasing then runs on the finished frame, as when upscaling.
+    Read at start: switching HDR on in the game takes a restart for the scene.
+    UNCHARTED_HDR_NATIVE=0 keeps the native path (anti-aliasing before post processing, SDR scene).
+    The launcher cannot see the display: without HDR output (no HDR display) the renderer removes
+    the variables listed in GOW3_COMPOSITE_NATIVE_ENV and the session is the native one."""
+    if ("GOW3_RENDER_RES" in env or game_key not in ("u1", "u2", "u3") or not hdr_on
+            or os.environ.get("UNCHARTED_TEMPORAL_AA", "1") == "0"
+            or os.environ.get("UNCHARTED_HDR_NATIVE", "1") == "0"):
+        return False
+    added = ["GOW3_RENDER_RES", "GOW3_OUTPUT_RES"]
+    added += [name for name in ("GOW3_UI_COMPOSITE_PS", "GOW3_UI_TONEMAP_PS") if name not in env]
+    env["GOW3_RENDER_RES"] = env["GOW3_OUTPUT_RES"] = f"{render_size[0]}x{render_size[1]}"
+    env["GOW3_COMPOSITE_NATIVE"] = "1"
+    env.setdefault("GOW3_UI_COMPOSITE_PS", "749bbec9")
+    env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")
+    env["GOW3_COMPOSITE_NATIVE_ENV"] = ",".join(added)
+    return True
+
+
 def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=()):
     """game: the folder the prepare scripts read; app0 (default: game) with overlays laid over
     it is what the game sees as /app0."""
@@ -1422,24 +1444,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             # into its target after it, so the upscale runs at the draw after it.
             env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")
             print(f"Upscaling: {render_size[0]}x{render_size[1]} -> {out_w}x{out_h}")
-    # HDR at the game's own size (all three games share the tone pass, gow3_pc/hdr):
-    # the scene HDR and the float HUD chain live on the upscaling path, so the frame takes it at
-    # 1:1 (GOW3_COMPOSITE_NATIVE). The anti-aliasing then runs on the finished frame, as when
-    # upscaling. Read at start: switching HDR on in the game takes a restart for the scene.
-    # UNCHARTED_HDR_NATIVE=0 keeps the native path (anti-aliasing before post processing, SDR scene).
-    # The launcher cannot see the display: without HDR output (no HDR display) the renderer removes
-    # the variables listed in GOW3_COMPOSITE_NATIVE_ENV and the session is the native one.
-    if ("GOW3_RENDER_RES" not in env and game_key in ("u1", "u2", "u3")
-            and os.environ.get("UNCHARTED_TEMPORAL_AA", "1") != "0"
-            and os.environ.get("UNCHARTED_HDR_NATIVE", "1") != "0"
-            and ini_value(Path(env["GOW3_CONFIG"]), "hdr", "0") == "1"):
-        added = ["GOW3_RENDER_RES", "GOW3_OUTPUT_RES"]
-        added += [name for name in ("GOW3_UI_COMPOSITE_PS", "GOW3_UI_TONEMAP_PS") if name not in env]
-        env["GOW3_RENDER_RES"] = env["GOW3_OUTPUT_RES"] = f"{render_size[0]}x{render_size[1]}"
-        env["GOW3_COMPOSITE_NATIVE"] = "1"
-        env.setdefault("GOW3_UI_COMPOSITE_PS", "749bbec9")
-        env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")
-        env["GOW3_COMPOSITE_NATIVE_ENV"] = ",".join(added)
+    if native_hdr_composite(env, game_key, render_size,
+                            ini_value(Path(env["GOW3_CONFIG"]), "hdr", "0") == "1"):
         print(f"HDR: {render_size[0]}x{render_size[1]} through the upscaling path at 1:1 "
               "(scene HDR, if the display offers HDR10)")
     pad_file=user / "probe-pad.txt"
