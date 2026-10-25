@@ -81,6 +81,10 @@ void TestFallbacks() {
     assert(key_queries == 3 && key.keySize == 0);
 
     SetCache("");
+    assert(!Vulkan::InitializePipelineBinaryCache(device, true, key));
+    assert(key_queries == 3 && key.keySize == 0);
+
+    SetCache("1");
     key_size = VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR;
     assert(Vulkan::InitializePipelineBinaryCache(device, true, key));
     assert(key_queries == 4 && key.keySize == key_size && key.key[0] == 7);

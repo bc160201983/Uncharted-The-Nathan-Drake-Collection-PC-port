@@ -138,10 +138,13 @@ int main(int argc, char** argv) {
     v.gold_orb_multiplier = 4.0f;
     Gow3Settings::Save();
     const std::string saved = Read(path);
-    for (const char* line : {"damage_dealt=2.500\n", "damage_taken=0.500\n", "green_orb_multiplier=3.000\n",
-                             "blue_orb_multiplier=100.000\n", "gold_orb_multiplier=4.000\n"}) {
+    // The Uncharted menu preserves legacy GOW3 keys rather than writing these controls.
+    for (const char* line : {"damage_dealt=2.5\n", "damage_taken=0.5\n", "green_orb_multiplier=3\n",
+                             "blue_orb_multiplier=1000\n", "gold_orb_multiplier=0\n"}) {
         assert(saved.find(line) != std::string::npos);
     }
+    Gow3Settings::Load();
+    assert(v.blue_orb_multiplier == 100.0f && v.gold_orb_multiplier == 0.1f);
     std::remove(path);
     std::puts("PASS: stat multipliers");
 }

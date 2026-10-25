@@ -16,6 +16,10 @@
 #include "video_core/host_shaders/taa_sharpen_comp.h"
 #include <vk_mem_alloc.h>
 
+// Match the renderer's Vulkan-Hpp dispatcher layout before enabling test assertions.
+#undef NDEBUG
+#include <cassert>
+
 int main(int argc, char** argv) {
     using namespace Vulkan;
     Instance instance(0, false);
