@@ -214,3 +214,17 @@ No runtime behavior was tested by this investigation, and no game patches were d
   on the first map, 50 kills, 20 minutes, 1 round, friendly fire off (UC2MP_SETTINGS_DEFAULT).
   Mode descriptions ("Shoot your enemies in the face." ee98504c) are in the same file.
 - Checked offscreen: the custom game page shows those defaults.
+
+## Classic maps in the native net game (2026-10-25)
+- runtime_coop_mp.c's netinit only had the Fort for deathmatch: the competitive spawn choice
+  (ChooseSpawn 0x644220: manager, slot -> spawner sid) and GetSpawnLocator (0x662fa0) read the
+  online spawners of the net pak level only, and the Collection lost every "<map>-multi-pak".
+- runtime_uc2mp_netmaps.c: for a competitive net game on a catalogue map, the main level stands in
+  for the net pak (with the PS3 companion levels) and both functions answer from
+  uc2mp_extracted_spawn_catalog.h (co-op spawners left out; the farthest from the others' last
+  spawns). GetDeltaSeconds (0xa477c0) asserted for networked processes (+0x168 bit 8, Village's
+  scripts): they get the frame's delta (0xa4785a je -> jmp).
+- *net-games* deathmatch indices: Sanctuary 0, Ice Cave 5, Lost City 10, Train Wreck 15, Temple 20,
+  Village 25, Plaza 30 (five variants each), Fort 124. UC2MP_NET_GAMES_LIST=1 prints the table.
+- Checked offscreen, host + joiner on one PC: all 7 reach Playing (net mode 26) on PS3 spawners,
+  no assert, no packet dropped; the Fort unchanged.
