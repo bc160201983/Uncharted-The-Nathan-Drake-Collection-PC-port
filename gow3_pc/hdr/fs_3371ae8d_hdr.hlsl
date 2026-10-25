@@ -1,4 +1,13 @@
-// Uncharted 2 HDR tone replacement. Live settings use binding 12; guest bindings 0-9 stay intact.
+// Derived from a game shader: the tone pass pixel shader of Uncharted: The Nathan Drake
+// Collection (guest hash 3371ae8d, filmic curve and LUT; the same shader in all three games).
+// It was translated to SPIR-V by the port's shader recompiler (gpu/shadps4/shader_recompiler,
+// dumped with GOW3_DUMP_SHADERS=1, NVIDIA profile: manual interpolation through
+// VK_KHR_fragment_shader_barycentric) and decompiled to HLSL with SPIRV-Cross. The game's shader
+// is Naughty Dog's / Sony Interactive Entertainment's work and not covered by the RenoDX MIT
+// license, which applies to renodx/ only. The port's additions: the HdrSettings buffer, the
+// renodx_* captures and main_hdr_shadow (RenoDX tone mapping of the pre-tonemap color).
+//
+// HDR tone replacement. Live settings use binding 12; guest bindings 0-9 stay intact.
 [[vk::binding(12, 0)]] ByteAddressBuffer HdrSettings;
 #define RENODX_PEAK_WHITE_NITS asfloat(HdrSettings.Load(0))
 #define RENODX_DIFFUSE_WHITE_NITS asfloat(HdrSettings.Load(4))

@@ -388,7 +388,9 @@ bool TemporalUpscaler::OnFrameStart() {
     // HUD and menu draws of the frame just upscaled still go to its host display buffer.
     display_redirect = ui_phase || composite_done;
     // gow3: HDR10 output (Stage 2: the HUD and display buffers in RGBA16F), for this frame.
-    hdr_chain = composite_frames && Gow3Settings::Get().hdr && Gow3Settings::Get().hdr_supported;
+    // Its draws need the float-target pipelines, built only when HDR was on at start.
+    hdr_chain = composite_frames && Gow3Settings::Get().hdr && Gow3Settings::Get().hdr_supported &&
+                Gow3Settings::Get().hdr_pipelines;
     tone_shadow.drawn = scene_shadow.drawn = false;
     hdr_output = false;
     composite_done = false;
@@ -476,7 +478,7 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
 
     FfxVkPortableUpscaleCreateInfo create_info{};
     create_info.structSize = sizeof(create_info);
-    // Native AA runs on the HDR scene color; scaled presets on the game's tonemapped frame.
+    // FSR 3's context flag describes its input domain. TAA and FSR 4 use their own paths.
     create_info.flags = hdr ? FFX_VK_PORTABLE_CONTEXT_HDR_COLOR_INPUT |
                                   FFX_VK_PORTABLE_CONTEXT_AUTO_EXPOSURE
                             : 0;
@@ -585,8 +587,7 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     resources_fsr4 = use_fsr4;
     resources_taa = use_taa;
     if (use_taa) {
-        std::printf("TAA: context %ux%u -> %ux%u (%s), no FSR model\n", w, h, ow, oh,
-                    hdr ? "HDR scene color" : "tonemapped frame");
+        std::printf("TAA: context %ux%u -> %ux%u, no FSR model\n", w, h, ow, oh);
         return true;
     }
     if (use_fsr4) {

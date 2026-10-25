@@ -166,6 +166,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
                    vk::Format::eA2B10G10R10UnormPack32);
     Gow3Overlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
     Gow3Settings::Get().hdr_supported = swapchain.HasHDR();
+    // Before the pipeline warm-up below: SDR sessions build none of the HDR10 pipelines.
+    Gow3Settings::Get().hdr_pipelines = Gow3Settings::Get().hdr && swapchain.HasHDR();
 
     const bool binary_cache = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARIES", true) &&
                               EmulatorSettings.IsPipelineCacheEnabled();
@@ -237,6 +239,9 @@ void Presenter::RenderOverlay(vk::CommandBuffer cmdbuf, vk::Extent2D extent) {
     const vk::Device device = instance.GetDevice();
     if (!overlay_image || overlay_extent != extent) {
         if (overlay_image) {
+            // vkDeviceWaitIdle excludes queue submissions; the game scheduler submits on another
+            // thread (as in Swapchain::Destroy). The present lock is only taken later, at submit.
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
             Check(device.waitIdle());
             device.destroyImageView(overlay_view);
             vmaDestroyImage(instance.GetAllocator(), overlay_image, overlay_allocation);

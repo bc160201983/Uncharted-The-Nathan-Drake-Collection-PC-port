@@ -4,7 +4,9 @@
 #include <chrono>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <string>
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -23,9 +25,39 @@ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
     .colorSpace = vk::ColorSpaceKHR::eHdr10St2084EXT,
 };
 
+// gow3: the launcher sends the game's own size through the upscaling path at 1:1 when the ini
+// has HDR on (GOW3_COMPOSITE_NATIVE, tools/probe_uncharted.py); it cannot see the display. Without
+// HDR output that path only costs: the variables it set (GOW3_COMPOSITE_NATIVE_ENV) are removed
+// before the renderer reads them (TemporalUpscaler, Gow3Settings::FixedRenderSession), so the
+// session is the native one.
+static void KeepNativeCompositeOnlyWithHdr(bool hdr_output) {
+    const char* native = std::getenv("GOW3_COMPOSITE_NATIVE");
+    if (hdr_output || !native || native[0] != '1') {
+        return;
+    }
+    const char* listed = std::getenv("GOW3_COMPOSITE_NATIVE_ENV");
+    std::string names = std::string(listed ? listed : "") + ",GOW3_COMPOSITE_NATIVE";
+    for (size_t start = 0; start < names.size();) {
+        const size_t end = std::min(names.find(',', start), names.size());
+        const std::string name = names.substr(start, end - start);
+        if (!name.empty()) {
+#ifdef _WIN32
+            _putenv_s(name.c_str(), "");
+#else
+            unsetenv(name.c_str());
+#endif
+        }
+        start = end + 1;
+    }
+    std::printf("HDR: no HDR output (%s), the game's own size takes the native path\n",
+                Gow3Settings::Get().hdr ? "the display does not offer HDR10" : "HDR is off");
+    std::fflush(stdout);
+}
+
 Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
     : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
     FindPresentFormat();
+    KeepNativeCompositeOnlyWithHdr(supports_hdr && Gow3Settings::Get().hdr);
     FindPresentMode();
 
     Create(window.GetWidth(), window.GetHeight());
@@ -192,16 +224,23 @@ void Swapchain::FindPresentFormat() {
         return;
     }
 
-    // Try to find a suitable format.
-    for (const vk::SurfaceFormatKHR& sformat : formats) {
-        vk::Format format = sformat.format;
-        if (format != vk::Format::eR8G8B8A8Unorm && format != vk::Format::eB8G8R8A8Unorm) {
-            continue;
-        }
+    // Try to find a suitable format. gow3: with the color space extension enabled a surface may
+    // list the 8-bit formats in other color spaces too; the SDR swapchain takes sRGB nonlinear,
+    // another 8-bit one only if the surface offers none.
+    for (const bool srgb_only : {true, false}) {
+        for (const vk::SurfaceFormatKHR& sformat : formats) {
+            vk::Format format = sformat.format;
+            if (format != vk::Format::eR8G8B8A8Unorm && format != vk::Format::eB8G8R8A8Unorm) {
+                continue;
+            }
+            if (srgb_only && sformat.colorSpace != vk::ColorSpaceKHR::eSrgbNonlinear) {
+                continue;
+            }
 
-        surface_format.format = format;
-        surface_format.colorSpace = sformat.colorSpace;
-        return;
+            surface_format.format = format;
+            surface_format.colorSpace = sformat.colorSpace;
+            return;
+        }
     }
 
     UNREACHABLE_MSG("Unable to find required swapchain format!");

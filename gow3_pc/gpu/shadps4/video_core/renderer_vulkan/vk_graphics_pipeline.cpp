@@ -17,6 +17,7 @@
 
 #include "common/assert.h"
 #include "core/emulator_settings.h"
+#include "gow3_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -122,6 +123,30 @@ const std::vector<u32>* HdrShadowShader(u64 ps_hash) {
         }
     }
     return it->second.empty() ? nullptr : &it->second;
+}
+
+// gow3: the HDR10 chain's extra pipelines (float-target variants, the tone pass shadow and its
+// binding 12) are built only when HDR is on at start (Gow3Settings hdr_pipelines).
+bool HdrPipelines() {
+    return EmulatorSettings.IsHdrAllowed() && Gow3Settings::Get().hdr_pipelines;
+}
+
+// The replacement is the tone pass as translated with manual interpolation (per-vertex inputs
+// through VK_KHR_fragment_shader_barycentric): the profile used on NVIDIA's driver
+// (PipelineCache, needs_manual_interpolation). Elsewhere the translated interface differs, so
+// the scene stays SDR (inside HDR10 output).
+bool HdrShadowShaderUsable(const Instance& instance) {
+    const bool usable = instance.IsFragmentShaderBarycentricSupported() &&
+                        instance.GetDriverID() == vk::DriverId::eNvidiaProprietary;
+    static std::once_flag logged;
+    if (!usable) {
+        std::call_once(logged, [] {
+            std::printf("HDR: no scene HDR on this GPU (the tone pass replacement needs the "
+                        "NVIDIA barycentric shader path); HDR10 output of the SDR scene\n");
+            std::fflush(stdout);
+        });
+    }
+    return usable;
 }
 } // namespace
 
@@ -564,8 +589,8 @@ GraphicsPipeline::GraphicsPipeline(
     // gow3: HDR10 output keeps the upscaled frame, its HUD and the display buffer in RGBA16F
     // (TemporalUpscaler::HdrChain). Draws redirected there need this variant: same shaders and
     // state, only color target 0's format differs (about 1 in 12 pipelines in Uncharted 2).
-    // Without GOW3_HDR (allowed by default) the HDR10 chain is never used: none are built.
-    const bool float_candidate = EmulatorSettings.IsHdrAllowed() &&
+    // Only when HDR is on at start (HdrPipelines); SDR sessions build none.
+    const bool float_candidate = HdrPipelines() &&
                                  key.num_color_attachments == 1 && !needs_square_pass &&
                                  (color_formats[0] == vk::Format::eR8G8B8A8Unorm ||
                                   color_formats[0] == vk::Format::eR8G8B8A8Srgb);
@@ -588,7 +613,7 @@ GraphicsPipeline::GraphicsPipeline(
     // replacement fragment shader and an RGBA16F target. Brightness comes from binding 12.
     const auto* fragment_info = stages[u32(Shader::SwStage::Fragment)];
     const std::vector<u32>* shadow_code =
-        EmulatorSettings.IsHdrAllowed() && fragment_info && key.num_color_attachments == 1 &&
+        hdr_settings_binding && fragment_info && key.num_color_attachments == 1 &&
                 !needs_square_pass
             ? HdrShadowShader(fragment_info->pgm_hash)
             : nullptr;
@@ -721,10 +746,10 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
             });
         }
     }
-    // The U2 replacement shader adds a settings buffer after the translated bindings 0-11.
+    // The tone pass replacement adds a settings buffer after the translated bindings 0-11.
     const auto* ps = stages[u32(Shader::SwStage::Fragment)];
-    hdr_settings_binding = EmulatorSettings.IsHdrAllowed() && ps &&
-                           u32(ps->pgm_hash) == 0x3371ae8d && binding == 12 &&
+    hdr_settings_binding = ps && u32(ps->pgm_hash) == 0x3371ae8d && binding == 12 &&
+                           HdrPipelines() && HdrShadowShaderUsable(instance) &&
                            HdrShadowShader(ps->pgm_hash);
     if (hdr_settings_binding) {
         bindings.push_back({.binding = binding++,
