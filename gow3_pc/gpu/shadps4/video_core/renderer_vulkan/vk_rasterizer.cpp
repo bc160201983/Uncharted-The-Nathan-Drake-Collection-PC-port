@@ -2810,6 +2810,22 @@ static void RecordFullBarrier(vk::CommandBuffer cmdbuf) {
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 
+void Rasterizer::NoteDisplayStorageWrite(const Shader::Info& cs) {
+    if (!upscaler->CompositeFrames()) {
+        return;
+    }
+    for (const auto& image_desc : cs.images) {
+        if (!image_desc.is_written) {
+            continue;
+        }
+        const VAddr address = image_desc.GetSharp(cs).Address();
+        if (address && FrameCapture::IsDisplayBuffer(address)) {
+            upscaler->OnDisplayStorageWrite(address);
+            return;
+        }
+    }
+}
+
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
@@ -2859,6 +2875,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (ExecuteShaderHLE(cs, Regs(), cs_program, *this)) {
         return;
     }
+    NoteDisplayStorageWrite(cs);
     // gow3 diagnostics (GOW3_DUMP_CS_CONST=<hex shader hash>): the first 32 dwords (as floats) of
     // every buffer the dispatch reads that is up to 4 KiB, with a timestamp, 2000 lines at most.
     static const u64 dump_cs = [] {
@@ -3008,6 +3025,7 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
     }
     scheduler.PopPendingOperations();
     const u32 offset = 0;
+    NoteDisplayStorageWrite(pipeline->GetStage(Shader::SwStage::Compute));
 
     if (!BindResources(pipeline)) {
         return;

@@ -458,6 +458,40 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     return result;
 }
 
+// gow3 26 Oct 2026 (GitHub #201: "the launcher refuses to open the game" after an hour of play;
+// #230, #206, #185: AMD's driver crashed while the warm-up built a cached pipeline, at every start
+// until the player cleared the cache): a fault on a warm-up thread leaves warmup-crashed.txt in
+// the cache folder (gow3gpu_note_fatal_fault, from the fatal fault handler) and the next start
+// clears the cache and rebuilds it as the game plays, instead of crashing on the same pipeline.
+thread_local bool t_warmup_thread = false;
+wchar_t g_warmup_mark[1024] = {};
+
+std::filesystem::path WarmupMarkPath() {
+    const auto folder = Storage::DataBase::Instance().Folder();
+    return folder.empty() || !Storage::DataBase::Instance().ConcurrentReads()
+               ? std::filesystem::path{}
+               : folder / "warmup-crashed.txt";
+}
+
+/// Arms the mark for this start; true when the previous start crashed in its warm-up.
+bool TakeWarmupMark() {
+    const auto mark = WarmupMarkPath();
+    if (mark.empty()) {
+        return false;
+    }
+    const std::wstring path = mark.wstring();
+    if (path.size() < std::size(g_warmup_mark)) {
+        std::copy(path.begin(), path.end(), g_warmup_mark);
+        g_warmup_mark[path.size()] = 0;
+    }
+    std::error_code error;
+    if (!std::filesystem::exists(mark, error)) {
+        return false;
+    }
+    std::filesystem::remove(mark, error);
+    return true;
+}
+
 // gow3: GOW3_PARALLEL_WARMUP=1. The cache store is still read and the shader modules created in
 // order on the calling thread (program_cache and its permutation checks are not thread-safe);
 // only the pipeline objects, the slow part, are built here. The runtime compiler builds
@@ -537,6 +571,17 @@ private:
             ++running;
             lock.unlock();
             bool ok = false;
+            t_warmup_thread = true;
+            // Test (26 Oct 2026): GOW3_TEST_WARMUP_CRASH=<n> faults in the n-th warm-up job,
+            // as a graphics driver crash there would (the next start clears the cache).
+            static const long crash_at = [] {
+                const char* env = std::getenv("GOW3_TEST_WARMUP_CRASH");
+                return env ? std::strtol(env, nullptr, 10) : 0L;
+            }();
+            static std::atomic<long> jobs_run{0};
+            if (crash_at > 0 && jobs_run.fetch_add(1) + 1 == crash_at) {
+                *static_cast<volatile int*>(nullptr) = 0;
+            }
             try {
                 ok = job();
             } catch (const std::exception& e) {
@@ -558,6 +603,9 @@ private:
     u32 running = 0;
     bool closing = false;
 };
+
+u64 StagePrint(u64 perm_hash); // gow3 26 Oct 2026: stage prints, below
+constexpr u32 StagePrintsMagic = 0x54525053u; // "SPRT", after a graphics key's sdata
 
 void RegisterPipelineData(const ComputePipelineKey& key,
                           ComputePipeline::SerializationSupport& sdata) {
@@ -593,6 +641,14 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
     key.Serialize(ar);
     sdata.Serialize(ar);
 
+    // gow3 26 Oct 2026: the binary hash of each stage this pipeline is built with (0: unknown).
+    std::array<u64, MaxShaderStages> prints{};
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        prints[i] = key.stage_hashes[i] ? StagePrint(key.stage_hashes[i]) : 0;
+    }
+    pldata.Write(StagePrintsMagic);
+    pldata.Write(prints.data(), sizeof(prints));
+
     Storage::DataBase::Instance().Save(Storage::BlobType::PipelineKey,
                                        fmt::format("g_{:#018x}", hash), ar.TakeOff());
 }
@@ -605,6 +661,72 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
 // and a binary that does not match its meta is not used (the permutation compiles again).
 std::mutex g_binary_hash_mutex;
 std::unordered_map<u64, u64> g_binary_hashes; // HashCombine(program, permutation) -> XXH3 of SPIR-V
+
+// gow3 26 Oct 2026 (GitHub #230 #201 #206 #185: AMD's driver crashed in the background warm-up,
+// read of 0x60 in amdvlk64.dll, until the cache was cleared; #230 after switching upscaling): a
+// cached pipeline names its stages by program and permutation index, and a permutation the warm-up
+// does not load (motion vertex shaders never are) leaves its index free for the next permutation
+// the game compiles, whose files then replace the old ones under the same name. The next start
+// built the old pipeline from the new stage: a motion fragment shader with a vertex shader that
+// does not write the motion varyings, which the AMD compiler does not survive. A pipeline key now
+// also carries the binary hash ("print") of each stage it was built with, and the warm-up builds
+// it only from those very stages. Prints of this session's stages: perm hash -> binary hash.
+std::mutex g_stage_print_mutex;
+std::unordered_map<u64, u64> g_stage_prints;
+
+void NoteStagePrint(u64 perm_hash, u64 print, bool replace) {
+    if (!print) {
+        return;
+    }
+    std::scoped_lock lock{g_stage_print_mutex};
+    if (replace) {
+        g_stage_prints[perm_hash] = print;
+    } else {
+        g_stage_prints.try_emplace(perm_hash, print);
+    }
+}
+
+u64 StagePrint(u64 perm_hash) {
+    std::scoped_lock lock{g_stage_print_mutex};
+    const auto it = g_stage_prints.find(perm_hash);
+    return it == g_stage_prints.end() ? 0 : it->second;
+}
+
+/// The stage prints a graphics key was saved with (zeros for keys of earlier builds).
+std::array<u64, MaxShaderStages> ReadStagePrints(Serialization::Archive& ar) {
+    std::array<u64, MaxShaderStages> prints{};
+    if (ar.IsEoS()) {
+        return prints;
+    }
+    Serialization::Reader reader{ar};
+    u32 magic{};
+    reader.Read(magic);
+    if (magic == StagePrintsMagic) {
+        reader.Read(prints.data(), sizeof(prints));
+    }
+    return prints;
+}
+
+std::atomic<u32> g_stale_stage_pipelines{0};
+// Warm-up statistics: cached pipelines with a motion fragment shader (motion_pairs: of them, the
+// ones whose vertex shader would have loaded, i.e. the builds the AMD driver did not survive).
+std::atomic<u32> g_motion_fragment_pipelines{0}, g_motion_fragment_pairs{0};
+thread_local bool t_motion_fragment_rejected = false;
+
+/// Whether a cached stage (its meta's binary hash) is the one the pipeline was saved with.
+bool StageMatchesPrint(u64 expected, u64 binary_hash) {
+    if (!expected || !binary_hash || expected == binary_hash) {
+        return true;
+    }
+    if (g_stale_stage_pipelines.fetch_add(1, std::memory_order_relaxed) < 8) {
+        std::printf("Pipeline cache: a cached pipeline names a shader stage that was replaced "
+                    "since (binary %#llx, now %#llx); it compiles when used\n",
+                    static_cast<unsigned long long>(expected),
+                    static_cast<unsigned long long>(binary_hash));
+        std::fflush(stdout);
+    }
+    return false;
+}
 
 u64 TakeBinaryHash(u64 perm_hash) {
     std::scoped_lock lock{g_binary_hash_mutex};
@@ -710,7 +832,9 @@ void RegisterShaderMeta(const Shader::Info& info,
 
     meta.Write(perm_hash);
     meta.Write(perm_idx);
-    meta.Write(TakeBinaryHash(perm_hash));
+    const u64 binary_hash = TakeBinaryHash(perm_hash);
+    meta.Write(binary_hash);
+    NoteStagePrint(perm_hash, binary_hash, true);
 
     spec.Serialize(ar);
     info.Serialize(ar);
@@ -766,6 +890,14 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     // Motion vertex shaders embed session-local buffer device addresses. They must be
     // recompiled for the current allocation, never loaded from a previous process.
     if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
+        return false;
+    }
+    // gow3 26 Oct 2026 (#230 and other AMD warm-up crashes): nor their fragment shaders. Their
+    // pipelines need the motion vertex shader, so a cached pipeline that pairs one with another
+    // vertex shader (whose permutation took the motion one's index since) reads varyings that no
+    // stage writes, which crashes AMD's pipeline compiler. They compile along with the vertex ones.
+    if (info.hw_stage == Shader::HwStage::Fragment && spec.runtime_info.hw.fs.motion_vectors) {
+        t_motion_fragment_rejected = true;
         return false;
     }
 
@@ -880,6 +1012,10 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
     GraphicsPipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
+    const auto prints = ReadStagePrints(ar);
+    if (sel.graphics_key.motion_vectors) {
+        return false; // gow3 26 Oct 2026: its stages are never loaded (LoadShaderMeta)
+    }
 
     for (int stage_idx = 0; stage_idx < MaxShaderStages; ++stage_idx) {
         const auto& hash = sel.graphics_key.stage_hashes[stage_idx];
@@ -896,7 +1032,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
         Serialization::Archive meta_ar{std::move(meta_blob)};
 
-        if (!LoadPipelineStage(meta_ar, stage_idx)) {
+        if (!LoadPipelineStage(meta_ar, stage_idx, prints[stage_idx])) {
             return false;
         }
     }
@@ -928,14 +1064,14 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     return true;
 }
 
-bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) {
+bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, u64 expected_print) {
     auto program = std::make_unique<Program>();
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
     size_t perm_idx{};
     u64 binary_hash{};
     if (!LoadShaderMeta(ar, program->info, sel.fetch_shader, spec, perm_idx, binary_hash) ||
-        IsCrowdedShader(program->info.pgm_hash)) {
+        IsCrowdedShader(program->info.pgm_hash) || !StageMatchesPrint(expected_print, binary_hash)) {
         return false;
     }
 
@@ -951,6 +1087,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     // Permutation hash depends on shader variation index. To prevent collisions, we need insert it
     // at the exact position rather than append
 
+    const u64 stage_perm_hash = HashCombine(program->info.pgm_hash, u64(perm_idx));
     vk::ShaderModule module{};
 
     auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
@@ -977,10 +1114,29 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
         }
     }
     it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
+    NoteStagePrint(stage_perm_hash, binary_hash, false);
 
     sel.infos[stage] = &it_pgm.value()->info;
     sel.modules[stage] = module;
 
+    return true;
+}
+
+/// gow3 26 Oct 2026: true when the previous start crashed in the warm-up (warmup-crashed.txt):
+/// the cache is then cleared (only this game's, this GPU's) and starts over like a new one.
+bool PipelineCache::DropCrashedCache() {
+    if (!TakeWarmupMark()) {
+        return false;
+    }
+    auto& db = Storage::DataBase::Instance();
+    db.Clear();
+    db.FinishPreload();
+    std::vector<u8> profile_data(sizeof(profile));
+    std::memcpy(profile_data.data(), &profile, sizeof(profile));
+    db.Save(Storage::BlobType::ShaderProfile, "profile", std::move(profile_data));
+    std::printf("Pipeline cache: the last start crashed while the cache was loading (graphics "
+                "driver); the cache was cleared and is rebuilt as the game plays\n");
+    std::fflush(stdout);
     return true;
 }
 
@@ -1045,7 +1201,7 @@ bool PipelineCache::CheckCacheProfile() {
 }
 
 void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
-    if (!CheckCacheProfile()) {
+    if (!CheckCacheProfile() || DropCrashedCache()) {
         return;
     }
 
@@ -1069,6 +1225,8 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
         }
     };
 
+    t_warmup_thread = true;
+    SCOPE_EXIT { t_warmup_thread = false; };
     Storage::DataBase::Instance().ForEachBlob(
         Storage::BlobType::PipelineKey, [&](std::vector<u8>&& data) {
             ++num_total_pipelines;
@@ -1149,6 +1307,8 @@ struct PipelineCache::WarmStage {
     std::optional<Shader::Gcn::FetchShaderData> fetch;
     size_t perm_idx{};
     vk::ShaderModule module{};
+    u64 binary_hash{}; ///< gow3 26 Oct 2026: its meta's binary hash (the stage print)
+    bool motion_fragment = false; ///< gow3 26 Oct 2026: a motion fragment shader (not loaded)
     // GPU thread, from the merge on.
     bool merged = false;
     bool module_kept = false;           ///< the module now belongs to a Program
@@ -1201,7 +1361,7 @@ bool PipelineCache::StartBackgroundWarmUp() {
     if (!Storage::DataBase::Instance().ConcurrentReads()) {
         return false;
     }
-    if (!CheckCacheProfile()) {
+    if (!CheckCacheProfile() || DropCrashedCache()) {
         return true; // nothing cached yet
     }
     background = new BackgroundWarmup;
@@ -1245,6 +1405,7 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
     BackgroundWarmup::Entry entry{};
     entry.compute = is_compute != 0;
     std::array<u64, MaxShaderStages> hashes{};
+    std::array<u64, MaxShaderStages> prints{};
     if (entry.compute) {
         entry.compute_key.Deserialize(ar);
         ComputePipeline::SerializationSupport sdata{};
@@ -1253,6 +1414,7 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
     } else {
         entry.graphics_key.Deserialize(ar);
         entry.sdata.Deserialize(ar);
+        prints = ReadStagePrints(ar);
         for (u32 i = 0; i < MaxShaderStages; ++i) {
             hashes[i] = entry.graphics_key.stage_hashes[i];
         }
@@ -1276,9 +1438,11 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
             if (!meta_blob.empty()) {
                 Serialization::Archive meta_ar{std::move(meta_blob)};
                 u64 binary_hash{};
-                if (LoadShaderMeta(meta_ar, stage->program->info, stage->fetch, stage->spec,
-                                   stage->perm_idx, binary_hash) &&
-                    !IsCrowdedShader(stage->program->info.pgm_hash)) {
+                t_motion_fragment_rejected = false;
+                const bool meta_ok = LoadShaderMeta(meta_ar, stage->program->info, stage->fetch,
+                                                    stage->spec, stage->perm_idx, binary_hash);
+                stage->motion_fragment = t_motion_fragment_rejected;
+                if (meta_ok && !IsCrowdedShader(stage->program->info.pgm_hash)) {
                     std::vector<u32> spv;
                     db.Load(Storage::BlobType::ShaderBinary,
                             Serialization::ShaderBinaryName(stage->program->info.pgm_hash,
@@ -1289,6 +1453,7 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
                                                           stage->perm_idx)) {
                         const auto module_started = std::chrono::steady_clock::now();
                         stage->module = CompileSPV(spv, stage->device);
+                        stage->binary_hash = binary_hash;
                         module_time = ElapsedNs(module_started);
                         warm.module_ns += module_time;
                         ++warm.modules;
@@ -1302,6 +1467,27 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
         }
         entry.stages[i] = stage;
     }
+    if (!entry.compute) {
+        // gow3 26 Oct 2026: a pipeline with motion vectors is never preloaded (its motion vertex
+        // and fragment shaders are not loaded, LoadShaderMeta). Counted: those whose vertex stage
+        // under that name is no motion one now, which earlier builds built (AMD driver crash).
+        const auto& vs = entry.stages[u32(Shader::SwStage::Vertex)];
+        const auto& fs = entry.stages[u32(Shader::SwStage::Fragment)];
+        if (entry.graphics_key.motion_vectors || (fs && fs->motion_fragment)) {
+            g_motion_fragment_pipelines.fetch_add(1, std::memory_order_relaxed);
+            if (fs && fs->motion_fragment && vs && vs->module) {
+                g_motion_fragment_pairs.fetch_add(1, std::memory_order_relaxed);
+            }
+            return skip();
+        }
+        // Only the stages this pipeline was saved with (see g_stage_prints).
+        for (u32 i = 0; i < MaxShaderStages; ++i) {
+            const auto& stage = entry.stages[i];
+            if (stage && stage->module && !StageMatchesPrint(prints[i], stage->binary_hash)) {
+                return skip();
+            }
+        }
+    }
     entry.queued = std::chrono::steady_clock::now();
     warm.read.Push(std::move(entry));
 }
@@ -1309,6 +1495,8 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
 bool PipelineCache::MergeWarmStage(WarmStage& stage) {
     stage.merged = true;
     const u64 hash = stage.program->info.pgm_hash;
+    // gow3 26 Oct 2026: pipelines saved from now on name this permutation by its binary hash.
+    NoteStagePrint(HashCombine(hash, u64(stage.perm_idx)), stage.binary_hash, false);
     const auto it_pgm = program_cache.find(hash);
     if (it_pgm == program_cache.end()) {
         Program* program = stage.program.get();
@@ -1453,6 +1641,10 @@ void PipelineCache::PumpWarmUp() {
                 warm.loaded, warm.total.load(),
                 std::chrono::duration<double>(now - warm.started).count(), warm.threads);
     LOG_INFO(Render, "Preloaded {} pipelines in the background", warm.loaded);
+    std::printf("Pipeline warm-up: skipped %u cached pipelines with motion vectors (%u of them name a "
+                "vertex shader that is no motion one now) and %u with a stage replaced since\n",
+                g_motion_fragment_pipelines.load(), g_motion_fragment_pairs.load(),
+                g_stale_stage_pipelines.load());
     ReportPipelineBinaryCache();
     std::printf("Warm-up profile: reader wall %.3f s, entries %.3f s, shader IO/meta %.3f s, "
                 "modules %.3f s (%u); GPU pump %.3f s, max %.3f ms, gap max %.3f ms, "
@@ -1503,6 +1695,25 @@ void PipelineCache::Sync() {
 }
 
 } // namespace Vulkan
+
+extern "C" void gow3gpu_note_fatal_fault(void) {
+#ifdef _WIN32
+    if (!Vulkan::t_warmup_thread || !Vulkan::g_warmup_mark[0]) {
+        return;
+    }
+    const HANDLE file = CreateFileW(Vulkan::g_warmup_mark, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        static const char text[] = "The game stopped while loading the pipeline cache; the next "
+                                   "start clears the cache.\r\n";
+        DWORD written = 0;
+        WriteFile(file, text, DWORD(sizeof(text) - 1), &written, nullptr);
+        CloseHandle(file);
+    }
+    std::fprintf(stderr, "Pipeline cache: this crash happened while loading the pipeline cache "
+                         "(graphics driver); the next start clears the cache and rebuilds it\n");
+#endif
+}
 
 namespace Shader {
 

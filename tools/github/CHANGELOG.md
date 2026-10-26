@@ -4,6 +4,44 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 26 October 2026 (0.7.0)
+
+- **Uncharted 3 washed out / too bright on GeForce RTX 30 and 40 cards** (#199, #195, #204, #212):
+  the game's automatic exposure adds up each row's brightness in a compute shader whose last six
+  steps have no barriers: they rely on the PS4 GPU running 64 threads in lockstep. These cards run
+  32 at a time, so the sums came out too small (1056 instead of 2616 on the title screen) and the
+  exposure about 2.2 times too high. The shader (aec539f0) now gets the barriers on every GPU,
+  like Uncharted 3's cloth shaders; only that shader is compiled again. The title
+  screen's mean brightness on an affected laptop went from 205 to 166, the same as on other cards.
+- **Uncharted 3: no subtitles over movies with upscaling** (#237, #243, #222): every movie frame is
+  one compute pass that writes the screen from the decoded picture and the subtitle layer. With no
+  normal frame in between, the upscaler's interface phase of the last game or menu frame stayed on
+  during the whole movie, so the subtitles went to an image the movie never read. A compute pass
+  that writes the screen now ends that phase, and the movie is shown as the game drew it.
+- **AMD: crash at start in the shader warm-up** (#230, #201, #206, #185; the driver crashed at the
+  same place for everyone): a saved pipeline named its shaders by program and variant number, and
+  the motion-vector variants could be paired with a different shader on the next start. Saved
+  pipelines now record exactly which shaders they were built from and are skipped when those don't
+  match. A crash while the saved shaders load is also noted, and the next start clears and rebuilds
+  the cache by itself.
+- **Chapter 8 crash on game version 1.00** (`m_lookAt.X() == m_lookAt.X()`, #148, likely #210): the
+  camera focus fix made for 1.02 in 0.2 now has 1.00 variants for Uncharted 2 and 3.
+  UNCHARTED_FOCUS_RESET=0 turns it off.
+- **1.00 executables with a 1.02 version file** (#148, #176): some copies have update 1.02's
+  param.sfo but the 1.00 game executables, so the launcher said 1.02 and the 1.02 fixes were
+  skipped. Such a copy is now reported as 1.00, and the "install update 1.02" warning shows.
+- **Launcher: Advanced -> Uncharted 3 exposure**: an optional, lower exposure for Uncharted 3
+  (-0.3, -0.6 or -1.0 EV; "Game's" = unchanged), based on pavlikdcx's patch in #199.
+- **Launcher: IGPU preset** for Intel and AMD integrated graphics (540-720p, FSR 1 to 1080p),
+  chosen as the recommended preset when the game ran on integrated graphics; adapted from PR #223
+  by memeguyoffical.
+- **Launcher: Add to Steam** (Advanced -> STEAM): adds the port (or each game) to Steam's library
+  as a non-Steam game, with library pictures from the player's own game files. Steam's
+  shortcuts.vdf is read and written losslessly, with a backup; Steam must be closed.
+- **Merged pull requests:** #240 (Windows test builds and test expectations) and #227 (the package
+  zip is written with Python's zipfile, forward-slash paths) by moistman7; #231 by Sparks and #244
+  by fidalgojoao (research and code that is off in this release).
+
 ## 25 October 2026 (0.6.2)
 
 - **The launcher did not open after updating to 0.6.1** (#208): the launcher's new network search

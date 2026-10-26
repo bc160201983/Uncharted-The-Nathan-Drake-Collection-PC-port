@@ -2215,6 +2215,39 @@ bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
     return true;
 }
 
+void TemporalUpscaler::OnDisplayStorageWrite(VAddr address) {
+    // Uncharted 3's movies (#237, #243, #222): every movie frame is one dispatch writing the
+    // display buffer (the decoded picture plus the subtitle layer, a render-size RGBA8 target the
+    // game draws the subtitles into). There is no composite pass, so the rasterizer never started
+    // a new upscaler frame: the UI phase of the last upscaled frame (menu or gameplay) stayed on
+    // for the whole movie. The subtitle draws into that target (the menu frame's ui_color) went to
+    // the output-size ui_image, and the movie shader read ui_image in its place: no subtitles
+    // over movies whenever the game drew below the output size (DLSS / FSR / TAA upscaling).
+    if (!composite_frames) {
+        return;
+    }
+    if (ui_phase || composite_done || display_redirect) {
+        static int reported = 0;
+        if (reported < 3) {
+            ++reported;
+            std::printf("Upscaler: display %#llx written by a compute shader (movie): shown as "
+                        "drawn, its UI layer stays in guest memory\n",
+                        static_cast<unsigned long long>(address));
+            std::fflush(stdout);
+        }
+    }
+    ui_phase = false;
+    composite_done = false;
+    display_redirect = false;
+    tonemap_pending = false;
+    ui_read_barrier = false;
+    ldr_target = {};
+    std::scoped_lock lock{display_mutex};
+    if (const auto it = displays.find(address); it != displays.end()) {
+        it->second.valid = false; // the presenter shows the guest buffer
+    }
+}
+
 bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
     std::scoped_lock lock{display_mutex};
     const auto it = displays.find(address);

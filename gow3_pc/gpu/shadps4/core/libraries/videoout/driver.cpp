@@ -384,6 +384,10 @@ static void LogFrameEvent(char kind) {
 
 void VideoOutDriver::Flip(const Request& req) {
     LogFrameEvent('P');
+    // gow3 26 Oct 2026 (GitHub #236): the frame's GPU work, read before the present can recycle
+    // the frame (see the wait before the flip status below).
+    const vk::Semaphore flip_ready_semaphore = req.frame ? req.frame->ready_semaphore : vk::Semaphore{};
+    const u64 flip_ready_tick = req.frame ? req.frame->ready_tick : 0;
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
@@ -706,6 +710,35 @@ void VideoOutDriver::Flip(const Request& req) {
             worst_ms = 0;
             stalls_shown = 0;
             std::fill(std::begin(last_wait) + 1, std::begin(last_wait) + 6, 0);
+        }
+    }
+
+    // gow3 26 Oct 2026 (GitHub #236, AMD): the guest sees the flip done only once the GPU has
+    // finished the frame, as on the console (the flip follows the frame's end of pipe). Before,
+    // the status changed as soon as the present was queued: Uncharted 2 then reused the frame's
+    // memory while the GPU still drew it, and on a slow AMD GPU (Radeon 780M; RX 9070 reported)
+    // the title screen's text ("Press X", the copyright line) was missing in a quarter to half
+    // of the frames. GOW3_FINISH_AT_FLIP=1 (the whole GPU idle at every flip) cured it at 20% of
+    // the frame rate; this waits on the flip thread only, the GPU command thread goes on.
+    // GOW3_FLIP_AFTER_GPU=1: on, otherwise off (opt-in until it is tested on AMD GPUs).
+    {
+        static const bool flip_after_gpu = [] {
+            const char* env = std::getenv("GOW3_FLIP_AFTER_GPU");
+            const bool on = env && env[0] && env[0] != '0';
+            std::printf("VideoOut: flips complete after the frame's GPU work: %s "
+                        "(GOW3_FLIP_AFTER_GPU)\n",
+                        on ? "on" : "off");
+            std::fflush(stdout);
+            return on;
+        }();
+        if (flip_after_gpu && flip_ready_semaphore && flip_ready_tick) {
+            const vk::SemaphoreWaitInfo wait_info = {
+                .semaphoreCount = 1,
+                .pSemaphores = &flip_ready_semaphore,
+                .pValues = &flip_ready_tick,
+            };
+            // Bounded: a lost device must not hang the flip thread (the old behaviour then).
+            (void)presenter->GetInstance().GetDevice().waitSemaphores(wait_info, 2'000'000'000ULL);
         }
     }
 

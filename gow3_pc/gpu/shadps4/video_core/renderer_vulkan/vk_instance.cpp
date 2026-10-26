@@ -401,7 +401,25 @@ bool Instance::CreateDevice() {
     }
 
     boost::container::static_vector<const char*, 64> enabled_extensions;
+    // gow3 26 Oct 2026 (diagnostics, GitHub #236): GOW3_HIDE_EXTENSIONS=<name>[,<name>...] treats
+    // these device extensions as unavailable (a part of the name is enough, e.g.
+    // vertex_input_dynamic_state), to run a newer driver with an older driver's feature set.
+    static const std::string hidden_extensions = [] {
+        const char* env = std::getenv("GOW3_HIDE_EXTENSIONS");
+        return std::string(env ? env : "");
+    }();
     const auto add_extension = [&](std::string_view extension) -> bool {
+        for (size_t start = 0; start < hidden_extensions.size();) {
+            const size_t end = std::min(hidden_extensions.find(',', start), hidden_extensions.size());
+            const std::string_view part =
+                std::string_view(hidden_extensions).substr(start, end - start);
+            if (!part.empty() && extension.find(part) != std::string_view::npos) {
+                std::printf("GPU: extension %s hidden (GOW3_HIDE_EXTENSIONS)\n", extension.data());
+                LOG_WARNING(Render_Vulkan, "Extension {} unavailable.", extension);
+                return false;
+            }
+            start = end + 1;
+        }
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
                          [&](const std::string& name) { return name == extension; });
@@ -628,8 +646,14 @@ bool Instance::CreateDevice() {
         return true;
     }();
     static constexpr std::array queue_priorities = {1.0f, 1.0f, 1.0f};
+    // gow3 26 Oct 2026 (diagnostics, GitHub #236): GOW3_MAX_QUEUES=1 uses one queue of the
+    // graphics family, as on AMD's drivers that offer only one (no copy or present queue).
+    static const u32 max_queues = [] {
+        const char* env = std::getenv("GOW3_MAX_QUEUES");
+        return env && env[0] >= '1' && env[0] <= '3' ? u32(env[0] - '0') : 3u;
+    }();
     const u32 queue_count =
-        std::min<u32>(present_queue_wanted ? 3u : 2u,
+        std::min<u32>(std::min<u32>(present_queue_wanted ? 3u : 2u, max_queues),
                       family_properties[queue_family_index].queueCount);
     std::vector<vk::DeviceQueueCreateInfo> queue_infos = {vk::DeviceQueueCreateInfo{
         .queueFamilyIndex = queue_family_index,

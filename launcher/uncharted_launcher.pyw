@@ -736,7 +736,9 @@ def game_update_dir(folder):
 
 def app_version(folder):
     """APP_VER of a game folder (sce_sys/param.sfo); 01.02 when the executables are 1.02 although
-    param.sfo says otherwise (dumps with the update merged in that kept the 1.00 param.sfo)."""
+    param.sfo says otherwise (dumps with the update merged in that kept the 1.00 param.sfo), and
+    01.00 when they are 1.00 although param.sfo says 01.02 (26 Oct 2026, #148 and #176: the
+    launcher showed 1.02, the games ran 1.00 and crashed where 1.02 has fixes)."""
     try:
         data = (Path(folder) / "sce_sys" / "param.sfo").read_bytes()
         _, _, keys, values, count = struct.unpack_from("<IIIII", data)
@@ -745,7 +747,11 @@ def app_version(folder):
             key = data[keys + key_at:data.index(bytes(1), keys + key_at)].decode()
             if key == "APP_VER":
                 version = data[values + value_at:values + value_at + length].rstrip(bytes(1)).decode()
-                return "01.02" if version < "01.02" and has_update_102_code(folder) else version
+                if version < "01.02" and has_update_102_code(folder):
+                    return "01.02"
+                if version >= "01.02" and has_update_100_code(folder):
+                    return "01.00"
+                return version
     except (OSError, ValueError, struct.error):
         pass
     return None
@@ -757,18 +763,36 @@ UPDATE_102_CODE = bytes.fromhex("488d05cc9fd500 8b4850 84c9 7440 8a50".replace("
 _update_102_cache = {}
 
 
-def has_update_102_code(folder):
+# Uncharted 2's PlayerBase::UpdateFocus assert as version 1.00 compiled it (exact bytes; also in
+# the dumped 1.00 executable as it is). tools/probe_uncharted.py U2_FOCUS_100.
+UPDATE_100_CODE = bytes.fromhex(
+    "c4e37904c900c5f0c2c900c5f850c183f80f7438e8a8d71a004885c07427488d3d4c9c8300"
+    "488d354b998300488d155b9c8300488d0d7e99830041b84d0400004531c9ffd0cd41")
+
+
+def _executable_codes(folder):
+    """(has the 1.02 code, has the 1.00 code) of the folder's Uncharted 2 executable; both False
+    when it is missing. Cached by file and write time."""
     path = Path(folder) / "big2-ps4_Shipping.elf"
     try:
         key = (str(path), path.stat().st_mtime_ns)
     except OSError:
-        return False
+        return False, False
     if key not in _update_102_cache:
         try:
-            _update_102_cache[key] = UPDATE_102_CODE in path.read_bytes()
+            data = path.read_bytes()
+            _update_102_cache[key] = (UPDATE_102_CODE in data, UPDATE_100_CODE in data)
         except OSError:
-            _update_102_cache[key] = False
+            _update_102_cache[key] = (False, False)
     return _update_102_cache[key]
+
+
+def has_update_102_code(folder):
+    return _executable_codes(folder)[0]
+
+
+def has_update_100_code(folder):
+    return _executable_codes(folder)[1]
 
 
 def desktop_folder():
@@ -901,10 +925,21 @@ def resolution_options(aspect):
 # render resolution is new (October 2026): confirm in play. All three games draw at 4K
 # natively except Drake's Fortune, which stops at 1620p (its memory layout) and upscales.
 PRESETS = {
+    # IGPU card adapted from PR #223 by memeguyoffical (the card, its values and the iGPU detection).
+    "igpu": {
+        "title": "IGPU", "summary": "30–60 FPS  •  540–720p, FSR 1",
+        "detail": "Intel and AMD integrated graphics: the game draws at 540p (720p on the strongest "
+                  "iGPUs, 360p on the weakest) and FSR 1 upscales it to 1080p. About 30 FPS on Vega "
+                  "and 2-CU Radeon, 60 on Radeon 680M/760M/780M and Iris Xe. No anti-aliasing; the "
+                  "lowest memory use.",
+        "resolution": "1920x1080", "upscale": "performance",
+        "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
+                   "fsr1": "1", "rcas": "1", "rcas_strength": "75", "upscaler": "off"},
+    },
     "low": {
         "title": "LOW", "summary": "60 FPS  •  1080p, FSR 1",
-        "detail": "For integrated and older graphics cards: the game draws at half of 1080p and FSR 1 "
-                  "upscales it; the HUD stays sharp.",
+        "detail": "For older graphics cards: the game draws at half of 1080p and FSR 1 upscales it; "
+                  "the HUD stays sharp.",
         "resolution": "1920x1080", "upscale": "performance",
         "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
                    "fsr1": "1", "rcas": "1", "rcas_strength": "75"},
@@ -932,7 +967,7 @@ PRESETS = {
                    "fsr1": "0", "rcas": "1", "rcas_strength": "50"},
     },
 }
-PRESET_ORDER = ("low", "medium", "high", "ultra")
+PRESET_ORDER = ("igpu", "low", "medium", "high", "ultra")
 
 
 def upscaling_options():
@@ -951,19 +986,39 @@ def preset_values(name):
     return dict(PRESETS[name]["values"])
 
 
-def gpu_names():
-    """The graphics cards: the one the game used last (its log names it), else Windows' list."""
+def gpu_log_info():
+    """The graphics card the game used last, as its log names it: {"name", "integrated"}.
+    None when no log has it. The log lists every card as "GPU 0: <name> (DiscreteGpu)" and the one
+    chosen as "GPU: using <name>"; the kind is None when the log predates that line."""
     logs = [ROOT / "analysis" / g["log"] / "boot.log" for g in GAMES]
     for log in sorted((log for log in logs if log.exists()), key=lambda p: p.stat().st_mtime, reverse=True):
+        name, kinds = None, {}
         try:
             with open(log, encoding="utf-8", errors="replace") as lines:
                 for number, line in enumerate(lines):
                     if line.startswith("GPU: using "):
-                        return [line[len("GPU: using "):].strip()]
+                        name = line[len("GPU: using "):].strip()
+                    elif line.startswith("GPU ") and ": " in line:
+                        head, _, card = line.partition(": ")
+                        if head[4:].strip().isdigit() and card.rstrip().endswith(")"):
+                            model, _, kind = card.rstrip().rpartition(" (")
+                            kinds[model] = kind[:-1]
                     if number > 400:
                         break
         except OSError:
-            pass
+            continue
+        if name:
+            kind = kinds.get(name)
+            return {"name": name, "integrated": True if kind == "IntegratedGpu"
+                    else False if kind == "DiscreteGpu" else None}
+    return None
+
+
+def gpu_names():
+    """The graphics cards: the one the game used last (its log names it), else Windows' list."""
+    info = gpu_log_info()
+    if info:
+        return [info["name"]]
     try:
         result = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
                                 capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW)
@@ -972,13 +1027,82 @@ def gpu_names():
         return []
 
 
+# Integrated graphics by model name (IGPU card adapted from PR #223 by memeguyoffical): the log says
+# it exactly ("(IntegratedGpu)"), but Windows' list and older logs only give the name. AMD APUs:
+# Vega, the 610M-890M Radeon and the unnamed "Radeon Graphics"; Intel: Iris Xe, UHD/HD and the
+# integrated Arc (130V-150V, 130T/140T, "Arc Graphics"). Separate cards: a discrete Arc A/B (also
+# the laptop A370M-A770M and Arc Pro A40-B60), a Radeon RX, Vega 56/64, Radeon VII, and GeForce
+# laptop chips with the same numbers (GTX 660M/680M). Strix Halo (Radeon 8040S-8060S) is
+# integrated too, but as fast as a mid-range card: it is not an IGPU-preset GPU.
+INTEGRATED_AMD = re.compile(
+    r"\bradeon\s*(?:610m|640m|660m|680m|740m|760m|780m|860m|880m|890m)\b"
+    r"|\bradeon\s+graphics\b|\bradeon\s+vega\b|\bvega\s*(?:3|6|7|8|9|10|11)\b"
+    r"|\bryzen\s+.*\bgraphics\b")
+DISCRETE_ARC = re.compile(r"\barc\s*(?:pro\s*)?[ab]\d{2,3}")
+STRIX_HALO = re.compile(r"\bradeon\s*80[4-6]0s\b")
+
+
+def gpu_name_key(name):
+    return " ".join((name or "").lower().replace("(tm)", " ").replace("(r)", " ").split())
+
+
+def gpu_strix_halo(name):
+    """True for the Ryzen AI Max APUs (Radeon 8040S/8050S/8060S): integrated, but no low-end GPU."""
+    return bool(STRIX_HALO.search(gpu_name_key(name)))
+
+
+def gpu_integrated(name):
+    """True for low-end integrated graphics (the IGPU preset's GPUs), from the model name."""
+    n = gpu_name_key(name)
+    if not n or gpu_strix_halo(n) or "nvidia" in n or "geforce" in n:
+        return False
+    if "vega 56" in n or "vega 64" in n or "radeon vii" in n or re.search(r"\brx\s*\d", n):
+        return False
+    if "intel" in n:
+        return not DISCRETE_ARC.search(n)
+    return bool(INTEGRATED_AMD.search(n))
+
+
+def igpu_class(name):
+    """How strong an integrated GPU is, for the IGPU preset's own defaults: "weak" (30 FPS: Vega,
+    the 2-4 CU Radeon, older Intel UHD/HD), "mainstream" (60 FPS at 540p: Radeon 680M/760M/780M,
+    Iris Xe) or "strong" (60 FPS at 720p: Radeon 880M/890M, integrated Arc)."""
+    n = gpu_name_key(name)
+    if ("intel" in n and "arc" in n) or re.search(r"\b(880m|890m)\b", n):
+        return "strong"
+    if re.search(r"\b(680m|760m|780m|860m)\b", n) or ("intel" in n and "iris xe" in n):
+        return "mainstream"
+    if "intel" in n or "vega" in n or re.search(r"\b(610m|640m|660m|740m)\b", n) \
+            or "radeon graphics" in n:
+        return "weak"
+    return "mainstream"
+
+
+def gpu_recommendation(name, integrated=None):
+    """The Quick Setup preset for a card: IGPU for low-end integrated graphics (the game log's
+    "(IntegratedGpu)" when known, else the model name), else gpu_tier. Strix Halo never takes IGPU."""
+    n = gpu_name_key(name)
+    if gpu_strix_halo(n):
+        return gpu_tier(n)
+    # A name that is a separate card (discrete Arc, GeForce, Radeon RX) never takes IGPU.
+    if integrated is None or DISCRETE_ARC.search(n) \
+            or re.search(r"\b(?:nvidia|geforce|radeon vii)\b|\brx\s*(?:\d|vega)", n):
+        integrated = gpu_integrated(n)
+    return "igpu" if integrated else gpu_tier(name)
+
+
 def gpu_tier(name):
     """The Quick Setup preset for a graphics card, from its model name; None when not known.
-    Rough classes: Low = integrated and older entry cards, Medium = 1080p cards (GTX 1060-1660,
-    RTX x060, RX 580-7600), High = 1440p cards, Ultra = 4K cards (RTX x080/x090,
-    RTX 4070 Ti and up, RX 6800 XT/7900/9070). High and Ultra laptop chips count one class lower."""
-    n = (name or "").lower().replace("(tm)", "").replace("(r)", "")
-    nvidia = re.search(r"\b(rtx|gtx|gt|mx)\s*(\d{3,4})\s*(ti)?\s*(super)?", n)
+    Low-end integrated graphics take IGPU (30-60 FPS below 1080p with FSR 1); the others: Low =
+    older entry cards, Medium = 1080p cards (GTX 1060-1660, RTX x060, RX 580-7600, Strix Halo),
+    High = 1440p cards, Ultra = 4K cards (RTX x080/x090, RTX 4070 Ti and up, RX 6800 XT/7900/9070).
+    High and Ultra laptop chips count one class lower."""
+    n = gpu_name_key(name)
+    if gpu_strix_halo(n):
+        return "medium"
+    if gpu_integrated(n):
+        return "igpu"
+    nvidia =re.search(r"\b(rtx|gtx|gt|mx)\s*(\d{3,4})\s*(ti)?\s*(super)?", n)
     amd = re.search(r"\brx\s*(\d{3,4})\s*(xtx|xt|gre)?", n)
     arc = re.search(r"\barc\s*([ab])(\d{3})", n)
     if nvidia:
@@ -1028,7 +1152,7 @@ def gpu_tier(name):
     elif arc:
         tier = "medium" if int(arc.group(2)) >= 500 else "low"
     elif "intel" in n or ("radeon" in n and "graphics" in n):
-        tier = "low"  # integrated graphics
+        tier = "low"  # other Intel (Arc Pro) and Radeon graphics the checks above did not place
     else:
         return None
     if "laptop" in n or "max-q" in n or "mobile" in n or re.search(r"\d{3,4}m\b", n):
@@ -1422,7 +1546,7 @@ class Launcher:
         self.images = []
         # The graphics card (as last detected; detect_gpu checks again) for the Quick Setup advice.
         self.gpu_name = self.config.get("gpu")
-        self.recommended = gpu_tier(self.gpu_name)
+        self.recommended = gpu_recommendation(self.gpu_name)
         self.fonts()
         root.title(f"{APP_TITLE} - Launcher by BilalReloaded")
         root.configure(bg=BG)
@@ -1476,20 +1600,22 @@ class Launcher:
 
     def detect_gpu(self):
         """Finds the graphics card in the background (Windows' list takes a moment) and marks the
-        Quick Setup preset that suits it."""
+        Quick Setup preset that suits it. The game log's "(IntegratedGpu)" is exact; the model name
+        is the fallback, and all there is when the card has never run the game."""
         found = []
-        threading.Thread(target=lambda: found.append(gpu_names()), daemon=True).start()
+        threading.Thread(target=lambda: found.append((gpu_log_info(), gpu_names())), daemon=True).start()
 
         def done():
             if not found:
                 self.root.after(200, done)
                 return
-            names = found[0]
+            info, names = found[0]
             if not names:
                 return
             known = [name for name in names if gpu_tier(name)]
             name = max(known, key=lambda n: PRESET_ORDER.index(gpu_tier(n))) if known else names[0]
-            self.gpu_name, self.recommended = name, gpu_tier(name)
+            integrated = info.get("integrated") if info and info.get("name") == name else None
+            self.gpu_name, self.recommended = name, gpu_recommendation(name, integrated)
             if self.config.get("gpu") != name:
                 self.config["gpu"] = name
                 write_config(self.config)
@@ -1922,11 +2048,15 @@ class Launcher:
         grid.pack(side="top", fill="x")
         self.preset_cards = {}
         gap = self.px(16)
-        card_w = (self.width - 2 * self.px(40) - 3 * gap) // 4
-        card_h = self.px(150)
+        # Five presets in 3 + 2: five in one row would squeeze the descriptions at this width.
+        columns = 3
+        card_w = (self.width - 2 * self.px(40) - (columns - 1) * gap) // columns
+        card_h = self.px(170)
         for i, name in enumerate(PRESET_ORDER):
+            row, column = divmod(i, columns)
             canvas = tk.Canvas(grid, width=card_w, height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
-            canvas.grid(row=0, column=i, padx=(0 if i == 0 else gap, 0))
+            canvas.grid(row=row, column=column, padx=(0 if column == 0 else gap, 0),
+                        pady=(0 if row == 0 else gap, 0), sticky="w")
             canvas.bind("<Button-1>", lambda e, n=name: self.apply_preset(n))
             canvas.bind("<Enter>", lambda e, n=name: self.draw_preset(n, hover=True))
             canvas.bind("<Leave>", lambda e, n=name: self.draw_preset(n))
@@ -1961,9 +2091,9 @@ class Launcher:
         for name in self.preset_cards:
             self.draw_preset(name)
         if self.recommended:
-            self.setup_intro.config(text=f"Recommended for your graphics card ({self.gpu_name}): "
-                                         f"{PRESETS[self.recommended]['title'].title()}. Every setting can still be "
-                                         "changed in Display and Performance.")
+            label = "iGPU" if self.recommended == "igpu" else PRESETS[self.recommended]["title"].title()
+            self.setup_intro.config(text=f"Recommended for your graphics card ({self.gpu_name}): {label}. "
+                                         "Every setting can still be changed in Display and Performance.")
         else:
             self.setup_intro.config(text="Pick a quality level. Every setting can still be changed in Display "
                                          "and Performance.")
@@ -1974,17 +2104,37 @@ class Launcher:
 
     def apply_preset(self, name):
         settings = self.game_settings()
-        settings["resolution"] = PRESETS[name]["resolution"]
-        settings["upscale"] = PRESETS[name]["upscale"]
+        resolution = PRESETS[name]["resolution"]
+        upscale = PRESETS[name]["upscale"]
+        values = preset_values(name)
+        if name == "igpu":
+            # IGPU card adapted from PR #223 by memeguyoffical. One card for every low-end
+            # integrated GPU: its class chooses how far below 1080p the game draws and the frame
+            # limit (Vega and the 2-CU Radeon need 30 at 360p; Radeon 680M/760M/780M and Iris Xe
+            # reach 60 at 540p; Radeon 880M/890M and integrated Arc at 720p).
+            kind = igpu_class(self.gpu_name)
+            if kind == "weak":
+                upscale, values["fps_limit"] = "ultra", "30"
+            elif kind == "strong":
+                upscale = "quality"
+        settings["resolution"] = resolution
+        settings["upscale"] = upscale
         if "resolution" in self.widgets:
-            self.widgets["resolution"].set(settings["resolution"])
-        for key, value in preset_values(name).items():
+            self.widgets["resolution"].set(resolution)
+        for key, value in values.items():
             self.ini[key] = value
             widget = self.widgets.get(key)
             if isinstance(widget, Toggle):
                 widget.set(value == "1")
             elif isinstance(widget, Segmented):
                 widget.set(value)
+        if name == "igpu":
+            # The command thread is the limit on an integrated GPU, and multithreaded rendering
+            # takes part of it. Drake's Fortune keeps it off (its gun and camera misbehave with it).
+            settings["multithreaded"] = self.current_game()["key"] != "u1"
+            if isinstance(self.widgets.get("multithreaded"), Toggle):
+                self.widgets["multithreaded"].set(settings["multithreaded"])
+            settings["aa"] = "off"
         self.sync_sharpening()
         settings["preset"] = name
         write_config(self.config)
@@ -2507,6 +2657,17 @@ class Launcher:
             "Menus and subtitles in another language: pick it here, then press Square in a game's main "
             "menu to switch. Languages marked + voices are also spoken in your copy of the game.", language)
 
+        # GitHub #199/#195/#204/#212: Uncharted 3 too bright on some PCs (pavlikdcx's exposure patch,
+        # tools/probe_uncharted.py u3_exposure_patch).
+        def u3_exposure(parent):
+            return Segmented(parent, (("0", "Game's"), ("-0.3", "-0.3"), ("-0.6", "-0.6"), ("-1.0", "-1.0")),
+                             str(self.config.get("u3_exposure", "0")),
+                             lambda v: self.change_config("u3_exposure", v), self.f_small, recommended="0")
+        self.row(page, "Uncharted 3 exposure",
+                 "If Uncharted 3 looks washed out or too bright on your PC (bright skies and highlights), "
+                 "lower its exposure here: -0.3 a little, -1.0 about half as bright. Game's = unchanged.",
+                 u3_exposure)
+
         def speakers(parent):
             return Segmented(parent, (("auto", "Auto"), ("2", "Stereo"), ("6", "5.1"), ("8", "7.1")),
                              str(self.config.get("speakers", "auto")),
@@ -2564,6 +2725,9 @@ class Launcher:
                     side="left", padx=(self.px(6), 0))
         section("SHORTCUTS", (("Desktop shortcut", self.desktop_shortcut), ("Game shortcuts", self.game_shortcuts)),
                 "Game shortcuts: one per game on the desktop, each starts its game directly.")
+        section("STEAM", (("Add to Steam", lambda: self.add_to_steam(per_game=False)),
+                          ("Add games to Steam", lambda: self.add_to_steam(per_game=True))),
+                "A non-Steam game in your library: the Collection, or one entry per game.")
         section("FOLDERS", (("Open log folder", self.open_logs), ("Open save folder", self.open_saves),
                             ("Change game folder", self.choose_game_dir),
                             ("Install game from .pkg", self.install_game_pkg)))
@@ -3109,6 +3273,7 @@ class Launcher:
         env["UNCHARTED_JOB_SLEEP"] = "0" if self.config.get("job_sleep", "auto") == "off" else "1"
         env["UNCHARTED_LANGUAGE"] = str(self.config.get("language", "1"))
         env["UNCHARTED_SPEAKERS"] = str(self.config.get("speakers", "auto"))
+        env["UNCHARTED_U3_EXPOSURE"] = str(self.config.get("u3_exposure", "0"))
         env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"
         env["UNCHARTED_UNLOCK_REWARDS"] = "1" if self.config.get("unlock_rewards", False) else "0"
         if self.chosen_update():
@@ -3598,6 +3763,62 @@ class Launcher:
             messagebox.showinfo(APP_TITLE, "Shortcuts created on the desktop:\n" + "\n".join(made) +
                                 "\n\nEach starts its game directly with the launcher's settings. From a command "
                                 "prompt: \"Uncharted Launcher.exe\" --play u1 (or u2, u3).")
+
+    def add_to_steam(self, per_game=False):
+        """Adds the Collection (or each game, started with --play) to Steam's library as a non-Steam
+        game, with pictures made from the game's own files (launcher/steam_library.py)."""
+        try:
+            import steam_library
+        except ImportError as error:
+            messagebox.showerror(APP_TITLE, f"Add to Steam is missing a launcher file:\n{error}")
+            return
+        while steam_library.steam_running():
+            if not messagebox.askretrycancel(
+                    APP_TITLE, "Steam is open. Steam saves its own list of games when it closes, so a game "
+                               "added now would be lost.\n\nClose Steam completely (Steam menu -> Exit, or "
+                               "right-click its icon by the clock -> Exit), then press Retry."):
+                return
+        games = [(game["key"], game["name"]) for game in GAMES] if per_game else None
+        targets = steam_library.launch_targets(ROOT, STARTER_EXE, sys.executable,
+                                               Path(__file__).resolve(), games)
+        names = [steam_library.COLLECTION_NAME] + [game["name"] for game in GAMES]
+        game_dir = self.game_dir() if is_game_dir(self.game_dir()) else None
+        self.root.config(cursor="watch")
+        self.root.update_idletasks()
+        try:
+            results = steam_library.add_to_steam(targets, ASSETS / "uncharted.ico", game_dir, all_names=names)
+        except steam_library.SteamError as error:
+            if error.kind == "no_steam":
+                text = ("Steam was not found on this PC (no Steam account folder in Steam's userdata). "
+                        "Install Steam and sign in once, then try again.")
+                if WINE:
+                    text += ("\n\nOn Linux, add the launcher from Steam itself: Games -> Add a Non-Steam "
+                             "Game to My Library.")
+            else:
+                text = ("Steam's list of non-Steam games could not be read, so it was left as it is:\n"
+                        f"{error.detail}")
+            messagebox.showerror(APP_TITLE, text)
+            return
+        except OSError as error:
+            messagebox.showerror(APP_TITLE, f"Could not write Steam's list of games:\n{error}")
+            return
+        finally:
+            self.root.config(cursor="")
+        lines = []
+        for folder, name, result in results:
+            who = f"{name} ({folder.name})" if name else f"Steam account {folder.name}"
+            changes = [f"{count} {word}" for count, word in ((result["added"], "added"),
+                                                            (result["updated"], "updated"),
+                                                            (result["removed"], "replaced")) if count]
+            lines.append(f"{who}: {', '.join(changes)}")
+        added = "the three games" if per_game else f"\"{steam_library.COLLECTION_NAME}\""
+        pictures = ("Library pictures come from your game files."
+                    if game_dir else "No library pictures: choose the game folder first, then add again.")
+        backups = [str(result["backup"]) for _, _, result in results if result["backup"]]
+        messagebox.showinfo(APP_TITLE, f"Added {added} to Steam:\n" + "\n".join(lines) +
+                            f"\n\n{pictures}" +
+                            (f"\n\nThe previous list was saved as:\n" + "\n".join(backups) if backups else "") +
+                            f"\n\nStart Steam again: {'they are' if per_game else 'it is'} in your Library.")
 
     def reset(self):
         name = self.current_game()["name"]

@@ -274,6 +274,10 @@ private:
                   const IndirectDraw* indirect = nullptr);
     /// Everything of a direct dispatch after the pipeline selection (GPU thread or stage B).
     void DispatchRecord(const ComputePipeline* pipeline);
+    /// gow3: a dispatch writing a display buffer as a storage image (Uncharted 3's movie
+    /// frames) while frames are upscaled at the composite pass: TemporalUpscaler::
+    /// OnDisplayStorageWrite (#237/#243/#222, no subtitles over movies).
+    void NoteDisplayStorageWrite(const Shader::Info& cs);
     /// The compute registers of the dispatch being recorded.
     const AmdGpu::ComputeProgram& CsRegs() const;
     static void RunDrawPacket(void* rasterizer, const u8* packet, u32 size);

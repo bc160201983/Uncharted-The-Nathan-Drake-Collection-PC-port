@@ -193,6 +193,11 @@ FRAME_BEGIN_WAIT_PATCHES = {
 # runs for it: NaN compares false. The assert's path (53 bytes) now takes that reset instead when
 # the target itself is a number (velocity register xmm5 zeroed first, as on the reset's usual
 # way in); a NaN target still asserts. UNCHARTED_FOCUS_RESET=0 keeps the original.
+# The 1.00 checks and assert paths (exact bytes; each occurs once in its 1.00 executable only).
+U3_FOCUS_100 = ("c4e37904cb00c5f0c2c900c5f850c183f80f7438e8c3c110004885c07427488d3dd698c100"
+                "488d350595c100488d15e598c100488d0d3b95c10041b8690700004531c9ffd0cd41")
+U2_FOCUS_100 = ("c4e37904c900c5f0c2c900c5f850c183f80f7438e8a8d71a004885c07427488d3d4c9c8300"
+                "488d354b998300488d155b9c8300488d0d7e99830041b84d0400004531c9ffd0cd41")
 FOCUS_NAN_PATCHES = {
     "big3-ps4_Shipping.elf": [
         ("Uncharted 3 player focus: reset instead of asserting on NaN", [
@@ -201,6 +206,13 @@ FOCUS_NAN_PATCHES = {
              bytes.fromhex("488b05f73302014885c07427488d3d74ff8900488d3546fd8900488d1583ff8900"
                            "488d0d6ece7d0041b86a0700004531c9ffd0cd41"),
              bytes.fromhex("c5d057edc5f8284580c5f8c2c800c5f850c183f80f0f84a5feffffcd41") + b"\xcc" * 24),
+            # 1.00 (26 Oct 2026, GitHub #148: the same assert, int 0x41 at 0x3908e9, on a copy
+            # without update 1.02): the same function at 0x390330. The assert path at 0x3908b8 is
+            # 51 bytes (it fetches the handler with a call); the target sits at rbp-0xa0, the
+            # reset is 0x390779 and its velocity register is xmm4.
+            (U3_FOCUS_100, 20, bytes.fromhex(U3_FOCUS_100)[20:],
+             bytes.fromhex("c5d857e4c5f8288560ffffffc5f8c2c800c5f850c183f80f0f84a3feffffcd41")
+             + b"\xcc" * 19),
         ]),
     ],
     # Uncharted 2 (1.02) PlayerBase::UpdateFocus (player-base.cpp:1101, 0x7272e0): the same spring
@@ -216,6 +228,12 @@ FOCUS_NAN_PATCHES = {
                            "488d0dbdcb6c0041b84d0400004531c9ffd0cd41"),
              bytes.fromhex("c5f8284da0c5f0c2d100c5f850c283f80f7511c5e857d2c5f82993c0020000"
                            "e9e7feffffcd41") + b"\xcc" * 15),
+            # 1.00 (26 Oct 2026, GitHub #24's first U2 log: int 0x41 at 0x33ba44): the same function
+            # at 0x33b4f0, assert path at 0x33ba13 (51 bytes). Its snap (0x33b8f9) takes the target
+            # from rbp-0x60 as in 1.02 (and its y from rbp-0xa0, stored on every way in).
+            (U2_FOCUS_100, 20, bytes.fromhex(U2_FOCUS_100)[20:],
+             bytes.fromhex("c5f8284da0c5f0c2d100c5f850c283f80f7511c5e857d2c5f82993c0020000"
+                           "e9c2feffffcd41") + b"\xcc" * 13),
         ]),
     ],
 }
@@ -620,6 +638,38 @@ def job_sleep_enabled():
     return os.environ.get("UNCHARTED_JOB_SLEEP", "auto").strip().lower() not in ("0", "off", "no")
 
 
+def u3_exposure_bias():
+    """UNCHARTED_U3_EXPOSURE=<EV> (launcher: Uncharted 3 exposure; 0 = the game's own): GitHub
+    #199/#195/#204/#212, Uncharted 3 too bright on some RTX 30/40 PCs, not on the test PC."""
+    try:
+        bias = float(os.environ.get("UNCHARTED_U3_EXPOSURE", "0").strip() or 0)
+    except ValueError:
+        return 0.0
+    return max(-2.0, min(1.0, bias)) if abs(bias) >= 0.05 else 0.0
+
+
+def u3_exposure_patch(bias):
+    """Uncharted 3 1.02's tonemap constants (pavlikdcx's patch in GitHub #199): the filmic exposure
+    bias, read from the render settings at [rbx+0x72c] on two paths (image 0xed9d30 / 0xed9d49),
+    gets <bias> EV more before the tonemap. Main path: the load jumps to a stub in the code
+    segment's zero padding (image 0x1648800) that adds the bias; second path: its add of -0.5
+    (shared constant 0x144b3b8) reads our own (-0.5 + bias) instead."""
+    pattern = "c5fa10932c070000 c5f057c9 c5fa100570165700 e9d1000000 c5fa10832c070000 c5fa58055f165700"
+    cave = 0x1648800 - 0xed9d30  # from the pattern's start
+    stub = bytes.fromhex("c5fa10932c070000")                                    # vmovss xmm2, [rbx+0x72c]
+    stub += bytes.fromhex("c5ea5815") + struct.pack("<i", 0x40 - (len(stub) + 8))  # vaddss xmm2, xmm2, [cave+0x40]
+    stub += bytes.fromhex("c5f057c9")                                           # vxorps xmm1, xmm1, xmm1
+    stub += b"\xe9" + struct.pack("<i", 12 - (cave + len(stub) + 5))            # jmp back (pattern + 12)
+    stub = stub.ljust(0x40, b"\xcc") + struct.pack("<ff", bias, -0.5 + bias)
+    jump = b"\xe9" + struct.pack("<i", cave - 5) + b"\x90" * 7
+    second = struct.pack("<i", (cave + 0x44) - (0x21 + 8))                       # disp of the 2nd path's add
+    return (f"Uncharted 3 exposure {bias:+.2f} EV (UNCHARTED_U3_EXPOSURE)", [
+        (pattern, [(0, bytes.fromhex("c5fa10932c070000c5f057c9"), jump),
+                   (cave, bytes(len(stub)), stub),
+                   (0x25, bytes.fromhex("5f165700"), second)]),
+    ])
+
+
 def apply_patches(image, patches):
     data = bytearray(image.read_bytes())
     for description, variants in patches:
@@ -870,15 +920,21 @@ def sfo_value(game, key):
 def game_version(game):
     """APP_VER of the game folder; 01.02 when its executables are 1.02 although param.sfo says
     otherwise (dumps with the update merged in that kept the 1.00 param.sfo). The check is Uncharted
-    2's torch code as 1.02 compiled it (TORCH_FORWARD_PATCHES; 1.00 lays it out differently)."""
+    2's torch code as 1.02 compiled it (TORCH_FORWARD_PATCHES; 1.00 lays it out differently).
+    26 Oct 2026 (GitHub #148, #176): 01.00 when param.sfo says 01.02 but the executables are 1.00
+    (Uncharted 2's 1.00 UpdateFocus code, U2_FOCUS_100): the launcher showed 1.02 and no warning,
+    and the games crashed where update 1.02 has the port's fixes."""
     version = sfo_value(game, "APP_VER")
-    if version and version < "01.02":
-        try:
-            code = (game / "big2-ps4_Shipping.elf").read_bytes()
-        except OSError:
-            return version
-        if pattern_regex(TORCH_FORWARD_PATCHES[0][1][0][0]).search(code):
-            return "01.02"
+    if not version:
+        return version
+    try:
+        code = (game / "big2-ps4_Shipping.elf").read_bytes()
+    except OSError:
+        return version
+    if version < "01.02" and pattern_regex(TORCH_FORWARD_PATCHES[0][1][0][0]).search(code):
+        return "01.02"
+    if version >= "01.02" and bytes.fromhex(U2_FOCUS_100) in code:
+        return "01.00"
     return version
 
 
@@ -958,6 +1014,9 @@ def run_once(args, executable, guest_args, loadexec):
                   f"{title.name}-patch.")
         return run_game(args, base, executable, guest_args, loadexec)
     print(f"Update {sfo_value(update, 'APP_VER') or '?'}: {update}")
+    if (update_version := game_version(update)) and update_version < "01.02":
+        print(f"The update folder holds version {update_version} executables (its param.sfo says "
+              f"otherwise): the fixes written for 1.02 are skipped. Extract update 1.02 again.")
     try:
         if os.environ.get("UNCHARTED_TEST_OVERLAY") == "1":  # test: the drive-without-links path
             raise SystemExit("UNCHARTED_TEST_OVERLAY=1")
@@ -1111,6 +1170,11 @@ def net_mode():
     return mode if mode in ("host", "join") else ""
 
 
+def net_lobby():
+    """The lobby before each match (runtime_coop_menu.c mpmenu lobby); UNCHARTED_NET_LOBBY=0 = off."""
+    return os.environ.get("UNCHARTED_NET_LOBBY", "1").strip() != "0"
+
+
 def net_game_env(env, user, roots):
     """The runtime settings of a net game; returns the /app0 overlay it needs (tools/net_overlay.py,
     built from the player's own game files; roots = the /app0 folders, topmost first).
@@ -1135,7 +1199,10 @@ def net_game_env(env, user, roots):
         env["GOW3_NET_SKIN"] = skin
     boot = user / "net-boot.txt"
     # mpmenu auto (runtime_coop_menu.c): the game's own results pages after a round (25 Oct, run f6)
-    boot.write_text("at 1\nnetwait\nnetinit auto 64\nmpmenu auto\n", encoding="ascii")
+    # mpmenu lobby (25 Oct): the game's own Custom Game lobby first, the host's Start Game starts
+    # every game (no "task online" then); UNCHARTED_NET_LOBBY=0 starts the match at once as before.
+    boot.write_text("at 1\nnetwait\nnetinit auto 64\nmpmenu auto\n" + ("mpmenu lobby\n" if net_lobby() else ""),
+                    encoding="ascii")
     env["GOW3_COOP_BOOT"] = str(boot)
     # Multiplayer data the Collection does not ship (e.g. the bullets' MP explosion settings,
     # the first shot faulted) falls back to its single-player twin (runtime_coop_mp.c).
@@ -1196,6 +1263,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         size_w, size_h = (int(value) for value in size.split("x"))
         if size_w / size_h > 16 / 9 + 0.01:
             patches.extend(hor_plus_patches(executable))
+    if executable == "big3-ps4_Shipping.elf" and (bias := u3_exposure_bias()):
+        patches.append(u3_exposure_patch(bias))
     if job_sleep_enabled():
         patches.extend(JOB_SLEEP_PATCHES)
         # Diagnostics: UNCHARTED_JOB_SLEEP_SPINS=<n> idle spins before a worker sleeps (1000).
@@ -1685,7 +1754,7 @@ def main():
             guest_args = ["/app0/eboot.bin"]
         else:
             guest_args = ["eboot.bin", "ispartofuccollection"]
-            if executable == "big2-ps4_Shipping.elf" and net_mode():
+            if executable == "big2-ps4_Shipping.elf" and net_mode() and not net_lobby():
                 guest_args += ["task", "online"]  # Uncharted 2's own online game (net_mode)
     while True:
         loadexec.unlink(missing_ok=True)

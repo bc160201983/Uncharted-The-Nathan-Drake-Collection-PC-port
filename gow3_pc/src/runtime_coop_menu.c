@@ -62,7 +62,10 @@ static uint32_t sid(const char *s) {
 static const unsigned char u2_frame_bytes[19] = {0x48, 0x8d, 0x05, 0x0f, 0x39, 0x05, 0x01, 0xc6, 0x00, 0x01,
                                                  0x0f, 0x31, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xc2};
 static int is_u2(void) {
-    return image && !memcmp(image + U2_FRAME_SITE - 10, u2_frame_bytes, sizeof(u2_frame_bytes));
+    /* 25 Oct: the NPC sync (runtime_coop_mp.c np_frame_start) hooks the lea at 0x3fae7b (7 bytes)
+     * right before ours, so only the bytes from 0x3fae82 on (mov byte [rax], 1; rdtsc; shl; or) are
+     * checked; our 6 bytes at 0x3fae85 do not overlap it. */
+    return image && !memcmp(image + U2_FRAME_SITE - 3, u2_frame_bytes + 7, sizeof(u2_frame_bytes) - 7);
 }
 
 static unsigned char *stub_page(void) {
@@ -253,6 +256,245 @@ static int install_results_hook(void) {
     return wr((uint64_t)(uintptr_t)(image + site), patch, sizeof(patch));
 }
 
+/* ---- mpmenu lobby host|join: the game's own Custom Game lobby before the match (25 Oct 2026) ----
+ * The original flow lived in the menus, before the online task (coop-mp.md, lobby runs l01-l03):
+ * - PAGE_LOBBY's update goes Back while the lobby kind (netinfo 0x104f1c8+0x2c4) is 0 or
+ *   netinfo+0x1c is set; BUTTON_MULTIPLAYER_CUSTOM (0x5ecbd6) writes kind 2 and then GoToPage.
+ * - Its rows (Start Game, Map, Difficulty) show only in the host's lobby step: net mode 3 (run l03;
+ *   with net mode 0 the list is empty, run l02).
+ * - BUTTON_MULTIPLAYER_STARTMATCH (sid 0x70e80076, menu host button table +0x18f0 {sid, fn, user}
+ *   x 0x18, count +0x18ec) is a bare ret (0x5eb780): our handler takes its place.
+ * - Start = the dev boot's own task start (GameInit 0x3f8c22..0x3f8c96): the task table
+ *   0xa17280(0x6e51b48f, 0x67723261) -> {count, {sid, task} sorted}, then TaskStart 0xa5b020(task)
+ *   with the task 'online'. runtime_net sends the host's start to the joiners (NET_KIND_START).
+ * - After the round (Leave -> the menus), the lobby opens again. */
+#define PAGE_LOBBY 0xb99a3235u
+#define U2_NETINFO 0x104f1c8u
+#define BUTTON_STARTMATCH 0x70e80076u
+extern int runtime_net_ready(void);
+extern int runtime_net_send_start(void);
+extern int runtime_net_take_start(void);
+extern int runtime_net_hosting(void);
+static int lobby_role;              /* 0 off, 1 host, 2 joiner */
+static int lobby_state;             /* 0 wait for the menus, 1 lobby shown, 2 starting, 3 in the match */
+static volatile LONG lobby_pressed; /* the Start Game button (host) */
+static ULONGLONG lobby_since;
+static uint32_t top_page(void) {
+    const uint64_t host = (uint64_t)(uintptr_t)image + U2_MENU_HOST;
+    int32_t top = -1;
+    uint64_t page = 0;
+    uint32_t id = 0;
+    if (!rd(host + 0x1010, &top, 4) || top < 0 || top > 32) return 0;
+    if (rd(host + 0x9d0 + 8 * (uint64_t)top, &page, 8) && page && rd(page + 0x10, &id, 4)) return id;
+    return 0;
+}
+static uint64_t ABI on_start_match(uint64_t event) {
+    (void)event;
+    if (lobby_state == 1) InterlockedExchange(&lobby_pressed, 1);
+    return 0;
+}
+static int install_start_button(void) {
+    const uint64_t host = (uint64_t)(uintptr_t)image + U2_MENU_HOST;
+    int32_t count = 0;
+    if (!rd(host + 0x18ec, &count, 4) || count <= 0 || count > 0x80) return 0;
+    for (int i = 0; i < count; ++i) {
+        const uint64_t entry = host + 0x18f0 + (uint64_t)i * 0x18;
+        uint32_t id = 0;
+        if (!rd(entry, &id, 4) || id != BUTTON_STARTMATCH) continue;
+        const uint64_t fn = (uint64_t)(uintptr_t)on_start_match;
+        return wr(entry + 8, &fn, 8);
+    }
+    return 0;
+}
+/* The party list (Party Leader / Party Members): the party session object 0x105efb8 (the same
+ * class as the game session 0x1065b08: +0x10 the removed layer's session, +0xb00 our id, +0xb04
+ * the leader's id, members at +0x20c, 10 x 0xd0: SceNpId (name at +0) | valid +0x25 | id +0x2c |
+ * connection +0x34). It gets a stand-in and our LAN player list. GOW3_LOBBY_PARTY=0: off. */
+#define U2_PARTY 0x105efb8u
+extern int runtime_net_roster(int *ids, char (*names)[32], int max);
+extern int runtime_net_local_id(void);
+extern const char *runtime_net_local_name(void);
+static __attribute__((aligned(64))) unsigned char party_standin[4096];
+static void lobby_party(void) {
+    static int off = -1, shown = -1;
+    if (off < 0) { const char *v = getenv("GOW3_LOBBY_PARTY"); off = v && v[0] == '0'; }
+    if (off) return;
+    const uint64_t party = (uint64_t)(uintptr_t)image + U2_PARTY;
+    uint64_t session = 0;
+    if (rd(party + 0x10, &session, 8) && !session) {
+        session = (uint64_t)(uintptr_t)party_standin;
+        wr(party + 0x10, &session, 8);
+    }
+    int ids[10];
+    char names[10][32];
+    int n = runtime_net_roster(ids, names, 9);
+    const int local = runtime_net_local_id() > 0 ? runtime_net_local_id() : 1;
+    const char *me = runtime_net_local_name();
+    ids[n] = local;
+    snprintf(names[n], sizeof(names[n]), "%s", me && me[0] ? me : "Player");
+    ++n;
+    /* the leader (id 1, the host) first */
+    for (int i = 1; i < n; ++i)
+        if (ids[i] == 1) {
+            int t = ids[0]; ids[0] = ids[i]; ids[i] = t;
+            char s[32]; memcpy(s, names[0], 32); memcpy(names[0], names[i], 32); memcpy(names[i], s, 32);
+        }
+    for (int i = 0; i < 10; ++i) {
+        unsigned char m[0xd0] = {0};
+        if (i < n) {
+            memcpy(m, names[i], 16);
+            m[0x25] = 1;
+            memcpy(m + 0x2c, &ids[i], 4);
+            memcpy(m + 0x34, &ids[i], 4);
+        }
+        wr(party + 0x20c + (uint64_t)i * 0xd0, m, sizeof(m));
+    }
+    const int32_t leader = 1;
+    wr(party + 0xb00, &local, 4);
+    wr(party + 0xb04, &leader, 4);
+    if (n != shown) {
+        shown = n;
+        printf("CoopMenu: lobby: party list: %d player(s)\n", n);
+        fflush(stdout);
+    }
+}
+static void lobby_keep(void) {
+    const uint64_t netinfo = (uint64_t)(uintptr_t)image + U2_NETINFO;
+    const int32_t kind = 2, zero = 0, step = 3;
+    wr(netinfo + 0x2c4, &kind, 4);
+    wr(netinfo + 0x1c, &zero, 4);
+    wr((uint64_t)(uintptr_t)image + U2_MODE, &step, 4);
+    lobby_party();
+}
+static int start_online_task(void) {
+    typedef uint64_t (ABI *Lookup)(uint32_t, uint32_t);
+    const uint64_t at = ((Lookup)(image + 0xa17280))(0x6e51b48fu, 0x67723261u);
+    uint64_t table = 0, entries = 0;
+    int32_t count = 0;
+    if (!at || !rd(at, &table, 8) || !table || !rd(table, &count, 4) || !rd(table + 8, &entries, 8)) return 0;
+    const uint32_t want = sid("online");
+    for (int32_t i = 0; i < count && i < 256; ++i) {
+        uint32_t id = 0;
+        uint64_t task = 0;
+        if (rd(entries + 16 * (uint64_t)i, &id, 4) && id == want && rd(entries + 16 * (uint64_t)i + 8, &task, 8) && task) {
+            ((Fn1)(image + 0xa5b020))(task);
+            return 1;
+        }
+    }
+    return 0;
+}
+static void lobby_tick(void) {
+    if (!lobby_role) return;
+    const uint64_t host = (uint64_t)(uintptr_t)image + U2_MENU_HOST;
+    const ULONGLONG now = GetTickCount64();
+    static int played;   /* state 3: the match reached Playing (net modes 0x1a..0x1e) */
+    int32_t hmode = -1, mode = 0;
+    rd(host, &hmode, 4);
+    rd((uint64_t)(uintptr_t)image + U2_MODE, &mode, 4);
+    const uint32_t top = top_page();
+    switch (lobby_state) {
+    case 0: {   /* the menus up (main menu mode, a page shown), the net side ready: open the lobby */
+        uint64_t net_heap = 0;
+        rd((uint64_t)(uintptr_t)image + 0x11c6630 + 0x14 * 8, &net_heap, 8);
+        const int ok = hmode == 0 && top && net_heap && runtime_net_ready() && (mode < 0x1a || mode > 0x1e);
+        if (!ok) { lobby_since = 0; break; }
+        if (!lobby_since) lobby_since = now;
+        if (now - lobby_since < 1500) break;
+        lobby_keep();
+        const int button = install_start_button();
+        ((Fn3)(image + 0x5cb990))(host, PAGE_LOBBY, 0);
+        lobby_state = 1;
+        lobby_pressed = 0;
+        lobby_since = now;
+        printf("CoopMenu: lobby: open (%s; Start Game button %s)\n", lobby_role == 1 ? "host" : "joiner",
+               button ? "ours" : "NOT found");
+        print_state("lobby open");
+        fflush(stdout);
+        break;
+    }
+    case 1: {   /* in the lobby: keep its state; the host's Start Game or the host's start message */
+        lobby_keep();
+        if (top != PAGE_LOBBY && now - lobby_since > 1000) {
+            /* left the lobby (Back): open it again (this game was started for multiplayer) */
+            puts("CoopMenu: lobby: left the lobby page, opening it again");
+            fflush(stdout);
+            lobby_state = 0;
+            lobby_since = 0;
+            break;
+        }
+        int go = 0;
+        if (lobby_role == 1 && InterlockedExchange(&lobby_pressed, 0)) {
+            const int sent = runtime_net_send_start();
+            printf("CoopMenu: lobby: Start Game: sent to %d player(s)\n", sent);
+            go = 1;
+        } else if (lobby_role == 2 && runtime_net_take_start()) {
+            puts("CoopMenu: lobby: the host started the game");
+            go = 1;
+        }
+        if (go) { lobby_state = 2; lobby_since = now; }
+        fflush(stdout);
+        break;
+    }
+    case 2: {   /* close the lobby, then start the match */
+        if (top == PAGE_LOBBY) { ((Fn1)(image + 0x5cc6f0))(host); break; }
+        {   /* the party stand-in only lives in the lobby (the match code tests the party too) */
+            const uint64_t none = 0;
+            wr((uint64_t)(uintptr_t)image + U2_PARTY + 0x10, &none, 8);
+        }
+        /* Run lb02: TaskStart('online') from the menus crashed both games while the village level
+         * logged in (0x4bf48b, *net-games* 0x3b9a067d NULL: the task switch reloads the DC modules).
+         * The dev boot's own path works (task online at GameInit), so each game restarts into it
+         * through the launcher's executable switch (GOW3_LOADEXEC_FILE, exit 30), as the
+         * Collection's menu starts Uncharted 2. The host waits 1.5 s so the start reaches the
+         * joiners first. GOW3_LOBBY_TASKSTART=1 tries the in-process task start instead. */
+        static int in_process = -1;
+        if (in_process < 0) { const char *v = getenv("GOW3_LOBBY_TASKSTART"); in_process = v && v[0] == '1'; }
+        const char *handoff = getenv("GOW3_LOADEXEC_FILE");
+        if (!in_process && handoff && *handoff) {
+            if (lobby_role == 1 && now - lobby_since < 1500) break;
+            if (lobby_role == 1) {   /* the net game picked in the lobby (Map / Game Type), for runtime_net */
+                int16_t game = -1;
+                rd((uint64_t)(uintptr_t)image + U2_NGM + 0x1ca0, &game, 2);
+                char path[1024];
+                snprintf(path, sizeof(path), "%s", handoff);
+                char *slash = strrchr(path, '\\'), *slash2 = strrchr(path, '/');
+                if (slash2 > slash) slash = slash2;
+                if (game >= 0 && slash && (size_t)(slash + 1 - path) + 20 < sizeof(path)) {
+                    strcpy(slash + 1, "net-game-next.txt");
+                    FILE *g = fopen(path, "w");
+                    if (g) { fprintf(g, "%d\n", game); fclose(g); printf("CoopMenu: lobby: net game %d for the match\n", game); }
+                }
+            }
+            FILE *f = fopen(handoff, "w");
+            if (f) {
+                fputs("/app0/big2-ps4_Shipping.elf\neboot.bin\nispartofuccollection\ntask\nonline\n", f);
+                fclose(f);
+                puts("CoopMenu: lobby: restarting into the match (task online)");
+                fflush(NULL);
+                _exit(30);
+            }
+        }
+        const int started = start_online_task();
+        printf("CoopMenu: lobby: online task %s\n", started ? "started" : "NOT found");
+        print_state("lobby start");
+        fflush(stdout);
+        lobby_state = started ? 3 : 1;
+        lobby_since = now;
+        played = 0;
+        break;
+    }
+    case 3:     /* the match; after it (Leave -> menus) the lobby again */
+        if (mode >= 0x1a && mode <= 0x1e) { played = 1; lobby_since = now; }
+        else if (played && hmode == 0 && top && now - lobby_since > 5000) {
+            printf("CoopMenu: lobby: the match is over (net mode %d): back to the lobby\n", mode);
+            fflush(stdout);
+            lobby_state = 0;
+            lobby_since = 0;
+        }
+        break;
+    }
+}
+
 static void ABI menu_frame(void) {
     while (queue_tail != queue_head) {
         const MenuCall c = queue[queue_tail % 16];
@@ -284,15 +526,20 @@ static void ABI menu_frame(void) {
         fflush(stdout);
     }
     auto_tick();
+    lobby_tick();
 }
 
 static int install_frame_hook(void) {
-    static int installed;
+    static int installed, told;
     if (installed) return installed > 0;
-    installed = -1;
-    if (!is_u2()) { puts("CoopMenu: not the Uncharted 2 1.02 executable"); return 0; }
+    /* 25 Oct (run lb01): at frame 1 on the title screen the hook could not be placed on the host;
+     * a failure is retried (runtime_coop_menu_tick) instead of being final. */
+    if (!is_u2()) {
+        if (!told++) printf("CoopMenu: in-frame hook site %#x does not match (yet): commands wait\n", U2_FRAME_SITE);
+        return 0;
+    }
     unsigned char *stub = stub_page();
-    if (!stub) return 0;
+    if (!stub) { if (!told++) puts("CoopMenu: no stub page near the image (yet): commands wait"); return 0; }
     const unsigned length = 6;   /* rdtsc (2) + shl rdx, 0x20 (4) */
     build_mid_stub(stub, (void *)menu_frame, image + U2_FRAME_SITE, length, (uintptr_t)(image + U2_FRAME_SITE + length));
     const int64_t delta = (int64_t)(uintptr_t)stub - (int64_t)(uintptr_t)(image + U2_FRAME_SITE + 5);
@@ -341,6 +588,24 @@ static void push(int op, uint32_t page) {
 
 extern int runtime_coop_u3_command(unsigned char *base, const char *op, const char *args);
 
+static char pending[8][160];
+static int pending_count;
+int runtime_coop_menu_command(unsigned char *base, const char *op, const char *args);
+/* Every frame (runtime_coop.c coop_frame): mpmenu commands given before the in-frame hook could
+ * be placed run once it is in. */
+void runtime_coop_menu_tick(unsigned char *base) {
+    if (!pending_count) return;
+    image = base;
+    if (!install_frame_hook()) return;
+    const int n = pending_count;
+    pending_count = 0;
+    for (int i = 0; i < n; ++i) {
+        printf("CoopMenu: in-frame hook in: running the waiting 'mpmenu %s'\n", pending[i]);
+        runtime_coop_menu_command(base, "mpmenu", pending[i]);
+    }
+    fflush(stdout);
+}
+
 int runtime_coop_menu_command(unsigned char *base, const char *op, const char *args) {
     image = base;
     if (!strcmp(op, "u3")) return runtime_coop_u3_command(base, op, args);
@@ -349,7 +614,15 @@ int runtime_coop_menu_command(unsigned char *base, const char *op, const char *a
     char sub[16] = {0};
     int k = 0;
     while (*args && !isspace((unsigned char)*args) && k < 15) sub[k++] = *args++;
-    if (!install_frame_hook()) { puts("CoopMenu: no in-frame hook, command ignored"); fflush(stdout); return 1; }
+    if (!install_frame_hook()) {
+        /* kept and replayed once the hook is in (runtime_coop_menu_tick) */
+        if (pending_count < 8) {
+            snprintf(pending[pending_count++], sizeof(pending[0]), "%s%s", sub, args);
+            printf("CoopMenu: no in-frame hook yet: '%s' waits\n", sub);
+        }
+        fflush(stdout);
+        return 1;
+    }
     if (!strcmp(sub, "show") || !strcmp(sub, "goto")) {
         const uint32_t id = page_id(args);
         if (!id) { puts("CoopMenu: which page?"); return 1; }
@@ -385,6 +658,24 @@ int runtime_coop_menu_command(unsigned char *base, const char *op, const char *a
         c->fn = fn;
         memcpy(c->a, a, sizeof(a));
         queue_head = queue_head + 1;
+    } else if (!strcmp(sub, "lobby")) {
+        /* mpmenu lobby [host|join]: the Custom Game lobby before every match (default: the
+         * runtime_net role) */
+        while (*args == ' ') ++args;
+        lobby_role = !strncmp(args, "join", 4) ? 2 : !strncmp(args, "host", 4) ? 1 : runtime_net_hosting() ? 1 : 2;
+        lobby_state = 0;
+        lobby_since = 0;
+        {   /* started into the match (the lobby's restart: "task online", name at 0x147ea20): the
+             * lobby comes after this round */
+            char task[16] = {0};
+            if (rd((uint64_t)(uintptr_t)image + 0x147ea20, task, sizeof(task) - 1) && !strcmp(task, "online")) {
+                lobby_state = 3;
+                lobby_since = GetTickCount64();
+                puts("CoopMenu: lobby: this game started into the match; the lobby opens after the round");
+            }
+        }
+        printf("CoopMenu: lobby on (%s): the game opens the Custom Game lobby; the host's Start Game starts every game\n",
+               lobby_role == 1 ? "host" : "joiner");
     } else if (!strcmp(sub, "auto")) {
         auto_on = 1;
         printf("CoopMenu: auto results screens on (ShowResults hook %s)\n", install_results_hook() ? "at 0x5f0ea0" : "NOT installed");
@@ -396,4 +687,5 @@ int runtime_coop_menu_command(unsigned char *base, const char *op, const char *a
 }
 #else
 int runtime_coop_menu_command(unsigned char *base, const char *op, const char *args) { (void)base; (void)op; (void)args; return 0; }
+void runtime_coop_menu_tick(unsigned char *base) { (void)base; }
 #endif

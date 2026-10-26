@@ -304,7 +304,11 @@ bool MultiwaveLdsBarriers(u64 pgm_hash) {
         const char* env = std::getenv("GOW3_LDS_BARRIERS_MULTIWAVE");
         if (!env) {
             // Uncharted 3's two cloth solvers (Sully's shirt): 1024- and 128-thread groups.
-            return std::vector<u64>{0x1c957b01ULL, 0x809864d3ULL};
+            // gow3 26 Oct 2026 (GitHub #199 #195 #204 #212, U3 washed out on RTX 30/40): its
+            // auto-exposure row sums (aec539f0, 256 threads) reduce in LDS with no barriers in the
+            // last six steps (one GCN wave in lockstep); on 32-lane GPUs they raced and the sums
+            // came out 2.5x too small (a laptop: title 205 -> 166 with barriers, = AMD 780M).
+            return std::vector<u64>{0x1c957b01ULL, 0x809864d3ULL, 0xaec539f0ULL};
         }
         if (env[0] == '1' && env[1] == 0) {
             return std::vector<u64>{~0ULL};

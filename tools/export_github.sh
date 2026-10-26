@@ -44,6 +44,8 @@ find tools launcher -type f ! -path '*/__pycache__/*' ! -name 'PkgTool-*.zip' \
 copy Start-Uncharted.cmd
 copy analysis/STATUS.md
 copy analysis/PLAN.md
+for doc in analysis/MULTIPLAYER-*.md; do copy "$doc"; done   # multiplayer notes (PR #231 by Sparks)
+find u3mp -type f ! -path '*/__pycache__/*' | while read -r path; do copy "$path"; done   # U3 multiplayer research (PR #244 by fidalgojoao)
 cp -r tools/github/. "$dest/"
 cp -r tools/github-overlay/. "$dest/"
 

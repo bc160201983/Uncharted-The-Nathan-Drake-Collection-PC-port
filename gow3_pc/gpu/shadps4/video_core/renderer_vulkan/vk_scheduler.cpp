@@ -66,12 +66,86 @@ Scheduler::~Scheduler() {
 #endif
 }
 
+// gow3 26 Oct 2026 (GitHub #236, AMD): a rendering instance that goes on with an attachment of
+// the previous one (the same image view: the pass was only ended for a copy or a barrier in
+// between) waits for that instance's attachment writes first. Image::GetBarriers does not count
+// attachment writes as writes, so an unchanged layout and access recorded no barrier at all, and
+// rasterization order holds only inside one rendering instance. AMD's driver overlapped the two:
+// on Uncharted 2's title screen the fullscreen anti-aliasing draw into the display buffer landed
+// after the logo and text draws of the next instance (pieces of "2" and "AMONG THIEVES",
+// "Press X" and the copyright line missing in most frames on a Radeon 780M; RX 9070 too).
+// GOW3_ATTACHMENT_SYNC=0: off, =1: on for every GPU; default on except NVIDIA's driver (no
+// flicker there, and no extra waits).
+static bool AttachmentSyncEnabled(const Instance& instance) {
+    static const bool enabled = [&instance] {
+        const char* env = std::getenv("GOW3_ATTACHMENT_SYNC");
+        const bool on = env && env[0] ? env[0] != '0'
+                                       : instance.GetDriverID() != vk::DriverId::eNvidiaProprietary;
+        std::printf("GPU: rendering continued on the same attachments waits for their earlier "
+                    "writes: %s (GOW3_ATTACHMENT_SYNC)\n",
+                    on ? "on" : "off");
+        std::fflush(stdout);
+        return on;
+    }();
+    return enabled;
+}
+
+static vk::PipelineStageFlags2 SharedAttachmentStages(const RenderState& a, const RenderState& b) {
+    vk::PipelineStageFlags2 stages{};
+    for (u32 i = 0; i < a.num_color_attachments; ++i) {
+        const auto view = a.color_attachments[i].image_view;
+        if (!view) {
+            continue;
+        }
+        for (u32 j = 0; j < b.num_color_attachments; ++j) {
+            if (b.color_attachments[j].image_view == view) {
+                stages |= vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+            }
+        }
+    }
+    const auto& da = a.depth_stencil_attachment;
+    const auto& db = b.depth_stencil_attachment;
+    if ((da.has_depth || da.has_stencil) && (db.has_depth || db.has_stencil) && da.image_view &&
+        da.image_view == db.image_view) {
+        stages |= vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                  vk::PipelineStageFlagBits2::eLateFragmentTests;
+    }
+    return stages;
+}
+
 void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
     }
+    const vk::PipelineStageFlags2 shared =
+        has_render_state && AttachmentSyncEnabled(instance)
+            ? SharedAttachmentStages(render_state, new_state)
+            : vk::PipelineStageFlags2{};
     EndRendering();
+    if (shared) {
+        const bool color = bool(shared & vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+        const bool depth = bool(shared & vk::PipelineStageFlagBits2::eLateFragmentTests);
+        const vk::MemoryBarrier2 barrier = {
+            .srcStageMask = shared,
+            .srcAccessMask =
+                (color ? vk::AccessFlagBits2::eColorAttachmentWrite : vk::AccessFlagBits2{}) |
+                (depth ? vk::AccessFlagBits2::eDepthStencilAttachmentWrite : vk::AccessFlagBits2{}),
+            .dstStageMask = shared,
+            .dstAccessMask =
+                (color ? vk::AccessFlagBits2::eColorAttachmentRead |
+                             vk::AccessFlagBits2::eColorAttachmentWrite
+                       : vk::AccessFlagBits2{}) |
+                (depth ? vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+                             vk::AccessFlagBits2::eDepthStencilAttachmentWrite
+                       : vk::AccessFlagBits2{}),
+        };
+        Record([barrier](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{.memoryBarrierCount = 1,
+                                                       .pMemoryBarriers = &barrier});
+        });
+    }
     is_rendering = true;
+    has_render_state = true;
     render_state = new_state;
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;

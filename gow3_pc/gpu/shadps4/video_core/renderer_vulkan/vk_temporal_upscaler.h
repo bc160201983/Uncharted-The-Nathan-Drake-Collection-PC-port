@@ -131,6 +131,11 @@ public:
     /// draws after it go there at the output resolution. True: skip the guest's draw, and the
     /// next frame starts here (the rasterizer calls OnFrameStart).
     bool OnComposite(u64 ps_hash, VideoCore::ImageId color);
+    /// gow3 26 Oct 2026 (#237/#243/#222): a compute shader writes the display buffer at
+    /// `address` (Uncharted 3's movie player: cs 3e242626 puts the movie frame and the subtitle
+    /// layer together straight into it). Such a frame has no composite pass: it is shown from the
+    /// guest buffer, and the UI phase of the last upscaled frame ends here.
+    void OnDisplayStorageWrite(VAddr address);
     [[nodiscard]] bool CompositeFrames() const noexcept {
         return composite_frames;
     }
