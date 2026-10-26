@@ -1,0 +1,25 @@
+{
+  "source_sha256": "d578e66f38813c67da4db413b9f3f22e0232ddd1cc523d26dca352692ef20f14",
+  "blob_sha256": "d60e03f10f324d651c9a434a275cbffedd2228e205bbb839b612906909ab84e2",
+  "bytes": 338,
+  "entry_offset": 0,
+  "relocations": [],
+  "command": [
+    "C:\\msys64\\clang64\\bin\\clang.exe",
+    "--target=x86_64-unknown-elf",
+    "-std=c11",
+    "-O2",
+    "-ffreestanding",
+    "-fno-builtin",
+    "-fPIC",
+    "-mno-red-zone",
+    "-mno-sse",
+    "-fno-stack-protector",
+    "-fno-asynchronous-unwind-tables",
+    "-fno-jump-tables",
+    "-c",
+    "outputs\\u3_menu_flow.c",
+    "-o",
+    "work\\u3_menu_flow.o"
+  ]
+}

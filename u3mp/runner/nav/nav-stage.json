@@ -1,0 +1,89 @@
+[
+{
+"page": "0x37656388",
+"timeout": 60,
+"settle": 14.0
+},
+{
+"button": "cross",
+"duration_ms": 180,
+"wait": 1.5
+},
+{
+"page": "0x82d5c00b",
+"timeout": 20,
+"settle": 2.0
+},
+{
+"button": "down",
+"duration_ms": 180,
+"wait": 1.0
+},
+{
+"button": "cross",
+"duration_ms": 180,
+"wait": 1.5
+},
+{
+"sleep": 2.5
+},
+{
+"if_page": "0x960d2b9d",
+"button": "cross",
+"duration_ms": 180,
+"wait": 1.5
+},
+{
+"page": "0x1e66a744",
+"timeout": 20,
+"settle": 1.5
+},
+{
+"button": "down",
+"duration_ms": 180,
+"wait": 0.8
+},
+{
+"button": "cross",
+"duration_ms": 180,
+"wait": 1.5
+},
+{
+"page": "0x4608c1ad",
+"timeout": 20,
+"settle": 1.5
+},
+{
+"button": "down",
+"duration_ms": 180,
+"wait": 0.8
+},
+{
+"button": "cross",
+"duration_ms": 180,
+"wait": 1.5
+},
+{
+"page": "0x53cbb5f2",
+"timeout": 40,
+"settle": 3.0
+},
+{
+"sleep": 12
+},
+{
+"capture": "lobby-stage"
+},
+{
+"sleep": 3
+},
+{
+"capture": "lobby-stage2"
+},
+{
+"sleep": 2
+},
+{
+"end": true
+}
+]

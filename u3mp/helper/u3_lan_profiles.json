@@ -1,0 +1,170 @@
+{
+  "source_sha256": "17533805ba00188fadfa8d37ae9a3e6dcc95daa9f8120db6c52e260d2b821e0f",
+  "blob_sha256": "24ab6e3b3833d8529c0276d2c0cc61c87a07e62042371bcc9bcae148cdb19bcd",
+  "bytes": 5552,
+  "entry_offset": 0,
+  "relocations": [
+    {
+      "offset": 4261,
+      "target": 3296,
+      "kind": 4,
+      "name": "u3_profile_name"
+    },
+    {
+      "offset": 4564,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 4691,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 4698,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 5207,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 5306,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 5313,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 156,
+      "target": 5534,
+      "kind": 2,
+      "name": ".L.str.1"
+    },
+    {
+      "offset": 237,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 718,
+      "target": 3152,
+      "kind": 4,
+      "name": ""
+    },
+    {
+      "offset": 1405,
+      "target": 3152,
+      "kind": 4,
+      "name": ""
+    },
+    {
+      "offset": 1426,
+      "target": 3152,
+      "kind": 4,
+      "name": ""
+    },
+    {
+      "offset": 1476,
+      "target": 5546,
+      "kind": 2,
+      "name": ".L.str.2"
+    },
+    {
+      "offset": 1741,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 1782,
+      "target": 3152,
+      "kind": 4,
+      "name": ""
+    },
+    {
+      "offset": 1794,
+      "target": 5533,
+      "kind": 2,
+      "name": ".L.str"
+    },
+    {
+      "offset": 1836,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 1855,
+      "target": 5533,
+      "kind": 2,
+      "name": ".L.str"
+    },
+    {
+      "offset": 2252,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 2383,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 2392,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 2401,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 2410,
+      "target": 5360,
+      "kind": 2,
+      "name": ""
+    },
+    {
+      "offset": 2552,
+      "target": 5533,
+      "kind": 2,
+      "name": ".L.str"
+    }
+  ],
+  "command": [
+    "C:\\msys64\\clang64\\bin\\clang.exe",
+    "--target=x86_64-unknown-elf",
+    "-std=c11",
+    "-O2",
+    "-ffreestanding",
+    "-fno-builtin",
+    "-fPIC",
+    "-mno-red-zone",
+    "-mno-sse",
+    "-fno-stack-protector",
+    "-fno-asynchronous-unwind-tables",
+    "-fno-jump-tables",
+    "-c",
+    "outputs\\u3_lan_profiles.c",
+    "-o",
+    "work\\u3_lan_profiles.o"
+  ]
+}
