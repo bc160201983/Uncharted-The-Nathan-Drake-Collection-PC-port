@@ -4,6 +4,41 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 27 October 2026 (unreleased)
+
+- **Launcher: PlayStation 5 home screen.** The launcher now opens on a hub with a full-screen
+  background and logo for each game and the three games on a carousel (Left/Right, or L1/R1 on a
+  controller); Settings and Quit are the pills next to Play. The old tab strip is a category list on
+  the left, and every setting is still there, with the same names and the same pages (plus
+  **System**, for the launcher's own screen and controller options). The new shell is
+  `launcher/ps5_ui.py`.
+- **Launcher: Quit beside Play.** The hub's pills are Play, Settings and Quit, and Settings -> System
+  has a Quit row as well. A running game keeps running (L3 + R3 closes it).
+- **Launcher: controller-first navigation.** D-pad or left stick moves, Cross chooses or toggles,
+  Left/Right adjusts a setting, Circle goes back, Options opens Settings. Every row, preset card and
+  Controls slot shows a focus ring. Settings -> System turns the on-screen button hints and the
+  controller navigation off.
+- **Launcher: Controller only mode.** Settings -> System picks the shell: on is the PlayStation 5
+  hub; off is the classic layout (the game cards, the tab strip and the footer Play button) in the
+  same window, with the same settings pages and config. Switching keeps the page you were on and
+  needs no restart; both layouts work from the controller, and the keyboard still moves and chooses.
+  Config version 10.
+- **Launcher: L3 + R3 closes the running game.** Hold both sticks in for two seconds (1, 1.5, 2 or
+  3 s in Settings -> System); a ring fills at the bottom of the window while you hold. The first
+  five seconds after a launch are ignored, so a controller resting on a desk cannot close anything.
+  The game is asked to quit first (`taskkill /T`) and killed only if it is still there two seconds
+  later.
+- **Launcher: fullscreen by default**, borderless, with F11 (or Settings -> System) back to the
+  window it remembers. Animations are Auto / Fast / Off: Auto uses fewer frames on integrated
+  graphics, Off draws every transition at once and runs no timer. Backgrounds are pre-scaled into
+  `%LOCALAPPDATA%\Uncharted Launcher\ui-cache` on first start, so a screen change is a canvas move,
+  not an image resize.
+- **Launcher: about 0.5% of a core while it idles.** The controller is read 30 times a second only
+  while one is connected; with none the launcher looks for one four times a second, and the
+  carousel's tiles are resized in memory rather than written to the cache for every window size.
+- The artwork in `launcher/assets/ps5/` is Uncharted key art (Sony / Naughty Dog): see its
+  `NOTICE.md`; it is not covered by the GPL, and the launcher works without it.
+
 ## 26 October 2026 (0.7.0)
 
 - **Uncharted 3 washed out / too bright on GeForce RTX 30 and 40 cards** (#199, #195, #204, #212):

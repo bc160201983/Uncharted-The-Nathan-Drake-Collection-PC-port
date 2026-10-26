@@ -32,6 +32,7 @@ try:  # launcher/net_lan.py: Uncharted 2 games hosted on this network (Multiplay
 except ImportError:
     net_lan = None
 import updater  # launcher/updater.py: updates from the GitHub releases
+import ps5_ui  # launcher/ps5_ui.py: the PlayStation 5 shell (palette, home hub, controller navigation)
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "launcher" / "assets"
@@ -201,26 +202,29 @@ def net_games():
 
 
 GAMES = [
-    {"key": "u1", "number": "1", "title": "DRAKE'S FORTUNE", "name": "Uncharted: Drake's Fortune", "subtitle": "Uncharted 1  •  double-click to play",
-     "exe": "eboot.bin", "log": "uncharted"},
-    {"key": "u2", "number": "2", "title": "AMONG THIEVES", "name": "Uncharted 2: Among Thieves", "subtitle": "Uncharted 2  •  double-click to play",
-     "exe": "big2-ps4_Shipping.elf", "log": "big2-ps4_Shipping"},
-    {"key": "u3", "number": "3", "title": "DRAKE'S DECEPTION", "name": "Uncharted 3: Drake's Deception", "subtitle": "Uncharted 3  •  double-click to play",
-     "exe": "big3-ps4_Shipping.elf", "log": "big3-ps4_Shipping"},
+    {"key": "u1", "number": "1", "title": "DRAKE'S FORTUNE", "name": "Uncharted: Drake's Fortune",
+     "year": "2007", "exe": "eboot.bin", "log": "uncharted"},
+    {"key": "u2", "number": "2", "title": "AMONG THIEVES", "name": "Uncharted 2: Among Thieves",
+     "year": "2009", "exe": "big2-ps4_Shipping.elf", "log": "big2-ps4_Shipping"},
+    {"key": "u3", "number": "3", "title": "DRAKE'S DECEPTION", "name": "Uncharted 3: Drake's Deception",
+     "year": "2011", "exe": "big3-ps4_Shipping.elf", "log": "big3-ps4_Shipping"},
 ]
 
-# Palette: the Collection's parchment and gold over a dark leather brown.
-BG = "#120e0a"
-PANEL = "#1b1510"
-PANEL_HI = "#251d16"
-LINE = "#3a2e22"
-TEXT = "#f1e6cf"
-MUTED = "#a8977a"
-DIM = "#6f604b"
-GOLD = "#d4a24c"
-GOLD_HI = "#e9bc66"
-INK = "#2a1c0e"
-STOP_RED = "#b5533c"
+# Palette: the PlayStation 5 system software's near-black ground, white type and single blue
+# accent. ps5_ui owns the values (its home screen draws with them too); these names are what the
+# rest of the launcher's widgets use.
+BG = ps5_ui.BG
+PANEL = ps5_ui.PANEL
+PANEL_HI = ps5_ui.PANEL_HI
+LINE = ps5_ui.LINE
+TEXT = ps5_ui.TEXT
+MUTED = ps5_ui.MUTED
+DIM = ps5_ui.DIM
+GOLD = ps5_ui.GOLD
+GOLD_HI = ps5_ui.GOLD_HI
+INK = ps5_ui.INK
+STOP_RED = ps5_ui.STOP_RED
+WHITE = ps5_ui.WHITE
 
 # At most 120: faster, the game's movement timing breaks (Drake's Fortune at 140-160 FPS: running
 # slows, Nate fell through the world). The runtime caps older, faster settings at 120 too.
@@ -249,7 +253,22 @@ CHEATS = (("invincible", "Invincible", "Nate takes no damage. All three games.")
           ("grenades", "Infinite grenades", "Grenades never run out. Uncharted 3."),
           ("onehit", "One-hit kills", "Enemies go down with one hit. Uncharted 3."))
 LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True, "language": "1",
-                     "unlock": False}
+                     "unlock": False,
+                     # The PlayStation 5 shell: fullscreen by default, animations on (Fast on an
+                     # integrated GPU), the controller navigating the launcher, the hints bar, and
+                     # L3 + R3 held for `pad_quit_hold` seconds closing the running game.
+                     # `ui_controller_only` picks the shell: the hub (on) or the classic layout (off).
+                     "ui_fullscreen": True, "ui_motion": "auto", "ui_hints": True, "ui_controller_only": True,
+                     "pad_nav": True, "pad_quit": True, "pad_quit_hold": "2.0"}
+# Animations: Auto follows the graphics card (Fast on an integrated GPU), Fast halves the frame
+# rate of the transitions, Off turns them off entirely (nothing moves, nothing ticks).
+MOTION_MODES = [("auto", "Auto"), ("fast", "Fast"), ("off", "Off")]
+QUIT_HOLDS = [("1.0", "1.0 s"), ("1.5", "1.5 s"), ("2.0", "2.0 s"), ("3.0", "3.0 s")]
+# The settings' category list, in order (the Multiplayer page only while Uncharted 2 is chosen).
+PAGE_ORDER = ("setup", "display", "performance", "controls", "cheats", "multiplayer", "advanced", "system")
+PAGE_LABELS = {"setup": "Quick Setup", "display": "Display", "performance": "Performance",
+               "controls": "Controls", "cheats": "Cheats", "multiplayer": "Multiplayer",
+               "advanced": "Advanced", "system": "System"}
 
 # The PS4's system language (its id, as sceSystemServiceParamGetInt reports it) for the 22 languages
 # the Collection has text for (all three games; text1/ps4/<n>.common in core.psarc). Each game's main
@@ -472,10 +491,12 @@ class Gamepads:
     """Controllers through SDL3, the game's own library (gow3_pc/out in a release, MSYS2 here):
     which buttons are held, and whether the first one is a PlayStation controller."""
     PLAYSTATION_TYPES = (4, 5, 6)  # SDL_GAMEPAD_TYPE_PS3, PS4, PS5
+    HOTPLUG_CHECK = 0.5  # seconds between checks for a controller while none is connected
 
     def __init__(self):
         self.sdl = None
         self.pads = {}
+        self.checked = 0.0
         msys = Path(os.environ.get("MSYS2_ROOT", "C:/msys64"))
         for path in (ROOT / "gow3_pc/out/SDL3.dll", msys / "clang64/bin/SDL3.dll", ROOT.parent / "msys64/clang64/bin/SDL3.dll"):
             if not path.is_file():
@@ -506,10 +527,11 @@ class Gamepads:
                 self.sdl = sdl
             break
 
-    def refresh(self):
+    def refresh(self, pump=True):
         if not self.sdl:
             return []
-        self.sdl.SDL_PumpEvents()
+        if pump:
+            self.sdl.SDL_PumpEvents()
         count = ctypes.c_int(0)
         ids = self.sdl.SDL_GetGamepads(ctypes.byref(count))
         current = [ids[i] for i in range(count.value)] if ids else []
@@ -522,24 +544,46 @@ class Gamepads:
                     self.pads[jid] = pad
         for jid in [j for j in self.pads if j not in current]:
             self.sdl.SDL_CloseGamepad(self.pads.pop(jid))
-        self.sdl.SDL_UpdateGamepads()
+        if pump:
+            self.sdl.SDL_UpdateGamepads()
         return list(self.pads.values())
 
-    def held(self):
+    def poll(self):
+        """One SDL pass: the held buttons and the left stick, as (-1..1, -1..1) with y downwards.
+
+        The launcher calls this 30 times a second, but only when a controller is connected: with
+        none it just looks for one twice a second, so an idle launcher costs next to nothing."""
+        if not self.sdl:
+            return set(), (0.0, 0.0)
+        now = time.monotonic()
+        if not self.pads and now - self.checked < self.HOTPLUG_CHECK:
+            return set(), (0.0, 0.0)
+        self.checked = now
         down = set()
-        for pad in self.refresh():
-            for index, name in enumerate(SDL_BUTTONS):
-                if self.sdl.SDL_GetGamepadButton(pad, index):
+        stick = (0.0, 0.0)
+        for index, pad in enumerate(self.refresh(pump=bool(self.pads))):
+            for button, name in enumerate(SDL_BUTTONS):
+                if self.sdl.SDL_GetGamepadButton(pad, button):
                     down.add(name)
             for axis, name in ((4, "lefttrigger"), (5, "righttrigger")):
                 if self.sdl.SDL_GetGamepadAxis(pad, axis) > 16000:
                     down.add(name)
-        return down
+            if index == 0:  # the first controller drives the menus
+                stick = (self.sdl.SDL_GetGamepadAxis(pad, 0) / 32767.0,  # SDL_GAMEPAD_AXIS_LEFTX
+                         self.sdl.SDL_GetGamepadAxis(pad, 1) / 32767.0)  # SDL_GAMEPAD_AXIS_LEFTY
+        return down, stick
+
+    def held(self):
+        return self.poll()[0]
 
     def style(self):
         for pad in self.refresh():
             return "playstation" if self.sdl.SDL_GetGamepadType(pad) in self.PLAYSTATION_TYPES else "xbox"
         return None
+
+    def left_stick(self):
+        """The left stick as -1..1 screen directions (y grows downwards, like the D-pad's dpdown)."""
+        return self.poll()[1]
 
 
 STICK_ACTIONS = {"ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right"}
@@ -928,10 +972,8 @@ PRESETS = {
     # IGPU card adapted from PR #223 by memeguyoffical (the card, its values and the iGPU detection).
     "igpu": {
         "title": "IGPU", "summary": "30–60 FPS  •  540–720p, FSR 1",
-        "detail": "Intel and AMD integrated graphics: the game draws at 540p (720p on the strongest "
-                  "iGPUs, 360p on the weakest) and FSR 1 upscales it to 1080p. About 30 FPS on Vega "
-                  "and 2-CU Radeon, 60 on Radeon 680M/760M/780M and Iris Xe. No anti-aliasing; the "
-                  "lowest memory use.",
+        "detail": "Intel and AMD integrated graphics: the game draws at 540p (720p on the strongest) and "
+                  "FSR 1 upscales it to 1080p. About 30 FPS on the weakest, 60 on Radeon 680M and Iris Xe.",
         "resolution": "1920x1080", "upscale": "performance",
         "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
                    "fsr1": "1", "rcas": "1", "rcas_strength": "75", "upscaler": "off"},
@@ -1297,9 +1339,17 @@ def read_config():
     # a player who turns it off again keeps it off.
     if config.get("version", 1) < 8:
         games["u3"]["multithreaded"] = True
+    # Version 9: the PlayStation 5 shell (fullscreen, motion, controller navigation, hints and the
+    # L3 + R3 shortcut). Nothing to convert: every new key comes from LAUNCHER_DEFAULTS, so an
+    # existing launcher.json keeps everything it already had.
+    if config.get("ui_motion") not in {name for name, _ in MOTION_MODES}:
+        config["ui_motion"] = "auto"
+    if config.get("pad_quit_hold") not in {name for name, _ in QUIT_HOLDS}:
+        config["pad_quit_hold"] = "2.0"
     for name in GAME_SETTING_DEFAULTS:
         config.pop(name, None)
-    config["version"] = 8
+    # Version 10: the shell is a choice now (`ui_controller_only`): the hub, or the classic layout.
+    config["version"] = 10
     # Under Wine the game folder is also kept as a Linux path: another prefix can show the same
     # folder under another drive letter (Launcher.game_dir).
     folder = config.get("game_dir")
@@ -1334,6 +1384,21 @@ def round_rect(canvas, x1, y1, x2, y2, r, **kw):
     points = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2,
               x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
     return canvas.create_polygon(points, smooth=True, **kw)
+
+
+def wrapped_height(root, font, text, width):
+    """The height a canvas text of `text` takes when wrapped at `width`, from the font's own
+    measurements (a canvas cannot tell before it is drawn)."""
+    font = tkfont.Font(root=root, font=font)
+    lines, line = 0, ""
+    for word in text.split():
+        trial = f"{line} {word}" if line else word
+        if line and font.measure(trial) > width:
+            lines += 1
+            line = word
+        else:
+            line = trial
+    return (lines + (1 if line else 0)) * font.metrics("linespace")
 
 
 class Toggle(tk.Canvas):
@@ -1371,7 +1436,8 @@ class Chip(tk.Canvas):
         pad_x, pad_y = int(10 * scale), int(5 * scale)
         w = self.font.measure(label) + 2 * pad_x
         h = self.font.metrics("linespace") + 2 * pad_y
-        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0, cursor="hand2")
+        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=2,
+                         highlightbackground=BG, highlightcolor=WHITE, cursor="hand2")
         self.w, self.h = w, h
         self.bind("<Button-1>", lambda e: self.set(not self.value, notify=True))
         self.draw()
@@ -1547,23 +1613,57 @@ class Launcher:
         # The graphics card (as last detected; detect_gpu checks again) for the Quick Setup advice.
         self.gpu_name = self.config.get("gpu")
         self.recommended = gpu_recommendation(self.gpu_name)
-        self.fonts()
+        # The PlayStation 5 shell: artwork cache, one tween loop, focus and controller state.
+        self.art = ps5_ui.Art(ASSETS / "ps5")
+        self.animator = ps5_ui.Animator(root)
+        self.apply_motion()
+        self.focus = ps5_ui.FocusNav(self)
+        self.sticks = ps5_ui.StickWatcher(self)
+        # Which shell: the PlayStation 5 hub (controller first) or the classic layout, the game
+        # cards and the tab strip (Settings -> System, Controller only mode off).
+        self.classic = not self.config.get("ui_controller_only", True)
+        self.screen = "settings" if self.classic else "home"
+        # The shell's parts, so a rebuild (the layout or the window changed) can tell what exists.
+        self.home = None
+        self.sidebar = None
+        self.settings_view = None
+        self.settings_status = None
+        self.classic_status = None
+        self.classic_substatus = None
+        self.play_button = None
+        self.update_button = None
+        self.tab_strip = None
+        self.cards = {}
+        self.tab_buttons = {}
+        self.tab_cells = {}
+        self.status_text = ""
+        self.status_detail = ""
+        self.pad_prev = set()
+        self.pad_repeat = {}
+        self.capturing = None
+        self.pad_capture = None
+        self.setup_fonts()
         root.title(f"{APP_TITLE} - Launcher by BilalReloaded")
         root.configure(bg=BG)
         root.resizable(True, True)
         self.width = self.px(1180)
+        self.controls_two_columns = None
         try:
             root.iconbitmap(default=str(ASSETS / "uncharted.ico"))
         except tk.TclError:
             pass
+        self.apply_fullscreen(self.config.get("ui_fullscreen", True))
+        self.width = self.content_width()
         self.build()
         root.update_idletasks()
-        root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
-        self.fit_to_screen()
-        self.restore_window_position()
+        if not self.fullscreen:
+            root.minsize(self.px(980), self.px(620))
+            self.restore_window_position()
+        self.bind_keys()
         write_config(self.config)  # keeps one-time updates (read_config) even without a change
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(150, self.poll)
+        root.after(200, self.pad_tick)
         # Updates (launcher/updater.py): what an installed one left behind goes; a newer release
         # shows the UPDATE button.
         self.update_release = None
@@ -1587,16 +1687,134 @@ class Launcher:
         self.root.update_idletasks()
         screen_w, screen_h = self.root.winfo_vrootwidth(), self.root.winfo_vrootheight()
         if -50 <= x <= max(0, screen_w - 200) and 0 <= y <= max(0, screen_h - 200):
-            # All of the window on the screen (fit_to_screen may have made it taller than it was).
             y = min(y, max(0, self.root.winfo_screenheight() - self.root.winfo_reqheight() - self.px(70)))
             self.root.geometry(f"+{x}+{y}")
 
-    def fit_to_screen(self):
-        """More room for the settings when the screen is tall enough (fewer pages need to scroll)."""
-        spare = self.root.winfo_screenheight() - self.px(110) - self.root.winfo_reqheight()
-        if spare > 0:
-            self.body.config(height=self.body.winfo_reqheight() + min(spare, self.px(240)))
-            self.root.update_idletasks()
+    # -- window -------------------------------------------------------------------------------
+
+    def apply_fullscreen(self, on):
+        """Borderless fullscreen (the PS5's own mode); F11 and Settings > System switch back."""
+        self.fullscreen = bool(on)
+        try:
+            self.root.attributes("-fullscreen", self.fullscreen)
+        except tk.TclError:
+            self.fullscreen = False
+        if not self.fullscreen:
+            width, height = self.px(1180), self.px(760)
+            self.window_width = width
+            self.root.geometry(f"{width}x{height}")
+
+    def set_fullscreen(self, on):
+        self.config["ui_fullscreen"] = bool(on)
+        write_config(self.config)
+        self.apply_fullscreen(on)
+        if not on:
+            self.restore_window_position()
+        self.root.update_idletasks()
+        self.width = self.content_width()
+        if self.classic:
+            # The hero, the cards and the tab strip are laid out for the window's width: rebuild
+            # them for the new one (the toggle that fired this has gone by then).
+            self.root.after(10, self.rebuild_shell)
+        # The Controls page picks one or two columns from the room it has: rebuild it if that changed.
+        elif hasattr(self, "pages") and "controls" in self.pages and \
+                self.controls_two_columns != (self.width >= self.px(1000)):
+            self.rebuild_controls()
+        toggle = getattr(self, "widgets", {}).get("ui_fullscreen")
+        if isinstance(toggle, Toggle):
+            toggle.set(self.fullscreen)
+
+    def toggle_fullscreen(self):
+        self.set_fullscreen(not self.fullscreen)
+
+    def set_classic(self, on):
+        """Switch layouts: `on` is the classic cards and tabs, off the PlayStation 5 hub (the
+        System page's Controller only mode is the opposite of this)."""
+        on = bool(on)
+        if on == self.classic:
+            return
+        self.classic = on
+        self.config["ui_controller_only"] = not on
+        write_config(self.config)
+        self.rebuild_shell()
+
+    def rebuild_shell(self):
+        """Rebuilds the stage in the chosen layout (after switching it, or the window's size)."""
+        self.width = self.content_width()
+        self.focus.clear()
+        for child in self.stage.winfo_children():
+            child.destroy()
+        self.clear_page_state()
+        self.home = None
+        self.sidebar = None
+        self.settings_view = None
+        self.settings_status = None
+        self.classic_status = None
+        self.classic_substatus = None
+        self.play_button = None
+        self.update_button = None
+        self.tab_strip = None
+        self.cards = {}
+        self.tab_buttons = {}
+        self.tab_cells = {}
+        self.widgets = {}
+        self.images = []
+        self.pages = {}
+        self.scroll_canvases = set()
+        self.screen = "settings" if self.classic else "home"
+        if self.classic:
+            self.build_classic()
+        else:
+            self.build_home()
+            self.build_settings()
+        self.select_game(self.config.get("game", "u1"), save=False)
+        tab = self.config.get("tab", "setup")
+        self.show_tab(tab if tab in self.pages else "setup", save=False)
+        if self.classic:
+            self.screen = "settings"
+        else:
+            self.show_home()
+        self.update_play_state()
+
+    def clear_page_state(self):
+        """Forgets the widgets the pages built: their tests (`hasattr`) must not see the old ones
+        while the new pages are being built (the Display page asks for the Performance one's)."""
+        for name in ("setup_intro", "preset_cards", "preset_focused", "custom_note",
+                     "render_size_note", "upscale_row", "overlay_chips", "fps_note", "prompts_note",
+                     "controls_hint", "binding_slots", "pad_slots", "pad_images", "game_dir_label",
+                     "update_label", "ini_label", "net_list", "hero", "_hero_source", "body"):
+            if hasattr(self, name):
+                delattr(self, name)
+        self.capturing = None
+        self.pad_capture = None
+        self.controls_two_columns = None
+
+    def sidebar_width(self):
+        return self.px(286)
+
+    def content_width(self, window_width=None):
+        """The room the pages have: the window less the category list (or, in the classic layout,
+        less its margins)."""
+        if window_width is None:
+            if self.fullscreen:
+                window_width = self.root.winfo_screenwidth()
+            else:
+                window_width = self.root.winfo_width()
+                if window_width <= 1:  # not mapped yet
+                    window_width = getattr(self, "window_width", self.px(1180))
+        if self.classic:
+            return max(self.px(640), int(window_width) - self.px(80))
+        return max(self.px(640), int(window_width) - self.sidebar_width() - self.px(104))
+
+    def apply_motion(self):
+        """Animations: Auto follows the graphics card, Fast runs them at half rate, Off stops them."""
+        mode = self.config.get("ui_motion", "auto")
+        self.animator.enabled = mode != "off"
+        self.animator.interval = 33 if (mode == "fast" or (mode == "auto" and self.integrated_gpu())) else 16
+
+    def integrated_gpu(self):
+        name = (self.gpu_name or "").lower()
+        return bool(name) and (igpu_class(name) is not None or "intel" in name or "radeon graphics" in name)
 
     def detect_gpu(self):
         """Finds the graphics card in the background (Windows' list takes a moment) and marks the
@@ -1626,62 +1844,136 @@ class Launcher:
     def px(self, value):
         return int(value * self.s)
 
-    def fonts(self):
-        self.f_title = ("Georgia", 40, "bold")
-        self.f_subtitle = ("Segoe UI Semibold", 11)
-        self.f_card_number = ("Georgia", 30, "bold")
-        self.f_card_title = ("Georgia", 14, "bold")
-        self.f_body = ("Segoe UI", 10)
-        self.f_body_bold = ("Segoe UI Semibold", 10)
-        self.f_small = ("Segoe UI", 9)
-        self.f_tab = ("Segoe UI Semibold", 10)
-        self.f_caps = ("Segoe UI Semibold", 8)
-        self.f_play = ("Georgia", 17, "bold")
+    def setup_fonts(self):
+        """The PS5's type scale, exposed under the names the existing widgets already use."""
+        self.fonts = ps5_ui.Fonts(self.root, self.s)
+        self.f_title = self.fonts.f_hero
+        self.f_subtitle = self.fonts.f_body
+        self.f_card_number = self.fonts.f_title
+        self.f_card_title = self.fonts.f_h2
+        self.f_body = self.fonts.f_body
+        self.f_body_bold = self.fonts.f_body_bold
+        self.f_small = self.fonts.f_small
+        self.f_tab = self.fonts.f_tab
+        self.f_caps = self.fonts.f_caps
+        self.f_play = self.fonts.f_play
 
     # -- layout -----------------------------------------------------------------------------
 
     def build(self):
-        self.build_hero()
-        self.build_cards()
-        self.build_footer()
-        self.build_tabs()
+        # The hint bar is packed first (bottom), then the stage takes the rest of the window.
+        self.build_hintbar()
+        self.build_stage()
+        if self.classic:
+            self.build_classic()
+        else:
+            self.build_home()
+            self.build_settings()
         self.select_game(self.config.get("game", "u1"), save=False)
+        # The settings are built and ready, on the page they were left on; the hub is what opens (a
+        # game console's home screen), unless the classic layout is the one chosen.
         self.show_tab(self.config.get("tab", "setup") if self.config.get("tab") in self.pages else "setup",
                       save=False)
+        if not self.classic:
+            self.show_home()
 
-    def build_hero(self):
-        w, h = self.width, self.px(170)
-        art = None
+    def build_stage(self):
+        """The two screens share one stage: the game hub, and the settings on top of it."""
+        self.stage = tk.Frame(self.root, bg=BG)
+        self.stage.pack(side="top", fill="both", expand=True)
+
+    def build_hintbar(self):
+        self.hintbar = ps5_ui.HintBar(self, self.px(56))
+        self.hintbar.pack(side="bottom", fill="x")
+
+    def build_home(self):
+        self.home = ps5_ui.HomeView(self, self.art, self.animator, self.stage)
+        self.home.set_games(GAMES)
+
+    def build_settings(self):
+        """The settings: a PS5 category list on the left, the existing pages on the right."""
+        self.settings_view = tk.Frame(self.stage, bg=BG)
+        self.sidebar = ps5_ui.Sidebar(self, self.settings_view, self.sidebar_width(), [], self.show_tab)
+        self.sidebar.pack(side="left", fill="y")
+        content = tk.Frame(self.settings_view, bg=BG)
+        content.pack(side="left", fill="both", expand=True, padx=(0, self.px(40)),
+                     pady=(self.px(28), self.px(18)))
+        header = tk.Frame(content, bg=BG)
+        header.pack(side="top", fill="x", pady=(0, self.px(8)))
+        self.settings_status = tk.Label(header, text="", font=self.f_small, bg=BG, fg=MUTED, anchor="e")
+        self.settings_status.pack(side="right")
+        self.update_button = tk.Label(header, text="UPDATE", font=self.f_body_bold, bg=PANEL_HI, fg=GOLD,
+                                      padx=self.px(16), pady=self.px(10), cursor="hand2",
+                                      highlightthickness=1, highlightbackground=GOLD)
+        self.update_button.bind("<Button-1>", lambda e: self.install_update())
+        self.body = tk.Frame(content, bg=BG)
+        self.body.pack(side="top", fill="both", expand=True)
+        self.build_pages()
+        self.sync_update_button()
+
+    # -- the classic layout (Controller only mode off) ---------------------------------------
+
+    def build_classic(self):
+        """The pre-PS5 layout: the hero, the three game cards, the footer with Play, and the tab
+        strip. It shares the settings pages, the widgets and the config with the hub."""
+        self.screen = "settings"
+        self.settings_view = tk.Frame(self.stage, bg=BG)
+        self.settings_view.pack(fill="both", expand=True)
+        self.hero = tk.Canvas(self.settings_view, width=self.width, height=self.px(170), bg=BG,
+                              highlightthickness=0)
+        self.hero.pack(side="top", fill="x")
+        self.hero.bind("<Configure>", lambda e: self.draw_hero())
+        self._hero_source = None
+        self.build_classic_cards()
+        self.build_classic_footer()
+        self.build_classic_tabs()
+
+    def hero_art(self):
+        """The hero's art: the selected game's own sce_sys artwork, when the game folder has it."""
         for name in ("pic1.png", "pic0.png"):
-            if (self.game_dir() / "sce_sys" / name).exists():
-                art = Image.open(self.game_dir() / "sce_sys" / name).convert("RGB")
-                break
-        if art is None:
-            art = Image.new("RGB", (1920, 1080), "#d9c9a6")
-        # Fill the width; keep Drake (right) and the top of the parchment in view.
-        scale = w / art.width
-        art = art.resize((w, int(art.height * scale)), Image.LANCZOS)
+            path = self.game_dir() / "sce_sys" / name
+            if path.exists():
+                try:
+                    return Image.open(path).convert("RGB")
+                except OSError:
+                    continue
+        return Image.new("RGB", (1920, 1080), "#d9c9a6")
+
+    def draw_hero(self):
+        """The hero band: the art, faded into the panel, with the collection's title and links."""
+        canvas = getattr(self, "hero", None)
+        if canvas is None:
+            return
+        width = canvas.winfo_width()
+        if width <= 1:
+            width = self.width
+        height = self.px(170)
+        if self._hero_source is None:
+            self._hero_source = self.hero_art()
+        art = self._hero_source
+        scale = width / art.width
+        art = art.resize((max(1, width), max(1, int(art.height * scale))), Image.LANCZOS)
         top = int(art.height * 0.02)
-        art = art.crop((0, top, w, top + h))
+        art = art.crop((0, top, width, top + height))
         # Fade into the dark panel below.
-        fade = Image.new("L", (w, h), 0)
+        fade = Image.new("L", (width, height), 0)
         draw = ImageDraw.Draw(fade)
-        start = int(h * 0.62)
-        for y in range(start, h):
-            draw.line([(0, y), (w, y)], fill=int(255 * ((y - start) / (h - start)) ** 1.6))
-        dark = Image.new("RGB", (w, h), BG)
-        art = Image.composite(dark, art, fade)
+        start = int(height * 0.62)
+        for y in range(start, height):
+            draw.line([(0, y), (width, y)], fill=int(255 * ((y - start) / (height - start)) ** 1.6))
+        art = Image.composite(Image.new("RGB", (width, height), BG), art, fade)
         photo = ImageTk.PhotoImage(art)
-        self.images.append(photo)
-        canvas = tk.Canvas(self.root, width=w, height=h, bg=BG, highlightthickness=0)
-        canvas.pack(side="top")
+        self.images = [photo]
+        canvas.delete("all")
         canvas.create_image(0, 0, image=photo, anchor="nw")
         x, y = self.px(48), self.px(52)
         canvas.create_text(x, y, text="UNCHARTED", font=self.f_title, fill="#3b2914", anchor="w")
-        canvas.create_text(x + self.px(3), y + self.px(44), text="T H E   N A T H A N   D R A K E   C O L L E C T I O N",
+        canvas.create_text(x + self.px(3), y + self.px(44),
+                           text="T H E   N A T H A N   D R A K E   C O L L E C T I O N",
                            font=self.f_subtitle, fill="#8a6326", anchor="w")
-        canvas.create_line(x + self.px(3), y + self.px(66), x + self.px(330), y + self.px(66), fill="#b98d45", width=2)
-        self.draw_links(canvas, w)
+        canvas.create_line(x + self.px(3), y + self.px(66), x + self.px(330), y + self.px(66),
+                           fill="#b98d45", width=2)
+        self.draw_links(canvas, width)
 
     def draw_links(self, canvas, width):
         """The author's Patreon, YouTube channel and GitHub as badges in the top right of the hero."""
@@ -1694,7 +1986,8 @@ class Launcher:
             left = right - badge_w
             mid = top + height // 2
             canvas.coords(text, left + self.px(34), mid)
-            badge = round_rect(canvas, left, top, right, top + height, height // 2, fill=color, outline=color, tags=tag)
+            badge = round_rect(canvas, left, top, right, top + height, height // 2, fill=color, outline=color,
+                               tags=tag)
             canvas.tag_lower(badge, text)
             # Icon: YouTube's play triangle on white, a heart for Patreon, GitHub's code brackets.
             icon_x = left + self.px(12)
@@ -1702,34 +1995,43 @@ class Launcher:
                 canvas.create_text(icon_x + self.px(8), mid, text="♥", font=self.f_body_bold, fill="white",
                                    tags=tag)
             elif label == "YouTube":
-                round_rect(canvas, icon_x, mid - self.px(7), icon_x + self.px(16), mid + self.px(7), self.px(4),
-                           fill="white", outline="white", tags=tag)
-                canvas.create_polygon(icon_x + self.px(6), mid - self.px(4), icon_x + self.px(6), mid + self.px(4),
-                                      icon_x + self.px(12), mid, fill=color, outline=color, tags=tag)
+                round_rect(canvas, icon_x, mid - self.px(7), icon_x + self.px(16), mid + self.px(7),
+                           self.px(4), fill="white", outline="white", tags=tag)
+                canvas.create_polygon(icon_x + self.px(6), mid - self.px(4), icon_x + self.px(6),
+                                      mid + self.px(4), icon_x + self.px(12), mid, fill=color, outline=color,
+                                      tags=tag)
             else:
-                canvas.create_text(icon_x + self.px(8), mid, text="</>", font=self.f_small, fill="white", tags=tag)
+                canvas.create_text(icon_x + self.px(8), mid, text="</>", font=self.f_small, fill="white",
+                                   tags=tag)
             canvas.tag_bind(tag, "<Button-1>", lambda e, u=url: webbrowser.open(u))
-            canvas.tag_bind(tag, "<Enter>", lambda e, b=badge, c=hover: (canvas.itemconfig(b, fill=c, outline=c),
-                                                                       canvas.config(cursor="hand2")))
-            canvas.tag_bind(tag, "<Leave>", lambda e, b=badge, c=color: (canvas.itemconfig(b, fill=c, outline=c),
-                                                                       canvas.config(cursor="")))
+            canvas.tag_bind(tag, "<Enter>", lambda e, b=badge, c=hover: (
+                canvas.itemconfig(b, fill=c, outline=c), canvas.config(cursor="hand2")))
+            canvas.tag_bind(tag, "<Leave>", lambda e, b=badge, c=color: (
+                canvas.itemconfig(b, fill=c, outline=c), canvas.config(cursor="")))
             right = left - self.px(10)
 
-    def build_cards(self):
-        frame = tk.Frame(self.root, bg=BG)
+    def build_classic_cards(self):
+        """The three game cards: one click selects, a double click plays."""
+        frame = tk.Frame(self.settings_view, bg=BG)
         frame.pack(side="top", fill="x", padx=self.px(40), pady=(0, self.px(12)))
         self.cards = {}
         gap = self.px(16)
-        card_w = (self.width - 2 * self.px(40) - 2 * gap) // 3
+        card_w = max(1, (self.width - 2 * gap) // 3)
         card_h = self.px(72)
         for i, game in enumerate(GAMES):
-            canvas = tk.Canvas(frame, width=card_w, height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
+            canvas = tk.Canvas(frame, width=card_w, height=card_h, bg=BG, highlightthickness=0,
+                               cursor="hand2")
             canvas.grid(row=0, column=i, padx=(0 if i == 0 else gap, 0))
             canvas.bind("<Button-1>", lambda e, k=game["key"]: self.select_game(k))
             canvas.bind("<Double-Button-1>", lambda e, k=game["key"]: self.play_game(k))
             canvas.bind("<Enter>", lambda e, k=game["key"]: self.draw_card(k, hover=True))
             canvas.bind("<Leave>", lambda e, k=game["key"]: self.draw_card(k))
+            canvas._activate = lambda k=game["key"]: self.select_game(k)
+            canvas._focus_set = lambda on, c=canvas: c.config(
+                highlightthickness=2 if on else 0, highlightbackground=ps5_ui.WHITE)
             self.cards[game["key"]] = (canvas, game, card_w, card_h)
+        for key in self.cards:
+            self.draw_card(key)
 
     def draw_card(self, key, hover=False):
         canvas, game, w, h = self.cards[key]
@@ -1737,46 +2039,390 @@ class Launcher:
         canvas.delete("all")
         fill = PANEL_HI if selected or hover else PANEL
         outline = GOLD if selected else ("#5a4733" if hover else LINE)
-        round_rect(canvas, 2, 2, w - 2, h - 2, self.px(10), fill=fill, outline=outline, width=2 if selected else 1)
+        round_rect(canvas, 2, 2, w - 2, h - 2, self.px(10), fill=fill, outline=outline,
+                   width=2 if selected else 1)
         canvas.create_text(self.px(22), h // 2, text=game["number"], font=self.f_card_number,
                            fill=GOLD if selected else DIM, anchor="w")
         canvas.create_text(self.px(66), h // 2 - self.px(10), text=game["title"], font=self.f_card_title,
                            fill=TEXT, anchor="w")
-        canvas.create_text(self.px(67), h // 2 + self.px(13), text=game["subtitle"], font=self.f_small,
+        canvas.create_text(self.px(67), h // 2 + self.px(13),
+                           text=game["name"].split(": ", 1)[-1], font=self.f_small,
                            fill=MUTED, anchor="w")
         if selected:
-            canvas.create_text(w - self.px(18), self.px(16), text="SELECTED", font=("Segoe UI Semibold", 7),
-                               fill=GOLD, anchor="e")
+            canvas.create_text(w - self.px(18), h - self.px(12), text="SELECTED", font=self.f_caps,
+                               fill=GOLD, anchor="se")
+
+    def build_classic_footer(self):
+        """The status lines, the Play button and the update badge along the bottom."""
+        footer = tk.Frame(self.settings_view, bg=PANEL)
+        footer.pack(side="bottom", fill="x")
+        tk.Frame(self.settings_view, bg=LINE, height=1).pack(side="bottom", fill="x")
+        inner = tk.Frame(footer, bg=PANEL)
+        inner.pack(fill="x", padx=self.px(40), pady=self.px(14))
+        left = tk.Frame(inner, bg=PANEL)
+        left.pack(side="left", fill="x", expand=True)
+        self.classic_status = tk.Label(left, text=self.status_text, font=self.f_body_bold, bg=PANEL,
+                                       fg=TEXT, anchor="w")
+        self.classic_status.pack(side="top", fill="x")
+        self.classic_substatus = tk.Label(left, text="Insert or R3 + L2 in game opens the menu.",
+                                          font=self.f_small, bg=PANEL, fg=MUTED, anchor="w")
+        self.classic_substatus.pack(side="top", fill="x")
+        w, h = self.px(210), self.px(54)
+        self.play_button = tk.Canvas(inner, width=w, height=h, bg=PANEL, highlightthickness=0,
+                                     cursor="hand2")
+        self.play_button.pack(side="right")
+        self.play_button.bind("<Button-1>", lambda e: self.play_or_stop())
+        self.play_button.bind("<Enter>", lambda e: self.draw_play(hover=True))
+        self.play_button.bind("<Leave>", lambda e: self.draw_play())
+        self.play_button._activate = self.play_or_stop
+        self.play_button._focus_set = lambda on: self.play_button.config(
+            highlightthickness=2 if on else 0, highlightbackground=ps5_ui.WHITE)
+        self.update_button = tk.Label(inner, text="UPDATE", font=self.f_body_bold, bg=PANEL_HI, fg=GOLD,
+                                      padx=self.px(16), pady=self.px(10), cursor="hand2",
+                                      highlightthickness=1, highlightbackground=GOLD)
+        self.update_button.bind("<Button-1>", lambda e: self.install_update())
+        self.draw_play()
+        self.sync_update_button()
+        if not self.status_text:
+            self.set_status(f"Ready to play {self.current_game()['name']}.")
+
+    def build_classic_tabs(self):
+        """The tab strip, then the page area under it (the same pages as the hub's sidebar)."""
+        outer = tk.Frame(self.settings_view, bg=BG)
+        outer.pack(side="top", fill="both", expand=True, padx=self.px(40))
+        self.tab_strip = tk.Frame(outer, bg=BG)
+        self.tab_strip.pack(side="top", fill="x")
+        tk.Frame(outer, bg=LINE, height=1).pack(side="top", fill="x")
+        self.body = tk.Frame(outer, bg=BG, height=self.px(330))
+        self.body.pack(side="top", fill="both", expand=True, pady=(self.px(14), 0))
+        self.body.pack_propagate(False)
+        self.build_pages()
+
+    def build_tab_buttons(self):
+        """One tab per page, rebuilt when the Multiplayer tab comes or goes."""
+        if self.tab_strip is None:
+            return
+        for child in self.tab_strip.winfo_children():
+            child.destroy()
+        self.tab_buttons = {}
+        self.tab_cells = {}
+        for name in getattr(self, "page_order", PAGE_ORDER):
+            if name not in self.pages:
+                continue
+            cell = tk.Frame(self.tab_strip, bg=BG)
+            cell.pack(side="left", padx=(0, self.px(18)))
+            text = tk.Label(cell, text=PAGE_LABELS[name].upper(), font=self.f_tab, bg=BG, fg=MUTED,
+                            cursor="hand2")
+            text.pack(side="top", pady=(0, self.px(6)))
+            bar = tk.Frame(cell, bg=BG, height=max(2, self.px(2)))
+            bar.pack(side="top", fill="x")
+            for widget in (cell, text):
+                widget.bind("<Button-1>", lambda e, n=name: self.show_tab(n))
+            self.tab_buttons[name] = (text, bar)
+            self.tab_cells[name] = cell
+        self.select_tab(getattr(self, "current_tab", None))
+
+    def select_tab(self, name):
+        for tab, (text, bar) in self.tab_buttons.items():
+            text.config(fg=TEXT if tab == name else MUTED)
+            bar.config(bg=GOLD if tab == name else BG)
+
+    def sync_update_button(self):
+        """Shows the update badge (packed) when an update was found, in either layout."""
+        if self.update_button is None or not getattr(self, "update_release", None):
+            return
+        version = updater.version_text(self.update_release["version"])
+        self.update_button.config(text=f"UPDATE TO {version}")
+        self.update_button.pack(side="right", padx=(0, self.px(14)))
+
+    def build_pages(self):
+        self.scroll_canvases = set()
+        self.root.bind_all("<MouseWheel>", self.wheel)
+        self.pages = {
+            "setup": self.page_setup(),
+            "display": self.page_display(),
+            "performance": self.page_performance(),
+            "controls": self.page_controls(),
+            "cheats": self.page_cheats(),
+            "advanced": self.page_advanced(),
+            "system": self.page_system(),
+        }
+        if multiplayer_preview():
+            self.pages["multiplayer"] = self.page_multiplayer()
+        self.refresh_sidebar()
+
+    def refresh_sidebar(self):
+        """The category list (or the tab strip) follows which pages exist (Multiplayer only with
+        Uncharted 2)."""
+        order = [name for name in PAGE_ORDER if name in self.pages]
+        if self.config.get("game") != "u2":
+            order = [name for name in order if name != "multiplayer"]
+        self.page_order = order
+        if self.sidebar is not None:
+            self.sidebar.items = [(name, PAGE_LABELS[name]) for name in order]
+            self.sidebar.draw()
+            if getattr(self, "current_tab", None):
+                self.sidebar.select(self.current_tab)
+        if self.tab_strip is not None:
+            self.build_tab_buttons()
+
+    # -- screens ----------------------------------------------------------------------------
+
+    def show_home(self, save=True):
+        if self.classic:
+            return
+        self.settings_view.pack_forget()
+        self.home.pack(fill="both", expand=True)
+        self.screen = "home"
+        self.focus.clear()
+        self.home.set_running(self.process is not None)
+        self.set_hints_for_home()
+
+    def open_settings(self, tab=None, save=True):
+        if self.classic:
+            self.show_tab(tab or self.config.get("tab", "setup"), save=save)
+            return
+        self.home.pack_forget()
+        self.settings_view.pack(fill="both", expand=True)
+        self.screen = "settings"
+        self.show_tab(tab or self.config.get("tab", "setup"), save=save)
+
+    def set_hints_for_home(self):
+        if not hasattr(self, "hintbar"):
+            return
+        items = [("a", "Stop" if self.process else "Play"), ("start", "Settings"),
+                 ("leftshoulder", "Previous game"), ("rightshoulder", "Next game")]
+        if self.process:
+            items.append(("leftstick+rightstick", "Hold to close the game"))
+        self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
+
+    def set_hints_for_settings(self):
+        if not hasattr(self, "hintbar"):
+            return
+        if self.classic:
+            items = [("a", "Select"), ("dpleft", "Adjust"), ("leftshoulder", "Category"),
+                     ("rightshoulder", "Category"), ("start", "Stop" if self.process else "Play")]
+            if self.process:
+                items.append(("leftstick+rightstick", "Hold to close the game"))
+            self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
+            return
+        items = [("a", "Select"), ("dpleft", "Adjust"), ("b", "Back"), ("start", "Home")]
+        if self.process:
+            items.append(("leftstick+rightstick", "Hold to close the game"))
+        self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
+
+    # -- controller -------------------------------------------------------------------------
+
+    def pad_icon(self, button, style, height):
+        return pad_icon(button, style, height)
+
+    def pad_tick(self):
+        """The controller's buttons drive the launcher and the L3 + R3 shortcut: 30 times a second
+        while one is connected, four times a second (looking for one) while none is, so an idle
+        launcher with no controller barely wakes the CPU."""
+        delay = 33 if getattr(self.gamepads, "pads", None) else 250
+        try:
+            self.root.after(delay, self.pad_tick)
+        except tk.TclError:
+            return
+        if not getattr(self.gamepads, "sdl", None):
+            return
+        held, stick = self.gamepads.poll()
+        now = time.monotonic()
+        if self.capturing is not None:
+            # A Controls slot waits for a key: Circle cancels it (a controller cannot type one).
+            if "b" in held - self.pad_prev:
+                self.stop_capture()
+            self.pad_prev = held
+            return
+        if self.pad_capture is not None:
+            self.pad_prev = held
+            return
+        self.sticks.update(held, now)
+        if self.config.get("pad_nav", True) and not self.direct:
+            self.pad_navigate(held, now, stick)
+        self.pad_prev = held
+
+    def pad_navigate(self, held, now, stick=(0.0, 0.0)):
+        pressed = held - self.pad_prev
+        direction = None
+        for button, step in (("dpleft", (-1, 0)), ("dpright", (1, 0)), ("dpup", (0, -1)), ("dpdown", (0, 1))):
+            if button in held:
+                direction = step
+                break
+        if direction is None:
+            x, y = stick
+            if abs(x) > 0.62 or abs(y) > 0.62:
+                direction = (1 if x > 0.62 else -1 if x < -0.62 else 0,
+                             1 if y > 0.62 else -1 if y < -0.62 else 0)
+        if direction is None:
+            self.pad_repeat.pop("dir", None)
+        elif direction != self.pad_repeat.get("dir"):
+            self.pad_repeat = {"dir": direction, "at": now + 0.40}
+            self.navigate(*direction)
+        elif now >= self.pad_repeat.get("at", 0.0):
+            self.pad_repeat["at"] = now + 0.11
+            self.navigate(*direction)
+
+        if "a" in pressed:
+            self.key_activate()
+        if "b" in pressed:
+            self.key_back()
+        if "start" in pressed:
+            if self.classic:
+                self.play_or_stop()
+            else:
+                self.show_home() if self.screen == "settings" else self.open_settings()
+        if "leftshoulder" in pressed:
+            self.pad_category(-1)
+        if "rightshoulder" in pressed:
+            self.pad_category(1)
+        if "lefttrigger" in pressed:
+            self.pad_scroll(-1)
+        if "righttrigger" in pressed:
+            self.pad_scroll(1)
+
+    def navigate(self, dx, dy):
+        if self.screen == "home":
+            if dx:
+                keys = [g["key"] for g in GAMES]
+                index = keys.index(self.config.get("game", "u1"))
+                self.select_game(keys[(index + dx) % len(keys)])
+            return
+        self.focus.move(dx, dy)
+
+    def pad_category(self, step):
+        if self.screen != "settings" or not getattr(self, "page_order", None):
+            return
+        index = self.page_order.index(self.current_tab) if self.current_tab in self.page_order else 0
+        self.show_tab(self.page_order[(index + step) % len(self.page_order)])
+
+    def pad_scroll(self, step):
+        if self.screen != "settings":
+            return
+        page = self.pages.get(self.current_tab)
+        holder = getattr(page, "holder", page) if page is not None else None
+        if holder is None:
+            return
+        for child in holder.winfo_children():
+            if str(child) in self.scroll_canvases:
+                child.yview_scroll(step, "pages")
+
+    # -- keyboard ---------------------------------------------------------------------------
+
+    def bind_keys(self):
+        """Keyboard navigation and F11, on the window (never bind_all: the Controls page captures
+        key presses with bind_all while a slot waits for an input)."""
+        root = self.root
+        root.bind("<F11>", lambda e: self.toggle_fullscreen())
+        root.bind("<Escape>", self.key_back)
+        root.bind("<Left>", lambda e: self.key_move(-1, 0))
+        root.bind("<Right>", lambda e: self.key_move(1, 0))
+        root.bind("<Up>", lambda e: self.key_move(0, -1))
+        root.bind("<Down>", lambda e: self.key_move(0, 1))
+        root.bind("<Return>", lambda e: self.key_activate())
+        root.bind("<KP_Enter>", lambda e: self.key_activate())
+
+    def key_move(self, dx, dy):
+        if self.capturing is not None or self.pad_capture is not None:
+            return None
+        self.navigate(dx, dy)
+        return "break"
+
+    def key_activate(self):
+        if self.capturing is not None or self.pad_capture is not None:
+            return None
+        if self.screen == "home":
+            self.play_or_stop()
+        else:
+            self.focus.activate()
+        return "break"
+
+    def key_back(self, event=None):
+        if self.capturing is not None or self.pad_capture is not None:
+            return None
+        if self.screen == "settings":
+            self.show_home()
+        return "break"
+
+    # -- focus helpers ----------------------------------------------------------------------
+
+    def focus_targets(self, name):
+        """The focusable widgets of a page: the order the page set (preset cards, control slots),
+        else every widget that carries `_activate`, in the order they were built. In the classic
+        layout the game cards come first and the footer's Play button last."""
+        page = self.pages.get(name)
+        if page is None:
+            return []
+        order = getattr(page, "focus_order", None)
+        if order is not None:
+            found = [widget for widget in order if widget.winfo_exists()]
+        else:
+            found = []
+
+            def walk(widget):
+                if getattr(widget, "_activate", None) is not None:
+                    found.append(widget)
+                for child in widget.winfo_children():
+                    walk(child)
+
+            walk(page)
+        if self.classic:
+            extras = [card[0] for card in getattr(self, "cards", {}).values()]
+            found = [widget for widget in extras if widget.winfo_exists()] + found
+            if self.play_button is not None and self.play_button.winfo_exists():
+                found.append(self.play_button)
+        return found
+
+    def ensure_visible(self, widget):
+        """Scrolls the page so the focused row is on screen."""
+        canvas = widget.master
+        while canvas is not None and str(canvas) not in self.scroll_canvases:
+            canvas = canvas.master
+        if canvas is None:
+            return
+        box = canvas.bbox("all")
+        if not box:
+            return
+        total = max(1, box[3] - box[1])
+        view = canvas.winfo_height()
+        top = widget.winfo_rooty() - canvas.winfo_rooty() + canvas.canvasy(0) - box[1]
+        bottom = top + widget.winfo_height()
+        first = canvas.canvasy(0) - box[1]
+        if top < first + 6:
+            canvas.yview_moveto(max(0.0, (top - 14) / total))
+        elif bottom > first + view - 6:
+            canvas.yview_moveto(min(1.0, (bottom - view + 14) / total))
 
     def select_game(self, key, save=True):
-        if key not in self.cards:
+        if key not in GAME_KEYS:
             key = "u1"
         changed = key != self.config.get("game")
         self.config["game"] = key
-        for k in self.cards:
-            self.draw_card(k)
+        if self.home is not None:
+            self.home.select(key, animate=changed)
+        for card in getattr(self, "cards", {}):
+            self.draw_card(card)
         if save:
             write_config(self.config)
         if changed:
             # Each game keeps its own settings: show the selected game's.
             self.reload_ini()
             self.refresh_controls()
-        if hasattr(self, "status") and not self.process:
-            self.set_status(f"Ready to play {self.current_game()['name']}.")
+        if not self.process:
+            if self.home is not None:
+                self.home.set_status(f"Ready to play {self.current_game()['name']}.")
+            elif self.classic_status is not None:
+                self.set_status(f"Ready to play {self.current_game()['name']}.")
         self.update_multiplayer_tab()
 
     def update_multiplayer_tab(self):
-        """The Multiplayer tab shows only while Uncharted 2 is chosen (its net games)."""
-        cell = getattr(self, "tab_cells", {}).get("multiplayer")
-        if cell is None:
+        """The Multiplayer category shows only while Uncharted 2 is chosen (its net games)."""
+        if not getattr(self, "pages", None):
             return
-        if self.config.get("game") == "u2":
-            if not cell.winfo_manager():
-                cell.pack(side="left", padx=(0, self.px(26)))
-        else:
-            cell.pack_forget()
-            if getattr(self, "current_tab", None) == "multiplayer":
-                self.show_tab("setup", save=False)
+        self.refresh_sidebar()
+        if self.config.get("game") != "u2" and getattr(self, "current_tab", None) == "multiplayer":
+            self.show_tab("setup", save=False)
 
     def game_settings(self):
         """Preset, render resolution and multithreading of the selected game."""
@@ -1877,6 +2523,9 @@ class Launcher:
         if hasattr(self, "game_dir_label"):
             self.game_dir_label.config(text=f"Game files: {folder}")
             self.update_label.config(text=self.update_text())
+        if getattr(self, "hero", None) is not None:
+            self._hero_source = None
+            self.draw_hero()
         return True
 
     def chosen_update(self):
@@ -1907,47 +2556,11 @@ class Launcher:
     def current_game(self):
         return next(g for g in GAMES if g["key"] == self.config.get("game"))
 
-    def build_tabs(self):
-        outer = tk.Frame(self.root, bg=BG)
-        outer.pack(side="top", fill="both", expand=True, padx=self.px(40))
-        strip = tk.Frame(outer, bg=BG)
-        strip.pack(side="top", fill="x")
-        self.tab_buttons = {}
-        self.tab_cells = {}
-        tabs = [("setup", "QUICK SETUP"), ("display", "DISPLAY"), ("performance", "PERFORMANCE"),
-                ("controls", "CONTROLS"), ("cheats", "CHEATS"), ("advanced", "ADVANCED")]
-        if multiplayer_preview():
-            tabs.append(("multiplayer", "MULTIPLAYER"))
-        for name, label in tabs:
-            cell = tk.Frame(strip, bg=BG)
-            cell.pack(side="left", padx=(0, self.px(26)))
-            text = tk.Label(cell, text=label, font=self.f_tab, bg=BG, fg=MUTED, cursor="hand2")
-            text.pack(side="top", pady=(0, self.px(6)))
-            bar = tk.Frame(cell, bg=BG, height=max(2, self.px(2)))
-            bar.pack(side="top", fill="x")
-            for widget in (cell, text):
-                widget.bind("<Button-1>", lambda e, n=name: self.show_tab(n))
-            self.tab_buttons[name] = (text, bar)
-            self.tab_cells[name] = cell
-        tk.Frame(outer, bg=LINE, height=1).pack(side="top", fill="x")
-        self.body = tk.Frame(outer, bg=BG, height=self.px(330))
-        self.body.pack(side="top", fill="both", expand=True, pady=(self.px(14), 0))
-        self.body.pack_propagate(False)
-        # Pages taller than the space under the tabs scroll (Display, Performance, Advanced, Controls).
-        self.scroll_canvases = set()
-        self.root.bind_all("<MouseWheel>", self.wheel)
-        self.pages = {
-            "setup": self.page_setup(),
-            "display": self.page_display(),
-            "performance": self.page_performance(),
-            "controls": self.page_controls(),
-            "cheats": self.page_cheats(),
-            "advanced": self.page_advanced(),
-        }
-        if multiplayer_preview():
-            self.pages["multiplayer"] = self.page_multiplayer()
-
     def show_tab(self, name, save=True):
+        """A settings category: its page in view, the sidebar's pill (or the tab strip's tab) on
+        it, its rows focusable."""
+        if name not in self.pages:
+            name = "setup"
         if name == "multiplayer" and self.config.get("game") != "u2":
             name = "setup"
         self.current_tab = name
@@ -1957,15 +2570,28 @@ class Launcher:
         if save and self.config.get("tab") != name:
             self.config["tab"] = name
             write_config(self.config)
-        for tab, (text, bar) in self.tab_buttons.items():
-            text.config(fg=TEXT if tab == name else MUTED)
-            bar.config(bg=GOLD if tab == name else BG)
         for tab, page in self.pages.items():
             holder = getattr(page, "holder", page)
             if tab == name:
                 holder.pack(fill="both", expand=True)
             else:
                 holder.pack_forget()
+        if self.sidebar is not None:
+            self.sidebar.select(name)
+        self.select_tab(name)
+        if self.classic:
+            self.screen = "settings"
+        self.focus.bind(self.focus_targets(name))
+        if self.classic and self.cards:
+            selected = self.cards.get(self.config.get("game", "u1"))
+            if selected is not None:
+                for i, target in enumerate(self.focus.targets):
+                    if target is selected[0]:
+                        self.focus.focus(i, scroll=False)
+                        break
+        self.set_hints_for_settings()
+        if self.settings_status is not None:
+            self.settings_status.config(text=self.status_text)
 
     def wheel(self, event):
         """The mouse wheel scrolls the page under the pointer, when it is taller than the window."""
@@ -2016,17 +2642,95 @@ class Launcher:
         return inner
 
     def row(self, page, title, hint, control_factory):
-        row = tk.Frame(page, bg=BG)
-        row.pack(side="top", fill="x", pady=(0, self.px(10)))
+        """One settings row: its name and explanation, and its control on the right.
+
+        The row is a controller focus target: Cross works the control, Left/Right adjusts it. Its
+        border is the focus ring and is always 2 pixels, so focusing a row moves nothing."""
+        row = tk.Frame(page, bg=BG, highlightthickness=2, highlightbackground=BG,
+                       highlightcolor=ps5_ui.WHITE)
+        row.pack(side="top", fill="x", pady=(0, self.px(8)), padx=self.px(2))
         text = tk.Frame(row, bg=BG)
-        text.pack(side="left", fill="x", expand=True)
         tk.Label(text, text=title, font=self.f_body_bold, bg=BG, fg=TEXT, anchor="w").pack(side="top", fill="x")
+        hint_label = None
         if hint:
-            tk.Label(text, text=hint, font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
-                     wraplength=self.px(560)).pack(side="top", fill="x")
+            hint_label = tk.Label(text, text=hint, font=self.f_small, bg=BG, fg=MUTED, anchor="w",
+                                  justify="left", wraplength=self.px(560))
+            hint_label.pack(side="top", fill="x")
         control = control_factory(row)
-        control.pack(side="right", padx=(self.px(20), 0))
+        # The control first: it keeps its full width, the text takes what is left (and wraps there).
+        control.pack(side="right", padx=(self.px(20), self.px(6)))
+        text.pack(side="left", fill="x", expand=True)
+        if hint_label is not None:
+            text.bind("<Configure>", lambda event, label=hint_label:
+                      label.config(wraplength=max(self.px(240), event.width - self.px(6))))
+        self.focusable_row(row, control)
         return control
+
+    # -- a row's control, from a controller ---------------------------------------------------
+
+    def focusable_row(self, row, control):
+        """Controller support for a row: FocusNav calls `_activate` and `_adjust`."""
+        chips = self.control_group(control)
+        target = control if chips else self.control_widget(control)
+        state = {"index": 0}
+
+        def activate():
+            self.activate_control(chips[state["index"]] if chips else target)
+
+        def adjust(delta):
+            if chips:
+                state["index"] = (state["index"] + delta) % len(chips)
+                self.mark_chips(chips, state["index"])
+            else:
+                self.adjust_control(target, delta)
+
+        row._activate = activate
+        row._adjust = adjust
+        row._focus_set = lambda on: row.config(highlightbackground=ps5_ui.WHITE if on else BG)
+        if chips:
+            self.mark_chips(chips, 0)
+
+    def control_group(self, control):
+        """The separate controls a row holds in one frame (the performance counter's chips)."""
+        if not isinstance(control, tk.Frame) or isinstance(control, Segmented):
+            return []
+        return [child for child in control.winfo_children() if isinstance(child, (Toggle, Chip))]
+
+    def control_widget(self, control):
+        """The control inside a row's frame (the upscaling quality box holds a Segmented)."""
+        if isinstance(control, tk.Frame) and not isinstance(control, Segmented):
+            for child in control.winfo_children():
+                if isinstance(child, (Toggle, Chip, Segmented, Dropdown)):
+                    return child
+        return control
+
+    def activate_control(self, control):
+        if isinstance(control, (Toggle, Chip)):
+            control.set(not control.value, notify=True)
+        elif isinstance(control, (Segmented, Dropdown)):
+            self.adjust_control(control, 1)
+        elif isinstance(control, tk.Widget):
+            action = getattr(control, "_activate", None)
+            if action is not None:
+                action()
+
+    def adjust_control(self, control, delta):
+        if isinstance(control, Segmented):
+            visible = [option for option, item in control.labels.items() if item.winfo_manager()]
+            if not visible or control.value not in visible:
+                return
+            index = visible.index(control.value)
+            control.set(visible[(index + delta) % len(visible)], notify=True)
+        elif isinstance(control, Dropdown):
+            options = [option for option, _ in control.options]
+            if control.value in options:
+                index = options.index(control.value)
+                control.set(options[(index + delta) % len(options)], notify=True)
+
+    def mark_chips(self, chips, index):
+        for i, chip in enumerate(chips):
+            chip.config(highlightbackground=ps5_ui.WHITE if i == index else BG,
+                        highlightcolor=ps5_ui.WHITE if i == index else BG)
 
     def ini_toggle(self, page, key, title, hint):
         def factory(parent):
@@ -2042,25 +2746,41 @@ class Launcher:
 
     def page_setup(self):
         page = self.page()
-        self.setup_intro = tk.Label(page, text="", font=self.f_body, bg=BG, fg=MUTED, anchor="w")
+        self.setup_intro = tk.Label(page, text="", font=self.f_body, bg=BG, fg=MUTED, anchor="w",
+                                    justify="left", wraplength=self.width)
         self.setup_intro.pack(side="top", fill="x", pady=(0, self.px(12)))
         grid = tk.Frame(page, bg=BG)
         grid.pack(side="top", fill="x")
         self.preset_cards = {}
+        preset_order = []
         gap = self.px(16)
         # Five presets in 3 + 2: five in one row would squeeze the descriptions at this width.
         columns = 3
         card_w = (self.width - 2 * self.px(40) - (columns - 1) * gap) // columns
-        card_h = self.px(170)
+        # Tall enough for the longest card: the summary and the description wrap inside it.
+        detail_w = card_w - self.px(40)
+        card_h = max(self.px(196),
+                     max(self.px(62) + wrapped_height(self.root, self.f_body_bold, PRESETS[name]["summary"],
+                                                      detail_w)
+                         + self.px(8) + wrapped_height(self.root, self.f_small, PRESETS[name]["detail"],
+                                                       detail_w)
+                         + self.px(30) for name in PRESET_ORDER))
         for i, name in enumerate(PRESET_ORDER):
             row, column = divmod(i, columns)
-            canvas = tk.Canvas(grid, width=card_w, height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
+            canvas = tk.Canvas(grid, width=card_w, height=card_h, bg=BG, highlightthickness=2,
+                               highlightbackground=BG, highlightcolor=WHITE, cursor="hand2")
             canvas.grid(row=row, column=column, padx=(0 if column == 0 else gap, 0),
                         pady=(0 if row == 0 else gap, 0), sticky="w")
             canvas.bind("<Button-1>", lambda e, n=name: self.apply_preset(n))
             canvas.bind("<Enter>", lambda e, n=name: self.draw_preset(n, hover=True))
             canvas.bind("<Leave>", lambda e, n=name: self.draw_preset(n))
+            # Controller: the cards are a 3 x 2 grid of focus targets.
+            canvas._grid = (row, column)
+            canvas._activate = lambda n=name: self.apply_preset(n)
+            canvas._focus_set = lambda on, n=name: self.focus_preset(n, on)
             self.preset_cards[name] = (canvas, card_w, card_h)
+            preset_order.append(canvas)
+        page.focus_order = preset_order
         self.custom_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=MUTED, anchor="w")
         self.custom_note.pack(side="top", fill="x", pady=(self.px(10), 0))
         self.root.after_idle(self.redraw_presets)
@@ -2070,17 +2790,20 @@ class Launcher:
         canvas, w, h = self.preset_cards[name]
         preset = PRESETS[name]
         selected = self.game_settings().get("preset") == name
+        focused = getattr(self, "preset_focused", None) == name
         canvas.delete("all")
-        round_rect(canvas, 2, 2, w - 2, h - 2, self.px(10), fill=PANEL_HI if selected or hover else PANEL,
-                   outline=GOLD if selected else ("#5a4733" if hover else LINE), width=2 if selected else 1)
-        canvas.create_text(self.px(20), self.px(26), text=preset["title"], font=self.f_card_title,
+        outline = WHITE if focused else GOLD if selected else ("#5a4733" if hover else LINE)
+        round_rect(canvas, 2, 2, w - 2, h - 2, self.px(10), fill=PANEL_HI if selected or hover or focused else PANEL,
+                   outline=outline, width=3 if focused else 2 if selected else 1)
+        canvas.create_text(self.px(20), self.px(38), text=preset["title"], font=self.f_card_title,
                            fill=GOLD if selected else TEXT, anchor="w")
-        canvas.create_text(self.px(20), self.px(50), text=preset["summary"], font=self.f_body_bold,
-                           fill=TEXT, anchor="w")
-        canvas.create_text(self.px(20), self.px(70), text=preset["detail"], font=self.f_small, fill=MUTED,
+        summary = canvas.create_text(self.px(20), self.px(62), text=preset["summary"], font=self.f_body_bold,
+                                     fill=TEXT, anchor="nw", width=w - self.px(40))
+        detail_y = canvas.bbox(summary)[3] + self.px(8)
+        canvas.create_text(self.px(20), detail_y, text=preset["detail"], font=self.f_small, fill=MUTED,
                            anchor="nw", width=w - self.px(40))
         if name == self.recommended:
-            badge = canvas.create_text(w - self.px(20), self.px(26), text="RECOMMENDED", font=("Segoe UI Semibold", 7),
+            badge = canvas.create_text(w - self.px(26), self.px(16), text="RECOMMENDED", font=("Segoe UI Semibold", 7),
                                        fill=INK, anchor="e")
             x1, y1, x2, y2 = canvas.bbox(badge)
             pill = round_rect(canvas, x1 - self.px(8), y1 - self.px(3), x2 + self.px(8), y2 + self.px(3), self.px(8),
@@ -2101,6 +2824,17 @@ class Launcher:
         name = self.current_game()["name"]
         self.custom_note.config(text=f"{name}: custom settings (changed by hand)." if custom
                                 else f"Settings are kept per game: these are {name}'s.")
+
+    def focus_preset(self, name, on):
+        """The controller's focus ring on a preset card."""
+        previous = getattr(self, "preset_focused", None)
+        if on:
+            self.preset_focused = name
+            if previous and previous != name:
+                self.draw_preset(previous)
+        elif previous == name:
+            self.preset_focused = None
+        self.draw_preset(name)
 
     def apply_preset(self, name):
         settings = self.game_settings()
@@ -2372,15 +3106,21 @@ class Launcher:
         self.widgets["prompts"] = Segmented(icons, PROMPT_MODES, settings.get("prompts", "auto"),
                                             self.change_prompts, self.f_small)
         self.widgets["prompts"].pack(side="left", padx=(self.px(8), self.px(12)))
-        tk.Label(icons, text="Auto follows the device you play with (a controller's own buttons).",
-                 font=self.f_small, bg=BG,
-                 fg=MUTED).pack(side="left")
+        self.prompts_note = tk.Label(
+            page, text="Auto follows the device you play with (a controller's own buttons).",
+            font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left")
+        self.prompts_note.pack(side="top", fill="x", pady=(self.px(2), 0))
         self.controls_hint = tk.Label(
             page, text="Click a slot, then press a key or a mouse button (right-click a slot to clear it). "
                        "In game the mouse is captured; Alt+Tab or Insert (menu) frees it. A controller "
-                       "always works too.", font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
-            wraplength=self.px(1080))
+                       "always works too.", font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left")
         self.controls_hint.pack(side="top", fill="x", pady=(self.px(6), self.px(4)))
+        # The notes wrap to the page's own width (the window can be windowed or fullscreen).
+        def wrap_notes(event, page=page):
+            width = max(self.px(320), event.width - self.px(8))
+            self.prompts_note.config(wraplength=width)
+            self.controls_hint.config(wraplength=width)
+        page.bind("<Configure>", wrap_notes)
         holder = tk.Frame(page, bg=BG)
         holder.pack(side="top", fill="both", expand=True)
         canvas = tk.Canvas(holder, bg=BG, highlightthickness=0)
@@ -2400,13 +3140,22 @@ class Launcher:
         if not hasattr(self, "gamepads"):
             self.gamepads = Gamepads()
         columns = [tk.Frame(inner, bg=BG), tk.Frame(inner, bg=BG)]
-        columns[0].grid(row=0, column=0, sticky="n", padx=(0, self.px(36)))
-        columns[1].grid(row=0, column=1, sticky="n")
+        # Two columns side by side on a wide window (the fullscreen default), one when narrow.
+        two_columns = self.width >= self.px(1000)
+        self.controls_two_columns = two_columns
+        columns[0].grid(row=0, column=0, sticky="n", padx=(0, self.px(36) if two_columns else 0))
+        if two_columns:
+            columns[1].grid(row=0, column=1, sticky="n")
+        focus_cells = []
+        line_numbers = [0, 0]
         for index, (group, actions) in enumerate(CONTROL_GROUPS):
-            column = columns[0 if index < 2 else 1]
+            column_index = 0 if not two_columns or index < 2 else 1
+            column = columns[column_index]
             tk.Label(column, text=group, font=self.f_small, bg=BG, fg=GOLD, anchor="w").pack(
                 side="top", fill="x", pady=(self.px(6 if index % 2 else 2), self.px(2)))
             for action, label in actions:
+                line = line_numbers[column_index]
+                line_numbers[column_index] += 1
                 row = tk.Frame(column, bg=BG)
                 row.pack(side="top", fill="x", pady=self.px(1))
                 tk.Label(row, text=label, font=self.f_small, bg=BG, fg=TEXT, anchor="w",
@@ -2419,6 +3168,11 @@ class Launcher:
                     cell.bind("<Button-1>", lambda e, a=action, i=slot: self.start_capture(a, i))
                     cell.bind("<Button-3>", lambda e, a=action, i=slot: self.set_binding(a, i, None))
                     self.binding_slots[(action, slot)] = cell
+                    # Controller: a 3-column grid of slots (two keys, then the pad's button).
+                    cell._grid = (line, column_index * 3 + slot)
+                    cell._activate = lambda a=action, i=slot: self.start_capture(a, i)
+                    cell._focus_set = lambda on, c=cell: c.config(highlightbackground=WHITE if on else LINE)
+                    focus_cells.append(cell)
                 # The controller button: its icon; a click, then a controller button rebinds it.
                 pad_cell = tk.Label(row, text="", font=self.f_small, bg=PANEL, fg=TEXT, width=14, height=1,
                                     highlightthickness=1, highlightbackground=LINE, compound="center")
@@ -2427,10 +3181,28 @@ class Launcher:
                     pad_cell.config(cursor="hand2")
                     pad_cell.bind("<Button-1>", lambda e, a=action: self.start_pad_capture(a))
                     pad_cell.bind("<Button-3>", lambda e, a=action: self.set_pad_binding(a, None))
+                pad_cell._grid = (line, column_index * 3 + 2)
+                pad_cell._activate = lambda a=action: self.start_pad_capture(a) if a in PAD_DEFAULTS else None
+                pad_cell._focus_set = lambda on, c=pad_cell: c.config(highlightbackground=WHITE if on else LINE)
+                focus_cells.append(pad_cell)
                 self.pad_slots[action] = pad_cell
+        page.focus_order = focus_cells
         self.refresh_bindings()
         self.refresh_pad_slots()
         return page
+
+    def rebuild_controls(self):
+        """Builds the Controls page again after the window changed between fullscreen and a window,
+        so its columns match the room it now has."""
+        page = self.pages.get("controls")
+        if page is None:
+            return
+        current = self.current_tab == "controls"
+        holder = getattr(page, "holder", page)
+        holder.destroy()
+        self.pages["controls"] = self.page_controls()
+        if current:
+            self.show_tab("controls", save=False)
 
     def game_controls(self):
         return merged_controls(self.game_settings().get("controls"))
@@ -2757,7 +3529,85 @@ class Launcher:
         button.bind("<Button-1>", lambda e: action())
         button.bind("<Enter>", lambda e: button.config(bg=PANEL_HI))
         button.bind("<Leave>", lambda e: button.config(bg=PANEL))
+        button._activate = action  # controller: Cross presses it
+        button._focus_set = lambda on: button.config(highlightbackground=ps5_ui.WHITE if on else LINE,
+                                                     highlightthickness=2 if on else 1)
         return button
+
+    # -- system (the launcher itself) -------------------------------------------------------
+
+    def page_system(self):
+        """The launcher's own screen and controller options (the Collection's are on the other
+        pages)."""
+        page = self.page()
+        tk.Label(page, text="The launcher's screen and controller.", font=self.f_small, bg=BG, fg=MUTED,
+                 anchor="w").pack(side="top", fill="x", pady=(0, self.px(8)))
+
+        def controller_only(parent):
+            return Toggle(parent, self.s, bool(self.config.get("ui_controller_only", True)),
+                          lambda v: self.change_ui("ui_controller_only", v))
+        self.widgets["ui_controller_only"] = self.row(
+            page, "Controller only mode",
+            "On: the PlayStation 5 hub, made for a controller. Off: the classic layout with the game "
+            "cards and the tab strip, in the same window and with the same settings.", controller_only)
+
+        def fullscreen(parent):
+            return Toggle(parent, self.s, bool(self.fullscreen), self.set_fullscreen)
+        self.widgets["ui_fullscreen"] = self.row(
+            page, "Fullscreen",
+            "The PlayStation 5 look, edge to edge. F11 brings the window back, and the window keeps its "
+            "size and place for the next time.", fullscreen)
+
+        def motion(parent):
+            return Segmented(parent, MOTION_MODES, self.config.get("ui_motion", "auto"),
+                             lambda v: self.change_ui("ui_motion", v), self.f_small, recommended="auto")
+        self.widgets["ui_motion"] = self.row(
+            page, "Animations",
+            "Auto follows the graphics card: Fast on an integrated GPU (fewer frames, less power). Off "
+            "turns every transition off: nothing moves, and no timer runs.", motion)
+
+        def hints(parent):
+            return Toggle(parent, self.s, self.config.get("ui_hints", True),
+                          lambda v: self.change_ui("ui_hints", v))
+        self.widgets["ui_hints"] = self.row(
+            page, "Controller hints",
+            "The legend along the bottom: which button does what, drawn with the controller's own icons.",
+            hints)
+
+        def nav(parent):
+            return Toggle(parent, self.s, self.config.get("pad_nav", True),
+                          lambda v: self.change_ui("pad_nav", v))
+        self.widgets["pad_nav"] = self.row(
+            page, "Navigate with a controller",
+            "The D-pad and the left stick move, Cross chooses, Circle goes back, Options opens the "
+            "settings, L1 and R1 change the category.", nav)
+
+        def pad_quit(parent):
+            return Toggle(parent, self.s, self.config.get("pad_quit", True),
+                          lambda v: self.change_ui("pad_quit", v))
+        self.widgets["pad_quit"] = self.row(
+            page, "L3 + R3 closes the game",
+            "Hold both sticks in to stop the running game from the controller; a ring fills at the "
+            "bottom of the window while you hold. The first five seconds of a game are ignored, so a "
+            "controller resting on a desk cannot close anything.", pad_quit)
+
+        def quit_hold(parent):
+            return Segmented(parent, QUIT_HOLDS, str(self.config.get("pad_quit_hold", "2.0")),
+                             lambda v: self.change_ui("pad_quit_hold", v), self.f_small, recommended="2.0")
+        self.widgets["pad_quit_hold"] = self.row(
+            page, "How long to hold",
+            "Shorter triggers sooner; longer is safer. Two seconds is the default.", quit_hold)
+
+        self.row(
+            page, "Quit the launcher",
+            "Closes the launcher. A game that is running keeps running.",
+            lambda parent: self.flat_button(parent, "Quit", self.close))
+
+        tk.Label(page, text="In game, Insert (or R3 + L2) opens the Collection's own menu; the launcher "
+                            "stays behind it.", font=self.f_small, bg=BG, fg=DIM, anchor="w", justify="left",
+                 wraplength=max(self.px(420), self.width - self.px(60))).pack(side="top", fill="x",
+                                                                              pady=(self.px(8), 0))
+        return page
 
     # -- multiplayer (preview) --------------------------------------------------------------
 
@@ -2979,48 +3829,48 @@ class Launcher:
             return
         self.play(net={"mode": "join", "address": address})
 
-    # -- footer -----------------------------------------------------------------------------
+    # -- status -----------------------------------------------------------------------------
 
-    def build_footer(self):
-        footer = tk.Frame(self.root, bg=PANEL)
-        footer.pack(side="bottom", fill="x")
-        tk.Frame(self.root, bg=LINE, height=1).pack(side="bottom", fill="x")
-        inner = tk.Frame(footer, bg=PANEL)
-        inner.pack(fill="x", padx=self.px(40), pady=self.px(14))
-        left = tk.Frame(inner, bg=PANEL)
-        left.pack(side="left", fill="x", expand=True)
-        self.status = tk.Label(left, text="", font=self.f_body_bold, bg=PANEL, fg=TEXT, anchor="w")
-        self.status.pack(side="top", fill="x")
-        self.substatus = tk.Label(left, text="Insert or R3 + L2 in game opens the menu.", font=self.f_small,
-                                  bg=PANEL, fg=MUTED, anchor="w")
-        self.substatus.pack(side="top", fill="x")
-        w, h = self.px(210), self.px(54)
-        self.play_button = tk.Canvas(inner, width=w, height=h, bg=PANEL, highlightthickness=0, cursor="hand2")
-        self.play_button.pack(side="right")
-        self.play_button.bind("<Button-1>", lambda e: self.play_or_stop())
-        self.play_button.bind("<Enter>", lambda e: self.draw_play(hover=True))
-        self.play_button.bind("<Leave>", lambda e: self.draw_play())
+    def update_play_state(self):
+        """The hub's Play pill (or the classic footer's button) and the hint bar follow whether a
+        game runs."""
+        if self.home is not None:
+            self.home.set_running(self.process is not None)
         self.draw_play()
-        self.update_button = tk.Label(inner, text="UPDATE", font=self.f_body_bold, bg=PANEL_HI, fg=GOLD,
-                                      padx=self.px(16), pady=self.px(10), cursor="hand2",
-                                      highlightthickness=1, highlightbackground=GOLD)
-        self.update_button.bind("<Button-1>", lambda e: self.install_update())
-        self.set_status(f"Ready to play {self.current_game()['name']}." if self.config.get("game") else "Ready.")
+        if self.classic:
+            self.set_hints_for_settings()
+        elif self.screen == "home":
+            self.set_hints_for_home()
+        else:
+            self.set_hints_for_settings()
+
+    def set_status(self, text, detail=None):
+        """The hub shows it in its top right corner; the settings show the first line in the
+        header (an update's progress, for instance); the classic footer shows both lines."""
+        self.status_text = text
+        if detail is not None:
+            self.status_detail = detail
+        if self.home is not None:
+            self.home.set_status(self.status_text, self.status_detail)
+        if self.settings_status is not None:
+            self.settings_status.config(text=self.status_text)
+        if self.classic_status is not None:
+            self.classic_status.config(text=self.status_text)
+        if detail is not None and self.classic_substatus is not None:
+            self.classic_substatus.config(text=detail)
 
     def draw_play(self, hover=False):
+        """The classic footer's Play/Stop button (the hub draws its own pill)."""
         canvas = self.play_button
+        if canvas is None:
+            return
         w, h = int(canvas["width"]), int(canvas["height"])
         canvas.delete("all")
         running = self.process is not None
-        fill = (STOP_RED if running else (GOLD_HI if hover else GOLD))
+        fill = STOP_RED if running else (GOLD_HI if hover else GOLD)
         round_rect(canvas, 2, 2, w - 2, h - 2, self.px(8), fill=fill, outline=fill)
         canvas.create_text(w // 2, h // 2, text="STOP" if running else "PLAY", font=self.f_play,
-                           fill=TEXT if running else INK)
-
-    def set_status(self, text, detail=None):
-        self.status.config(text=text)
-        if detail is not None:
-            self.substatus.config(text=detail)
+                           fill=WHITE if running else INK)
 
     # -- updates (launcher/updater.py) ------------------------------------------------------
 
@@ -3218,6 +4068,19 @@ class Launcher:
         self.config[key] = value
         write_config(self.config)
 
+    def change_ui(self, key, value):
+        """A launcher option (the System page): saved, and applied to the shell right away."""
+        self.config[key] = value
+        write_config(self.config)
+        if key == "ui_motion":
+            self.apply_motion()
+        if key == "ui_controller_only":
+            # The toggle that fired this is destroyed by the rebuild: wait until it has returned.
+            # Its value is the hub (on); the classic layout is its opposite.
+            self.root.after(10, lambda: self.set_classic(not value))
+        if key in ("ui_hints", "pad_nav", "pad_quit", "pad_quit_hold"):
+            self.update_play_state()
+
     # -- game -------------------------------------------------------------------------------
 
     def play_or_stop(self):
@@ -3315,9 +4178,10 @@ class Launcher:
             messagebox.showerror(APP_TITLE, f"Could not start the game:\n{error}")
             self.process = None
             return
-        self.started_at = time.time()
+        self.started_at = time.monotonic()
         self.last_output = time.time()
         self.game_started = False
+        self.sticks.reset()  # L3 + R3 only counts after the game has been up for a few seconds
         # The start script's output (preparation, patches, the runtime's log path): kept for
         # "the game does not start" reports.
         try:
@@ -3342,7 +4206,7 @@ class Launcher:
             self.partner_start = (self.process, command, partner_env)
             self.root.after(15000, self.start_partner)
         self.set_status(f"Starting {game['name']}...", "Preparing game files and code patches.")
-        self.draw_play()
+        self.update_play_state()
 
     def start_partner(self):
         pending = getattr(self, "partner_start", None)
@@ -3529,7 +4393,7 @@ class Launcher:
     def finished(self, code):
         self.process = None
         self.stop_partner()  # local co-op: the second game ends with the first
-        self.draw_play()
+        self.update_play_state()
         reason = self.crash_reason()
         # A freeze is reported however the game was closed (STOP, or Task Manager).
         froze = bool(reason) and reason.startswith("The game froze")
@@ -3555,13 +4419,34 @@ class Launcher:
             self.root.after(200, self.root.destroy)
 
     def stop(self):
+        """STOP, or L3 + R3 held: closes the game, asking it to quit first (it saves its data),
+        and killing it if it is still there two seconds later."""
         if not self.process:
             return
         self.stopping = True
-        subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"], creationflags=NO_WINDOW,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.stop_partner()
+        process = self.process
+        self.sticks.reset()
         self.set_status("Stopping the game...")
+        self.stop_partner()
+        threading.Thread(target=self.end_game, args=(process,), daemon=True).start()
+
+    def stop_from_pad(self):
+        """The L3 + R3 shortcut (ps5_ui.StickWatcher): STOP, without a dialog."""
+        self.stop()
+
+    def end_game(self, process):
+        """taskkill /T (its children too), then /F when it is still running after ~2 s."""
+        for flags, wait in (([], 2.0), (["/F"], 0.0)):
+            try:
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", *flags], creationflags=NO_WINDOW,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                return
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    return
+                time.sleep(0.1)
 
     # -- advanced actions -------------------------------------------------------------------
 
@@ -3833,7 +4718,9 @@ class Launcher:
         if self.process and not messagebox.askyesno(
                 APP_TITLE, "The game is still running. Close the launcher anyway? (The game keeps running.)"):
             return
-        self.config["window_xy"] = [self.root.winfo_x(), self.root.winfo_y()]
+        if not getattr(self, "fullscreen", False):
+            self.config["window_xy"] = [self.root.winfo_x(), self.root.winfo_y()]
+        self.animator.cancel()
         write_config(self.config)
         self.root.destroy()
 
