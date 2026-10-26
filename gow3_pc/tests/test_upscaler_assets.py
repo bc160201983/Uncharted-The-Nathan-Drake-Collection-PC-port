@@ -3,7 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'launcher'))
+launcher = Path(__file__).resolve().parents[1] / 'launcher'
+if not (launcher / 'gow3_assets.py').is_file():
+    raise unittest.SkipTest("Packaged GOW3 upscaler asset helper is not included in this checkout")
+sys.path.insert(0, str(launcher))
 from gow3_assets import fsr411_problem
 
 

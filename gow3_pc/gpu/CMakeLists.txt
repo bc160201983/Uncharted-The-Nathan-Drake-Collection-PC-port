@@ -225,10 +225,13 @@ if (WIN32)
     set_target_properties(content-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
     target_compile_options(content-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_include_directories(content-test PRIVATE .. ../src)
-    add_executable(videodec2-test EXCLUDE_FROM_ALL ../tests/test_videodec2.cpp shim/videodec2/videodec2.cpp shim/videodec2/videodec2_impl.cpp)
+    add_executable(videodec2-test EXCLUDE_FROM_ALL ../tests/test_videodec2.cpp
+        ../tests/test_videodec2_stubs.cpp shim/gow3_movie.cpp
+        shim/videodec2/videodec2.cpp shim/videodec2/videodec2_impl.cpp)
     target_compile_options(videodec2-test PRIVATE -UNDEBUG)
-    target_include_directories(videodec2-test PRIVATE shadps4)
-    target_link_libraries(videodec2-test PRIVATE PkgConfig::FFMPEG)
+    target_compile_definitions(videodec2-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_include_directories(videodec2-test PRIVATE shim shadps4)
+    target_link_libraries(videodec2-test PRIVATE PkgConfig::FFMPEG Boost::headers)
     add_executable(shared-handles-test EXCLUDE_FROM_ALL ../tests/test_shared_handles.cpp)
     target_compile_options(shared-handles-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_link_libraries(shared-handles-test PRIVATE -pthread)
@@ -276,26 +279,12 @@ target_compile_definitions(pipeline-binary-cache-test PRIVATE NOMINMAX WIN32_LEA
 target_include_directories(pipeline-binary-cache-test PRIVATE shim shadps4 third_party/gcn/include)
 target_link_libraries(pipeline-binary-cache-test PRIVATE gow3gpu)
 target_compile_options(pipeline-binary-cache-test PRIVATE -fPIC)
-if (WIN32)
-    target_sources(pipeline-binary-cache-test PRIVATE ../src/compat_win.c)
-    target_compile_definitions(pipeline-binary-cache-test PRIVATE sigjmp_buf=gow3_jmp_buf)
-    target_compile_options(pipeline-binary-cache-test PRIVATE
-        -include ${CMAKE_CURRENT_SOURCE_DIR}/../src/compat_win.h)
-    target_link_libraries(pipeline-binary-cache-test PRIVATE onecore)
-endif()
 add_executable(pipeline-binary-initialization-test EXCLUDE_FROM_ALL
     ../tests/test_pipeline_binary_initialization.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_compile_definitions(pipeline-binary-initialization-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_include_directories(pipeline-binary-initialization-test PRIVATE shim shadps4 third_party/gcn/include)
 target_link_libraries(pipeline-binary-initialization-test PRIVATE gow3gpu)
 target_compile_options(pipeline-binary-initialization-test PRIVATE -fPIC)
-if (WIN32)
-    target_sources(pipeline-binary-initialization-test PRIVATE ../src/compat_win.c)
-    target_compile_definitions(pipeline-binary-initialization-test PRIVATE sigjmp_buf=gow3_jmp_buf)
-    target_compile_options(pipeline-binary-initialization-test PRIVATE
-        -include ${CMAKE_CURRENT_SOURCE_DIR}/../src/compat_win.h)
-    target_link_libraries(pipeline-binary-initialization-test PRIVATE onecore)
-endif()
 set_source_files_properties(../tests/test_pipeline_binary_cache.cpp PROPERTIES
     COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
@@ -350,13 +339,13 @@ add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolu
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)
 # The test's Vulkan-Hpp inline methods have a different set of platform extensions
 # from vk_platform.cpp. Keep them local and use an explicit dispatcher in the test.
-target_compile_options(scene-resolution-test PRIVATE -UNDEBUG -fPIC)
+target_compile_options(scene-resolution-test PRIVATE -fPIC)
 set_source_files_properties(../tests/test_scene_resolution.cpp PROPERTIES
     COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 target_link_libraries(scene-resolution-test PRIVATE gow3gpu)
 add_executable(taa-shader-test EXCLUDE_FROM_ALL ../tests/test_taa_shader.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(taa-shader-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)
-target_compile_options(taa-shader-test PRIVATE -UNDEBUG -fPIC)
+target_compile_options(taa-shader-test PRIVATE -fPIC)
 set_source_files_properties(../tests/test_taa_shader.cpp PROPERTIES
     COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 target_link_libraries(taa-shader-test PRIVATE gow3gpu)
@@ -364,9 +353,21 @@ add_dependencies(taa-shader-test host_shaders)
 
 add_executable(camera-motion-test EXCLUDE_FROM_ALL ../tests/test_camera_motion.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(camera-motion-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)
-target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
+target_compile_options(camera-motion-test PRIVATE -fPIC)
 target_link_libraries(camera-motion-test PRIVATE gow3gpu)
 add_dependencies(camera-motion-test host_shaders)
+
+# Vulkan-Hpp's dispatcher layout depends on NDEBUG. Match gow3gpu even in Debug
+# builds; tests enable their assertions after including the renderer headers.
+foreach(test pipeline-binary-cache-test pipeline-binary-initialization-test
+             motion-shader-test scene-resolution-test taa-shader-test camera-motion-test)
+    target_compile_definitions(${test} PRIVATE NDEBUG)
+    if (WIN32)
+        # The Windows renderer is static, so supply fault recovery in each test.
+        target_sources(${test} PRIVATE ../src/compat_win.c)
+        target_link_libraries(${test} PRIVATE onecore)
+    endif()
+endforeach()
 
 # gow3: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
 add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
