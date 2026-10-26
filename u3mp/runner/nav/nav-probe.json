@@ -1,0 +1,16 @@
+[
+ {"page":"0x37656388","timeout":60,"settle":14.0},
+ {"button":"cross","duration_ms":180,"wait":1.5},
+ {"page":"0x82d5c00b","timeout":20,"settle":3.0},
+ {"capture":"menu0"},
+ {"button":"down","duration_ms":180,"wait":1.0},
+ {"capture":"menu1"},
+ {"button":"down","duration_ms":180,"wait":1.0},
+ {"capture":"menu2"},
+ {"button":"down","duration_ms":180,"wait":1.0},
+ {"capture":"menu3"},
+ {"button":"cross","duration_ms":180,"wait":3},
+ {"capture":"after"},
+ {"sleep":2},
+ {"end":true}
+]

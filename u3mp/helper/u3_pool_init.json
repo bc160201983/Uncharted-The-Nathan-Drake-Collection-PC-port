@@ -1,0 +1,38 @@
+{
+  "source_sha256": "59d41ccfbca73166149358b2bf1926e58e7c9b485efd824c22fc1ec56eaa183f",
+  "blob_sha256": "108879278e0e477fcdb010584151a020119723696f7f03815a42664a62279821",
+  "bytes": 1257,
+  "entry_offset": 0,
+  "relocations": [
+    {
+      "offset": 362,
+      "target": 592,
+      "kind": 4,
+      "name": "u3_pool_initialize"
+    },
+    {
+      "offset": 499,
+      "target": 592,
+      "kind": 4,
+      "name": "u3_pool_initialize"
+    }
+  ],
+  "command": [
+    "C:\\msys64\\clang64\\bin\\clang.exe",
+    "--target=x86_64-unknown-elf",
+    "-std=c11",
+    "-O2",
+    "-ffreestanding",
+    "-fno-builtin",
+    "-fPIC",
+    "-mno-red-zone",
+    "-mno-sse",
+    "-fno-stack-protector",
+    "-fno-asynchronous-unwind-tables",
+    "-fno-jump-tables",
+    "-c",
+    "u3_pool_init.c",
+    "-o",
+    "work\\u3_pool_init.o"
+  ]
+}
