@@ -4,6 +4,18 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## Unreleased
+
+- **The HUD and menus are no longer stretched** at 21:9 and 32:9 (Uncharted 2; launcher ->
+  Display -> HUD). **16:9** (the default) draws them in the middle 16:9 of the screen;
+  full-screen fades and backdrops still cover the whole screen. **Wide** (experimental) puts the
+  in-game HUD elements that lie in a side third of the HUD (ammo, side prompts) at the screen
+  edges and keeps the rest in the middle; menus stay 16:9. **Wide HUD edges** (Screen edges,
+  21:9, 32:9) sets the area those side elements fill, so on a 32:9 screen they can sit closer in.
+  **Stretched** is the game's own. Each HUD draw is placed by where its own vertices lie; no game
+  code is changed for it. Environment: `UNCHARTED_HUD` (`16:9`, `wide`, `stretch`) and
+  `UNCHARTED_HUD_WIDE_ASPECT` (`screen`, `21:9`, `32:9`).
+
 ## 25 October 2026 (0.6.2)
 
 - **The launcher did not open after updating to 0.6.1** (#208): the launcher's new network search

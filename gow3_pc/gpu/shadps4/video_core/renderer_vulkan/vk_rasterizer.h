@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "video_core/renderer_vulkan/hud_layout.h"
+
 #include <chrono>
 #include <deque>
 #include <functional>
@@ -385,6 +387,24 @@ private:
     std::unique_ptr<TemporalUpscaler> upscaler; // gow3: FSR (docs/upscaler.md)
     std::array<float, 2> draw_jitter{};         ///< viewport offset of the current draw, pixels
     std::array<float, 2> target_scale{1.0f, 1.0f}; ///< pass drawn into the upscaler's output-size images
+    // gow3: Uncharted 2 ultrawide HUD (hud_layout.h): the draws into a display buffer after the
+    // frame copy are drawn into the centred area of hud_aspect.
+    float hud_aspect = 0.0f;   ///< GOW3_HUD_ASPECT (0: off)
+    HudLayout::Tracker hud_tracker; ///< which draws are the HUD's
+    bool hud_draw = false;     ///< the current draw is the HUD's
+    bool hud_wide = false;     ///< GOW3_HUD_MODE=wide: side elements at the screen edges
+    HudLayout::Anchor hud_anchor = HudLayout::Anchor::Centre; ///< where the current HUD draw goes
+    bool hud_trace = false;    ///< GOW3_HUD_TRACE: counts and shaders in the log
+    float hud_k = 1.0f;        ///< this draw's horizontal squeeze (1: none)
+    u32 hud_width = 0;         ///< and its target's width
+    bool hud_split = false;    ///< wide mode: this draw is recorded once per anchor (a third each)
+    u32 hud_height = 0;        ///< and height
+    float hud_wide_aspect = 0.0f; ///< GOW3_HUD_WIDE_ASPECT: area of the side elements (0: screen)
+    void NoteHudDraw(u64 ps_hash, bool indexed);
+    /// The horizontal extent of a draw's vertex positions (its first float position attribute).
+    bool HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
+                   float& min_x, float& max_x, std::string* detail = nullptr) const;
+    void NoteHudTarget(const RenderState& state);
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 

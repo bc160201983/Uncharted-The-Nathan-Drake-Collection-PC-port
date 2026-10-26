@@ -335,6 +335,10 @@ add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition
 target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(ui-composition-test PRIVATE ..)
 
+add_executable(hud-layout-test EXCLUDE_FROM_ALL ../tests/test_hud_layout.cpp)
+target_compile_options(hud-layout-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(hud-layout-test PRIVATE ..)
+
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)
 # The test's Vulkan-Hpp inline methods have a different set of platform extensions

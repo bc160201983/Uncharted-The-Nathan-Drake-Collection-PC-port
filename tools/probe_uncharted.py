@@ -602,6 +602,37 @@ def hor_plus_patches(executable):
             if not any(text in patch[0] for text in skip)]
 
 
+# Ultrawide HUD (Uncharted 2, launcher -> Display -> HUD; UNCHARTED_HUD = 16:9 | wide | stretch).
+# The HUD and menus are laid out in a 1280x720 UI space that the game maps to the whole screen,
+# so past 16:9 they were stretched to the sides. The runtime places each HUD draw by its own
+# horizontal extent (gpu/.../hud_layout.h; GOW3_HUD_ASPECT, GOW3_HUD_MODE): across the whole width
+# it keeps the full width (fades, backdrops), otherwise it is drawn into the 16:9 area, in the
+# middle or (wide) at the left/right screen edge when it lies wholly in that third. In game the
+# HUD, subtitles and prompts are drawn over the finished frame (after the tonemap draw 484cdbf5,
+# indexed draws into its target); menus into the display buffer after the frame copy (749bbec9).
+# No game code is patched for it.
+def hud_mode():
+    """UNCHARTED_HUD: 16:9 (the default), wide or stretch (the game's own, stretched)."""
+    mode = os.environ.get("UNCHARTED_HUD", "16:9").strip().lower()
+    return mode if mode in ("16:9", "wide", "stretch") else "16:9"
+
+
+def hud_wide_aspect():
+    """UNCHARTED_HUD_WIDE_ASPECT: screen (the default), 21:9 or 32:9: the area the side elements of
+    the wide HUD fill."""
+    value = os.environ.get("UNCHARTED_HUD_WIDE_ASPECT", "screen").strip().lower()
+    return value if value in ("21:9", "32:9") else None
+
+
+def hud_layout(executable, width, height):
+    """The HUD mode the runtime applies at this render size, or None (16:9 or narrower, stretch,
+    Drake's Fortune and Uncharted 3)."""
+    mode = hud_mode()
+    if executable != "big2-ps4_Shipping.elf" or mode == "stretch" or width / height <= 16 / 9 + 0.01:
+        return None
+    return mode
+
+
 PATCHES = {
     "eboot.bin": EBOOT_PATCHES,
     "big2-ps4_Shipping.elf": [GPU_WAIT_PATCH],
@@ -1389,6 +1420,16 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # (gpu/shim/videodec2; else movies come out green and tiled above 1080p).
     if render_size != (1920, 1080):
         env["GOW3_MOVIE_SIZE"] = f"{render_size[0]}x{render_size[1]}"
+    # Ultrawide HUD (hud_layout): the runtime places the HUD draws in the 16:9 area.
+    if hud := hud_layout(executable, width, height):
+        env["GOW3_HUD_ASPECT"] = f"{16 / 9:.7f}"
+        env["GOW3_HUD_MODE"] = hud
+        if hud == "wide" and (wide_area := hud_wide_aspect()):
+            env["GOW3_HUD_WIDE_ASPECT"] = wide_area
+        env.setdefault("GOW3_HUD_COMPOSITE_PS", "749bbec9")
+        env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")  # the in-game HUD is drawn over its frame
+        env.setdefault("GOW3_HUD_TRACE", "1")  # HUD draw counts and shaders in the log
+        print(f"HUD: {hud} (the HUD and menus in the 16:9 area of {width}x{height})")
     # Output resolution above the render resolution (UNCHARTED_OUTPUT_RES[_U1/_U2/_U3]=WxH): the
     # game draws at the render size and its finished frame is upscaled to the output size where
     # it copies the frame back into the display buffer (pixel shader 749bbec9, the same post

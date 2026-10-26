@@ -13,6 +13,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <xxhash.h>
+#include "video_core/renderer_vulkan/hud_layout.h"
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
 #include "gow3_watch_range.h"
@@ -132,6 +133,20 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     camera_motion->SetObjectMotion(object_motion.get());
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
                                                   *camera_motion, *scene_targets);
+    hud_aspect = HudLayout::AspectFromEnv();
+    hud_wide_aspect = HudLayout::AspectFromEnv("GOW3_HUD_WIDE_ASPECT");
+    hud_tracker.tonemap_ps = HudLayout::TonemapFromEnv();
+    hud_tracker.composite_ps = HudLayout::CompositeFromEnv();
+    if (const char* env = std::getenv("GOW3_HUD_TRACE")) {
+        hud_trace = env[0] == '1';
+    }
+    hud_wide = HudLayout::WideFromEnv();
+    if (hud_aspect > 0.0f) {
+        std::printf("HUD: drawn in the centred %.4f:1 area (over the frame after pixel shader "
+                    "%08llx, after its copy %08llx)\n", hud_aspect,
+                    static_cast<unsigned long long>(hud_tracker.tonemap_ps),
+                    static_cast<unsigned long long>(hud_tracker.composite_ps));
+    }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
         // gow3: compute shaders seen ahead of this thread compile on the compiler workers.
@@ -2165,6 +2180,63 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     scheduler.Checkpoint("draw",pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
                          fragment ? fragment->pgm_hash : 0);
+    NoteHudDraw(fragment ? fragment->pgm_hash : 0, is_indexed);
+    hud_anchor = HudLayout::Anchor::Centre;
+    hud_split = false;
+    if (hud_draw) {
+        float min_x = 0.0f, max_x = 0.0f;
+        std::string detail;
+        const bool valid = HudExtent(pipeline, is_indexed, index_offset, min_x, max_x,
+                                     hud_trace ? &detail : nullptr);
+        // Only the in-game HUD is split by thirds in wide mode; menus stay in the 16:9 area.
+        hud_anchor = HudLayout::Classify(valid, min_x, max_x, false);
+        hud_split = hud_wide && hud_tracker.last_over_frame && hud_anchor != HudLayout::Anchor::Full;
+        if (hud_trace) {
+            static std::mutex trace_mutex;
+            static std::unordered_map<u64, u32> traced;
+            const u64 ps = fragment ? fragment->pgm_hash : 0;
+            std::scoped_lock lock{trace_mutex};
+            if (auto& n = traced[ps]; n < 3 && traced.size() <= 32) {
+                ++n;
+                static constexpr const char* kNames[] = {"centre", "left", "right", "full"};
+                std::printf("HUD draw: vs %08x ps %08x %u %s, x %s %.3f..%.3f -> %s%s\n",
+                            u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash), u32(ps),
+                            Regs().num_indices, is_indexed ? "indices" : "vertices",
+                            valid ? "" : "(unknown)", min_x, max_x,
+                            kNames[u32(hud_anchor)], hud_split ? " (split)" : "");
+                const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+                const auto& fetch = pipeline->GetFetchShader();
+                std::string text = fmt::format("HUD attribs: vs {:08x} ps {:08x}",
+                                               u32(vs.pgm_hash), u32(ps));
+                if (fetch && !fetch->attributes.empty()) {
+                    for (const auto& a : fetch->attributes) {
+                        const auto sharp = a.GetSharp(vs);
+                        text += fmt::format(
+                            "\n  attrib semantic {} step {} fmt {}/{} stride {} base {:#x} "
+                            "elements {} inst_offset {}",
+                            a.semantic, u32(a.GetStepRate()), u32(sharp.GetDataFmt()),
+                            u32(sharp.GetNumberFmt()), sharp.GetStride(), sharp.base_address,
+                            a.num_elements, a.inst_offset);
+                    }
+                } else {
+                    text += fetch ? "\n  fetch shader has no attributes"
+                                  : "\n  no fetch shader";
+                    for (u32 i = 0; i < vs.buffers.size(); ++i) {
+                        const auto sharp = vs.buffers[i].GetSharp(vs);
+                        text += fmt::format(
+                            "\n  vs buffer {}: base {:#x} stride {} records {} fmt {}/{}", i,
+                            sharp.base_address, sharp.GetStride(), sharp.num_records,
+                            u32(sharp.GetDataFmt()), u32(sharp.GetNumberFmt()));
+                    }
+                }
+                if (!detail.empty()) {
+                    text += "\n  " + detail;
+                }
+                std::printf("%s\n", text.c_str());
+                std::fflush(stdout);
+            }
+        }
+    }
     // gow3 21 Oct 2026 diagnostics (U3 museum red carpet), GOW3_MESH_DUMP=<index buffer hex>:
     // for draws of that mesh, the vertex shader's user data and the 16 dwords behind each
     // pointer of its resource table (as floats), once per vertex shader every 10 s, to compare
@@ -2487,6 +2559,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                         u32(ps->pgm_hash));
         }
     }
+    if (hud_split) {
+        hud_anchor = HudLayout::Anchor::Left; // first of the passes below
+    }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
@@ -2501,7 +2576,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
-    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+    const auto record_draw = [=](vk::CommandBuffer cmdbuf) {
         const auto draw = [&] {
             if (is_indexed) {
                 cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex),
@@ -2516,7 +2591,19 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, square);
             draw();
         }
-    });
+    };
+    scheduler.Record(record_draw);
+    if (hud_split) {
+        // The other two passes: the same draw with the middle and right placement (viewport and
+        // scissor re-emitted; the dynamic state tracker only sends what changed).
+        for (const auto anchor : {HudLayout::Anchor::Centre, HudLayout::Anchor::Right}) {
+            hud_anchor = anchor;
+            UpdateDynamicState(pipeline, is_indexed);
+            scheduler.Record(record_draw);
+        }
+        hud_split = false;
+        hud_anchor = HudLayout::Anchor::Centre;
+    }
     // gow3: the camera of the game's velocity pass (GOW3_VELOCITY_PS, Uncharted): its constant
     // buffer, as this draw reads it, for the upscaler's motion vectors.
     if (camera_motion->VelocityMode()) {
@@ -2673,6 +2760,12 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     // Indirect arguments may be GPU-written: leave these draws on camera fallback.
     motion_draw = false;
     motion_geometry = 0;
+    {
+        const auto* fragment = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        NoteHudDraw(fragment ? fragment->pgm_hash : 0, is_indexed);
+        hud_anchor = HudLayout::Anchor::Centre; // GPU-written arguments: no extent
+        hud_split = false;
+    }
     PrepareRenderState(pipeline);
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
@@ -5825,6 +5918,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             attachment_feedback_loop = false;
             push_data.scene_size = begin_memo.scene_size;
             target_scale = begin_memo.target_scale;
+            NoteHudTarget(begin_memo.state);
             return begin_memo.state;
         }
         ++begin_memo_misses;
@@ -5844,7 +5938,204 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
                           target_scale};
         }
     }
+    NoteHudTarget(state);
     return state;
+}
+
+// gow3: Uncharted 2 ultrawide HUD (hud_layout.h, HudLayout::Tracker): which draws are the HUD's.
+void Rasterizer::NoteHudDraw(u64 ps_hash, bool indexed) {
+    hud_draw = false;
+    if (hud_aspect <= 0.0f) {
+        return;
+    }
+    const auto& cb = Regs().color_buffers[0];
+    if (!cb) {
+        return;
+    }
+    const VAddr target = cb.Address();
+    const u64 frames = hud_tracker.frames;
+    hud_draw = hud_tracker.Draw(ps_hash, target, FrameCapture::IsDisplayBuffer(target), indexed);
+    if (hud_trace) {
+        static constexpr size_t kShaders = 12;
+        static u64 shaders[kShaders]{};
+        static u32 shader_count = 0;
+        if (hud_draw && shader_count < kShaders &&
+            std::find(shaders, shaders + shader_count, ps_hash) == shaders + shader_count) {
+            shaders[shader_count++] = ps_hash;
+        }
+        if (hud_tracker.frames != frames && hud_tracker.frames % 300 == 0) {
+            std::string list;
+            for (u32 i = 0; i < shader_count; ++i) {
+                list += fmt::format(" {:08x}", shaders[i]);
+            }
+            std::printf("HUD trace: %llu frames; over the frame %llu draws (%llu not indexed, kept), "
+                        "after the copy %llu; HUD shaders:%s\n",
+                        static_cast<unsigned long long>(hud_tracker.frames),
+                        static_cast<unsigned long long>(hud_tracker.over_frame_draws),
+                        static_cast<unsigned long long>(hud_tracker.over_frame_skipped),
+                        static_cast<unsigned long long>(hud_tracker.after_copy_draws), list.c_str());
+            std::fflush(stdout);
+        }
+    }
+}
+
+bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
+                           float& min_x, float& max_x, std::string* detail) const {
+    using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
+    const auto& regs = Regs();
+    const auto& fetch = pipeline->GetFetchShader();
+    if (regs.num_indices == 0) {
+        return false;
+    }
+    const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+    // The position: the per-vertex float attribute of 2-4 components (32 or 16 bits) with the
+    // lowest semantic.
+    const Shader::Gcn::VertexAttribute* position = nullptr;
+    AmdGpu::Buffer buffer{};
+    bool half = false;
+    const auto min_stride_of = [](bool is_half) { return is_half ? 4u : 8u; };
+    if (fetch && !fetch->attributes.empty()) {
+        for (const auto& attrib : fetch->attributes) {
+            if (attrib.GetStepRate() != InstanceIdType::None) {
+                continue;
+            }
+            const auto sharp = attrib.GetSharp(vs);
+            const auto fmt = sharp.GetDataFmt();
+            const bool is_half = fmt == AmdGpu::DataFormat::Format16_16 ||
+                                 fmt == AmdGpu::DataFormat::Format16_16_16_16;
+            if (sharp.GetNumberFmt() != AmdGpu::NumberFormat::Float ||
+                (!is_half && fmt != AmdGpu::DataFormat::Format32_32 &&
+                 fmt != AmdGpu::DataFormat::Format32_32_32 &&
+                 fmt != AmdGpu::DataFormat::Format32_32_32_32)) {
+                continue;
+            }
+            if (!position || attrib.semantic < position->semantic) {
+                position = &attrib;
+                buffer = sharp;
+                half = is_half;
+            }
+        }
+        if (!position || buffer.GetStride() < min_stride_of(half)) {
+            return false;
+        }
+    } else {
+        // No fetch shader: the first vertex buffer of the shader that looks like vertices (best
+        // effort; the position is taken as the first two floats).
+        bool found = false;
+        for (u32 i = 0; i < vs.buffers.size() && !found; ++i) {
+            const auto sharp = vs.buffers[i].GetSharp(vs);
+            const auto fmt = sharp.GetDataFmt();
+            const u32 stride = sharp.GetStride();
+            const bool float_fmt = (fmt == AmdGpu::DataFormat::Format32_32 ||
+                                    fmt == AmdGpu::DataFormat::Format32_32_32 ||
+                                    fmt == AmdGpu::DataFormat::Format32_32_32_32) &&
+                                   sharp.GetNumberFmt() == AmdGpu::NumberFormat::Float;
+            const bool raw = fmt == AmdGpu::DataFormat::FormatInvalid ||
+                             fmt == AmdGpu::DataFormat::Format32 ||
+                             fmt == AmdGpu::DataFormat::Format8;
+            if (stride >= 8 && stride <= 256 && sharp.base_address != 0 && (float_fmt || raw)) {
+                buffer = sharp;
+                found = true;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    const u32 stride = buffer.GetStride();
+    const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs, fetch);
+    const u32 count = std::min<u32>(regs.num_indices, 4096);
+    const auto readable = [&](VAddr address, u64 size) {
+        return memory->IsValidGpuMapping(address, 0) &&
+               memory->ClampRangeSize(address, size) == size;
+    };
+    min_x = std::numeric_limits<float>::max();
+    max_x = std::numeric_limits<float>::lowest();
+    bool any = false;
+    if (detail) {
+        // The first 4 vertices' first 4 floats of the chosen attribute (raw, before any index).
+        *detail = fmt::format("chosen: {} base {:#x} stride {}{}", position
+                                  ? fmt::format("semantic {}", position->semantic)
+                                  : std::string{"vertex buffer"},
+                              u64(buffer.base_address), stride, half ? " half" : "");
+        for (u32 v = 0; v < 4; ++v) {
+            *detail += fmt::format("\n    v{}:", v);
+            for (u32 c = 0; c < 4; ++c) {
+                const u32 size = half ? 2 : 4;
+                const VAddr address = buffer.base_address + u64(u64(vertex_offset) + v) * stride +
+                                      c * size;
+                if (!memory->IsValidGpuMapping(address, 0) ||
+                    memory->ClampRangeSize(address, size) != size) {
+                    *detail += " ?";
+                    continue;
+                }
+                float f;
+                if (half) {
+                    u16 h;
+                    std::memcpy(&h, reinterpret_cast<const void*>(address), 2);
+                    f = HudLayout::HalfToFloat(h);
+                } else {
+                    std::memcpy(&f, reinterpret_cast<const void*>(address), 4);
+                }
+                *detail += fmt::format(" {:.4f}", f);
+            }
+        }
+    }
+    const auto take = [&](u64 vertex) {
+        const VAddr address = buffer.base_address + vertex * stride;
+        if (!readable(address, half ? sizeof(u16) : sizeof(float))) {
+            return;
+        }
+        float x;
+        if (half) {
+            u16 h;
+            std::memcpy(&h, reinterpret_cast<const void*>(address), sizeof(h));
+            x = HudLayout::HalfToFloat(h);
+        } else {
+            std::memcpy(&x, reinterpret_cast<const void*>(address), sizeof(x));
+        }
+        if (std::isfinite(x)) {
+            min_x = std::min(min_x, x);
+            max_x = std::max(max_x, x);
+            any = true;
+        }
+    };
+    if (is_indexed) {
+        const bool index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
+        const u32 index_size = index16 ? 2 : 4;
+        const VAddr indices = regs.index_base_address.Address<VAddr>() + u64(index_offset) * index_size;
+        if (!readable(indices, u64(count) * index_size)) {
+            return false;
+        }
+        const u32 restart = index16 ? 0xffffu : 0xffffffffu;
+        for (u32 i = 0; i < count; ++i) {
+            u32 index;
+            if (index16) {
+                u16 v;
+                std::memcpy(&v, reinterpret_cast<const void*>(indices + i * 2), 2);
+                index = v;
+            } else {
+                std::memcpy(&index, reinterpret_cast<const void*>(indices + u64(i) * 4), 4);
+            }
+            if (index != restart) {
+                take(u64(index) + vertex_offset);
+            }
+        }
+    } else {
+        for (u32 i = 0; i < count; ++i) {
+            take(u64(vertex_offset) + i);
+        }
+    }
+    return any;
+}
+
+void Rasterizer::NoteHudTarget(const RenderState& state) {
+    hud_k = 1.0f;
+    if (hud_draw && hud_anchor != HudLayout::Anchor::Full) {
+        hud_k = HudLayout::Factor(hud_aspect, state.width, state.height);
+        hud_width = state.width;
+        hud_height = state.height;
+    }
 }
 
 RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
@@ -6909,6 +7200,15 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = (yoffset - yscale) * target_scale[1] + draw_jitter[1];
             viewport.width = xscale * 2.0f * target_scale[0];
             viewport.height = yscale * 2.0f * target_scale[1];
+            if (hud_k < 1.0f) {
+                const float x0 = HudLayout::Place(viewport.x, float(hud_width), float(hud_height),
+                                                hud_k, hud_anchor, hud_wide_aspect);
+                const float x1 = HudLayout::Place(viewport.x + viewport.width, float(hud_width),
+                                                  float(hud_height), hud_k, hud_anchor,
+                                                  hud_wide_aspect);
+                viewport.x = x0;
+                viewport.width = x1 - x0;
+            }
         }
 
         // gow3 diagnostic ("clear far" in GOW3_DMA_TRIGGER): Uncharted's shadow map clear quad
@@ -6944,6 +7244,17 @@ void Rasterizer::UpdateViewportScissorState() const {
                 .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
                 .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
             });
+        }
+        if (hud_k < 1.0f && (hud_split || !regs.IsClipDisabled())) {
+            auto& s = scissors.back();
+            const s32 game_x0 = s.offset.x, game_x1 = s.offset.x + s32(s.extent.width);
+            const auto columns =
+                hud_split ? HudLayout::PassColumns(hud_anchor, game_x0, game_x1, hud_width,
+                                                   hud_height, hud_k, hud_wide_aspect)
+                          : HudLayout::Scissor(game_x0, game_x1, hud_width, hud_height, hud_k,
+                                               hud_anchor, hud_wide_aspect);
+            s.offset.x = columns.x0;
+            s.extent.width = u32(std::max(columns.x1 - columns.x0, 0));
         }
     }
 
