@@ -59,6 +59,70 @@ def wine_kernel32():
 WINE = wine_kernel32()
 
 
+def foreground_pid():
+    """The process that owns the foreground window (Windows), else None."""
+    if os.name != "nt":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        window = user32.GetForegroundWindow()
+        if not window:
+            return None
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
+        return pid.value or None
+    except (AttributeError, OSError):
+        return None
+
+
+def launcher_is_foreground():
+    """True when this process owns the foreground window: a message box of ours counts (the
+    window belongs to the launcher's process), another program does not. A controller resting on
+    a desk used to move the launcher's focus and start games while the player was elsewhere.
+    Unknown (no foreground window, another platform) counts as ours, so navigation keeps working
+    where this cannot be asked."""
+    pid = foreground_pid()
+    return pid is None or pid == os.getpid()
+
+
+def window_visible(pid):
+    """True when that process has a visible top-level window of its own: the game's, once its
+    window is up (the start script prepares files and warms shaders before it shows one)."""
+    if os.name != "nt" or not pid:
+        return True
+    try:
+        user32 = ctypes.windll.user32
+    except (AttributeError, OSError):
+        return True
+    user32.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.GetWindow.restype = ctypes.c_void_p
+    user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    user32.IsWindowVisible.restype = ctypes.c_int
+    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    found = []
+    callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def visit(window, _):
+        if user32.GetWindow(window, 4) or not user32.IsWindowVisible(window):  # GW_OWNER, tool windows
+            return True
+        owner = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if owner.value == pid and user32.GetWindowTextLengthW(window):
+            found.append(window)
+            return False
+        return True
+
+    try:
+        user32.EnumWindows(callback(visit), None)
+    except (AttributeError, OSError):
+        return True
+    return bool(found)
+
+
 def slow_drive_reason(path):
     """Why the drive holding `path` makes the games freeze, or None (20 Oct 2026). On a
     laptop the port and game on an external USB drive (an NVMe SSD in a USB case, exFAT) froze
@@ -145,6 +209,9 @@ def shared_config_file():
 
 CONFIG_FILE = (WINE and shared_config_file()) or PREFIX_CONFIG_FILE
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# Seconds a game may take to show its window before the launcher puts itself away anyway (first
+# launches warm shaders for a while, with the launcher's "Preparing" status in view).
+HIDE_AFTER = 25.0
 APP_TITLE = "Uncharted: The Nathan Drake Collection"
 # Credits shown on the Advanced page: the anti-aliasing technologies.
 CREDITS = ("Credits: DLSS and DLAA use NVIDIA DLSS technology. NVIDIA, RTX and DLSS are trademarks of "
@@ -1605,6 +1672,8 @@ class Launcher:
                 write_ini(key, controls_to_ini(self.config["games"][key]))
         self.reload_ini()
         self.process = None
+        self.hidden = False  # withdrawn while a game runs (hide_for_game)
+        self.ever_focused = False  # the window has had the foreground at least once (pad_tick)
         self.output = queue.Queue()
         self.last_output = 0.0
         self.game_started = False
@@ -1660,6 +1729,10 @@ class Launcher:
             root.minsize(self.px(980), self.px(620))
             self.restore_window_position()
         self.bind_keys()
+        if not direct:
+            # The pad only drives the launcher while it has the foreground (pad_tick): a console
+            # takes it when it opens, and a launch from a terminal or Steam can leave it behind.
+            self.take_foreground()
         write_config(self.config)  # keeps one-time updates (read_config) even without a change
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(150, self.poll)
@@ -1726,6 +1799,84 @@ class Launcher:
 
     def toggle_fullscreen(self):
         self.set_fullscreen(not self.fullscreen)
+
+    def take_foreground(self):
+        """Brings the window to the front and gives it the keyboard focus. Windows lets the
+        foreground process hand that right on; borrowing it (AttachThreadInput) is what makes a
+        launcher started from a terminal, or brought back after a game, still take it. The pad
+        only drives the launcher while it has the foreground (pad_tick)."""
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            return
+        if os.name != "nt":
+            self.ever_focused = True
+            return
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            user32.GetAncestor.restype = ctypes.c_void_p
+            user32.GetForegroundWindow.restype = ctypes.c_void_p
+            user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+            user32.BringWindowToTop.argtypes = [ctypes.c_void_p]
+            user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+            user32.SetFocus.argtypes = [ctypes.c_void_p]
+            window = user32.GetAncestor(self.root.winfo_id(), 2) or self.root.winfo_id()  # GA_ROOT
+            current = kernel32.GetCurrentThreadId()
+            target = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+            if target and target != current:
+                user32.AttachThreadInput(current, target, True)
+            try:
+                user32.BringWindowToTop(window)
+                user32.SetForegroundWindow(window)
+                user32.SetFocus(window)
+            finally:
+                if target and target != current:
+                    user32.AttachThreadInput(current, target, False)
+            self.ever_focused = launcher_is_foreground()
+        except (AttributeError, OSError, tk.TclError):
+            pass
+
+    def hide_for_game(self):
+        """The game gets the whole screen and the foreground: the launcher's window is put away
+        while it runs. A visible fullscreen launcher behind the game's borderless window kept the
+        two fighting over the foreground, and the pad loop read the game's own A presses."""
+        if self.direct or self.hidden:
+            return
+        self.hidden = True
+        try:
+            self.root.withdraw()
+            self.root.update_idletasks()
+        except tk.TclError:
+            self.hidden = False
+
+    def show_after_game(self):
+        """Back on screen once the game has closed, in the mode it was left in (a withdrawn
+        fullscreen window comes back as a plain one, so the mode is applied again)."""
+        if not self.hidden:
+            return
+        self.hidden = False
+        try:
+            self.root.deiconify()
+            self.root.update_idletasks()
+            self.apply_fullscreen(self.fullscreen)
+            self.root.update_idletasks()
+            self.take_foreground()
+        except tk.TclError:
+            pass
+
+    def quit_window(self):
+        """Leaves fullscreen, then destroys: destroying a -fullscreen Tk 9 window on Windows can
+        panic inside tcl90.dll (a breakpoint exception, seen after a game closed)."""
+        try:
+            if getattr(self, "fullscreen", False):
+                self.root.attributes("-fullscreen", False)
+                self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        self.root.destroy()
 
     def set_classic(self, on):
         """Switch layouts: `on` is the classic cards and tabs, off the PlayStation 5 hub (the
@@ -2190,25 +2341,24 @@ class Launcher:
     def set_hints_for_home(self):
         if not hasattr(self, "hintbar"):
             return
-        items = [("a", "Stop" if self.process else "Play"), ("start", "Settings"),
-                 ("leftshoulder", "Previous game"), ("rightshoulder", "Next game")]
         if self.process:
-            items.append(("leftstick+rightstick", "Hold to close the game"))
+            # A running game has the controller: only the L3 + R3 hold closes it (see pad_tick).
+            items = [("leftstick+rightstick", "Hold to close the game")]
+        else:
+            items = [("a", "Play"), ("start", "Settings"),
+                     ("leftshoulder", "Previous game"), ("rightshoulder", "Next game")]
         self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
 
     def set_hints_for_settings(self):
         if not hasattr(self, "hintbar"):
             return
-        if self.classic:
-            items = [("a", "Select"), ("dpleft", "Adjust"), ("leftshoulder", "Category"),
-                     ("rightshoulder", "Category"), ("start", "Stop" if self.process else "Play")]
-            if self.process:
-                items.append(("leftstick+rightstick", "Hold to close the game"))
-            self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
-            return
-        items = [("a", "Select"), ("dpleft", "Adjust"), ("b", "Back"), ("start", "Home")]
         if self.process:
-            items.append(("leftstick+rightstick", "Hold to close the game"))
+            items = [("leftstick+rightstick", "Hold to close the game")]
+        elif self.classic:
+            items = [("a", "Select"), ("dpleft", "Adjust"), ("leftshoulder", "Category"),
+                     ("rightshoulder", "Category"), ("start", "Play")]
+        else:
+            items = [("a", "Select"), ("dpleft", "Adjust"), ("b", "Back"), ("start", "Home")]
         self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
 
     # -- controller -------------------------------------------------------------------------
@@ -2219,8 +2369,11 @@ class Launcher:
     def pad_tick(self):
         """The controller's buttons drive the launcher and the L3 + R3 shortcut: 30 times a second
         while one is connected, four times a second (looking for one) while none is, so an idle
-        launcher with no controller barely wakes the CPU."""
-        delay = 33 if getattr(self.gamepads, "pads", None) else 250
+        launcher with no controller barely wakes the CPU. While a game runs the launcher only
+        watches for L3 + R3 (ten times a second): the game has the pad too, and its own A presses
+        must not reach the launcher (a fullscreen launch used to close the game at its menu)."""
+        running = self.process is not None
+        delay = 100 if running else 33 if getattr(self.gamepads, "pads", None) else 250
         try:
             self.root.after(delay, self.pad_tick)
         except tk.TclError:
@@ -2239,8 +2392,22 @@ class Launcher:
             self.pad_prev = held
             return
         self.sticks.update(held, now)
-        if self.config.get("pad_nav", True) and not self.direct:
-            self.pad_navigate(held, now, stick)
+        if running:
+            # The game owns the controller: only the L3 + R3 hold (sticks.update above) closes it.
+            self.pad_repeat.clear()
+            self.pad_prev = held
+            return
+        if not self.config.get("pad_nav", True) or self.direct:
+            self.pad_prev = held
+            return
+        foreground = launcher_is_foreground()
+        if foreground:
+            self.ever_focused = True
+        elif self.ever_focused:
+            # Another program is in front: the pad belongs to the player there, not to the launcher.
+            self.pad_prev = held
+            return
+        self.pad_navigate(held, now, stick)
         self.pad_prev = held
 
     def pad_navigate(self, held, now, stick=(0.0, 0.0)):
@@ -4221,7 +4388,10 @@ class Launcher:
             threading.Thread(target=self.read_partner_output, args=(self.partner,), daemon=True).start()
         except OSError as error:
             self.partner = None
-            messagebox.showerror(APP_TITLE, f"Could not start the second game:\n{error}")
+            if self.hidden:  # the launcher is away while the game runs: reported when it is back
+                self.set_status("The second game did not start.", str(error))
+            else:
+                messagebox.showerror(APP_TITLE, f"Could not start the second game:\n{error}")
 
     def read_partner_output(self, process):
         """Local co-op: the second game's start script output, kept in launcher-last-run-2.log."""
@@ -4286,6 +4456,11 @@ class Launcher:
         if self.process:
             if self.process.poll() is not None:
                 self.finished(self.process.returncode)
+            elif not self.hidden and (window_visible(self.process.pid) or
+                                      time.monotonic() - getattr(self, "started_at", 0.0) > HIDE_AFTER):
+                # The game's window is up (or the start is taking far too long): it gets the
+                # screen, and the launcher comes back in finished().
+                self.hide_for_game()
             elif not self.game_started and time.time() - self.last_output > 2.5:
                 self.game_started = True
                 self.set_status(f"Playing {self.current_game()['name']}",
@@ -4392,6 +4567,7 @@ class Launcher:
 
     def finished(self, code):
         self.process = None
+        self.show_after_game()  # the launcher comes back before anything is reported
         self.stop_partner()  # local co-op: the second game ends with the first
         self.update_play_state()
         reason = self.crash_reason()
@@ -4416,9 +4592,9 @@ class Launcher:
                 if messagebox.askyesno(APP_TITLE, f"The game stopped with an error:\n\n{reason}\n\nOpen the log folder?"):
                     self.open_logs()
         if self.direct:
-            self.root.after(200, self.root.destroy)
+            self.root.after(200, self.quit_window)
 
-    def stop(self):
+    def stop(self, reason="STOP button"):
         """STOP, or L3 + R3 held: closes the game, asking it to quit first (it saves its data),
         and killing it if it is still there two seconds later."""
         if not self.process:
@@ -4426,13 +4602,25 @@ class Launcher:
         self.stopping = True
         process = self.process
         self.sticks.reset()
+        self.log_stop(reason)
         self.set_status("Stopping the game...")
         self.stop_partner()
         threading.Thread(target=self.end_game, args=(process,), daemon=True).start()
 
+    def log_stop(self, reason):
+        """Who asked to close the game, in the run log: a pad press used to do it by accident."""
+        log = getattr(self, "run_log", None)
+        if not log:
+            return
+        try:
+            log.write(f"stop requested: {reason}\n")
+            log.flush()
+        except (OSError, ValueError):
+            pass
+
     def stop_from_pad(self):
         """The L3 + R3 shortcut (ps5_ui.StickWatcher): STOP, without a dialog."""
-        self.stop()
+        self.stop("L3 + R3 held")
 
     def end_game(self, process):
         """taskkill /T (its children too), then /F when it is still running after ~2 s."""
@@ -4718,11 +4906,11 @@ class Launcher:
         if self.process and not messagebox.askyesno(
                 APP_TITLE, "The game is still running. Close the launcher anyway? (The game keeps running.)"):
             return
-        if not getattr(self, "fullscreen", False):
+        if not getattr(self, "fullscreen", False) and not self.hidden:
             self.config["window_xy"] = [self.root.winfo_x(), self.root.winfo_y()]
         self.animator.cancel()
         write_config(self.config)
-        self.root.destroy()
+        self.quit_window()
 
 
 def main():
