@@ -215,8 +215,15 @@ class Art:
                     path.unlink()
                 except OSError:
                     pass
+
+        def modified(path):  # a file can vanish between the glob and the stat
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0
+
         for paths in per_stem.values():  # a handful of window sizes, newest kept
-            paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            paths.sort(key=modified, reverse=True)
             for path in paths[8:]:
                 try:
                     path.unlink()
@@ -404,6 +411,28 @@ def spaced(text):
     return " ".join(text)
 
 
+_TEXT_METRICS = {}
+
+
+def text_metrics(widget, font):
+    """(linespace, ascent, descent) for a font spec, cached per interpreter.
+
+    Laying text out from these numbers instead of from guessed offsets is what keeps the screens
+    from overlapping at large UI scales, where a 9-point label can be 31 pixels tall."""
+    key = (id(widget.tk), font if isinstance(font, str) else tuple(font))
+    metrics = _TEXT_METRICS.get(key)
+    if metrics is None:
+        probe = tkfont.Font(root=widget, font=font)
+        metrics = (probe.metrics("linespace"), probe.metrics("ascent"), probe.metrics("descent"))
+        _TEXT_METRICS[key] = metrics
+    return metrics
+
+
+def gutter(width, scale):
+    """The shared left and right margin: the wordmark, the game logo and the hints line up."""
+    return max(int(40 * scale), int(width * 0.05))
+
+
 # -- the floating top strip ---------------------------------------------------------------------
 
 
@@ -554,13 +583,22 @@ class TopBar(tk.Canvas):
         self.photos["base"] = photo
         self.base_item = self.create_image(0, 0, image=photo, anchor="nw")
 
-        pad = int(34 * s)
-        word = self.create_text(pad, int(29 * s), text=spaced("UNCHARTED"), anchor="w",
-                                font=self.host.fonts.f_h2, fill=WHITE)
-        word_sub = self.create_text(pad, int(50 * s), text=spaced("THE NATHAN DRAKE COLLECTION"),
-                                    anchor="w", font=self.host.fonts.f_caps, fill=MUTED)
+        pad = gutter(width, s)
+        title_font = self.host.fonts.f_h2
+        sub_font = self.host.fonts.f_caps
+        title_h = text_metrics(self, title_font)[0]
+        sub_h = text_metrics(self, sub_font)[0]
+        lock_gap = int(5 * s)
+        block = title_h + lock_gap + sub_h
+        lock_top = max(0, (height - block) / 2)
+        word = self.create_text(pad, lock_top + title_h / 2, text=spaced("UNCHARTED"), anchor="w",
+                                font=title_font, fill=WHITE)
+        word_sub = self.create_text(pad, lock_top + title_h + lock_gap + sub_h / 2,
+                                    text=spaced("THE NATHAN DRAKE COLLECTION"),
+                                    anchor="w", font=sub_font, fill=MUTED)
 
-        # The capsules sit in the room between the wordmark and the two buttons.
+        # The capsules sit in the middle of the strip, unless that would crowd the wordmark or the
+        # two buttons; then they take the free space between them.
         font = self.host.fonts.f_body_bold
         gap = int(10 * s)
         cap_h = int(38 * s)
@@ -571,15 +609,18 @@ class TopBar(tk.Canvas):
             item = self.create_text(0, 0, text=label, font=font, anchor="w")
             box = self.bbox(item)
             self.delete(item)
-            cap_w = box[2] - box[0] + int(38 * s)
+            cap_w = box[2] - box[0] + int(36 * s)
             sized.append((name, label, cap_w))
             total += cap_w
         total += gap * (len(sized) - 1)
         word_right = max(self.bbox(word)[2], self.bbox(word_sub)[2])
-        space_left = word_right + int(30 * s)
-        space_right = width - pad - (2 * size + int(10 * s)) - int(30 * s)
-        x = space_left + (space_right - space_left - total) / 2
-        x = max(space_left, x)
+        buttons_left = width - pad - (2 * size + int(10 * s))
+        min_left = word_right + int(28 * s)
+        max_left = buttons_left - int(28 * s) - total
+        if min_left <= max_left:
+            x = min(max((width - total) / 2, min_left), max_left)
+        else:
+            x = max(min_left, (min_left + max_left) / 2)
         y = (height - cap_h) / 2
         for name, label, cap_w in sized:
             box = (x, y, x + cap_w, y + cap_h)
@@ -741,8 +782,8 @@ class HomeView(tk.Frame):
         row_w = sel_w + 2 * base + 2 * gap
         return {"base": base, "gap": gap, "sel_w": sel_w, "row_w": row_w,
                 "left": (width - row_w) / 2,
-                "bottom": height - max(int(20 * s), int(height * 0.032)),
-                "margin": max(int(38 * s), int(width * 0.055))}
+                "bottom": height - max(int(30 * s), int(height * 0.045)),
+                "margin": gutter(width, s)}
 
     def _slot(self, metrics, index, selected_index):
         """The left edge and width of tile `index` while `selected_index` is enlarged."""
@@ -817,13 +858,14 @@ class HomeView(tk.Frame):
         s = self.host.s
         margin = metrics["margin"]
         block = self.size[1] * 0.42
+        sub_h = text_metrics(self.canvas, self.host.fonts.f_small)[0]
         self.logo_pos = (margin, block)
-        self.subtitle_pos = (margin, block + int(20 * s))
+        self.subtitle_pos = (margin, block + int(10 * s) + sub_h / 2)
         self.canvas.coords(self.subtitle_item, *self.subtitle_pos)
         self.canvas.coords(self.status_item, self.size[0] - margin, self.top_pad + int(24 * s))
         self.canvas.coords(self.status_shadow, self.size[0] - margin + 2 * s,
                            self.top_pad + int(26 * s))
-        self._layout_pills(block + int(54 * s))
+        self._layout_pills(block + int(10 * s) + sub_h + int(22 * s))
 
     def _play_text(self):
         if self.running:
@@ -1001,13 +1043,21 @@ class HomeView(tk.Frame):
         self.canvas.itemconfig(items["ring"], outline=WHITE if chosen else (GOLD_HI if hovered else LINE),
                                width=3 if chosen else 1)
         game = next(g for g in self.games if g["key"] == key)
+        font = self.host.fonts.f_title if chosen else self.host.fonts.f_h2
+        name_font = self.host.fonts.f_tiny
         self.canvas.itemconfig(items["number"], text=game["number"], fill=WHITE if chosen else DIM,
-                               font=self.host.fonts.f_title if chosen else self.host.fonts.f_h2)
-        self.canvas.coords(items["number"], x + 12 * s, y - 8 * s)
+                               font=font)
+        # Anchor "sw" pins the descent line, so the three numbers share a baseline only when each
+        # one is pushed down by its own font's descent. Otherwise the big selected number floats
+        # above the small ones.
+        baseline = y - int(12 * s)
+        self.canvas.coords(items["number"], x + 12 * s,
+                           baseline + text_metrics(self.canvas, font)[2])
         self.canvas.itemconfig(items["name"], text=game["title"], fill=TEXT if chosen else DIM,
                                state="normal" if chosen else "hidden")
         offset = int((30 if chosen else 24) * s)
-        self.canvas.coords(items["name"], x + 12 * s + offset, y - 8 * s)
+        self.canvas.coords(items["name"], x + 12 * s + offset,
+                           baseline + text_metrics(self.canvas, name_font)[2])
 
     def _draw_pills(self):
         if not getattr(self, "pills", None):
@@ -1048,13 +1098,15 @@ class HomeView(tk.Frame):
             self.host.open_settings()
 
     def _pill_at(self, x, y):
-        for tag, pill in self.pills.items():
+        for tag, pill in getattr(self, "pills", {}).items():
             px, py, pw, ph = pill["box"]
             if px <= x <= px + pw and py <= y <= py + ph:
                 return tag
         return None
 
     def _tile_at(self, x, y):
+        if not self.games or not self.metrics:
+            return None
         keys = [g["key"] for g in self.games]
         index = keys.index(self.key) if self.key in keys else 0
         for i, key in enumerate(keys):
@@ -1066,6 +1118,8 @@ class HomeView(tk.Frame):
         return None
 
     def _on_click(self, event):
+        if not self.metrics:
+            return
         pill = self._pill_at(event.x, event.y)
         if pill:
             self._pill_click(pill)
@@ -1075,6 +1129,8 @@ class HomeView(tk.Frame):
             self.host.select_game(key)
 
     def _on_motion(self, event):
+        if not self.metrics:
+            return
         self._set_hover(self._tile_at(event.x, event.y))
 
     def _set_hover(self, key):
@@ -1168,16 +1224,37 @@ class GalleryView(tk.Frame):
     def _metrics(self):
         width, height = self.size
         s = self.host.s
-        margin = max(int(44 * s), int(width * 0.042))
-        top = int(104 * s)
+        margin = gutter(width, s)
+        top = int(94 * s)
+        hero_h = text_metrics(self.canvas, self.host.fonts.f_hero)[0]
+        sub_h = text_metrics(self.canvas, self.host.fonts.f_small)[0]
+        sub_top = top + hero_h + int(6 * s)
+        grid_top = sub_top + sub_h + int(34 * s)
         gap = int(18 * s)
-        cols = 5 if width >= int(1680 * s) else 4
-        cell_w = int((width - 2 * margin - (cols - 1) * gap) / cols)
-        cell_h = int(cell_w * 9 / 16) + int(46 * s)
-        grid_top = top + int(92 * s)
-        rows = max(1, (height - grid_top - int(24 * s)) // (cell_h + gap))
-        return {"margin": margin, "top": top, "gap": gap, "cols": cols, "cell_w": cell_w,
-                "cell_h": cell_h, "grid_top": grid_top, "rows": rows}
+        # Columns follow the window, not the DPI scale: a 1920 screen keeps five photos across even
+        # at 150%, where scaling the threshold would leave only four huge cells.
+        cols = 6 if width >= 2400 else 5 if width >= 1500 else 4 if width >= 1100 else 3
+        tiny_h = text_metrics(self.canvas, self.host.fonts.f_tiny)[0]
+
+        def measure(count):
+            cell = int((width - 2 * margin - (count - 1) * gap) / count)
+            thumb = int(cell * 9 / 16)
+            tall = thumb + int(8 * s) + sub_h + int(2 * s) + tiny_h + int(10 * s)
+            fits = max(1, (height - grid_top - int(24 * s)) // (tall + gap))
+            return cell, thumb, tall, fits
+
+        cell_w, thumb_h, cell_h, rows = measure(cols)
+        # One row with a big empty band under it looks unfinished: if a denser grid fits a second
+        # row without making the cells tiny, use it.
+        while rows == 1 and cols < 6:
+            wider = measure(cols + 1)
+            if wider[0] < int(150 * s) or wider[3] <= rows:
+                break
+            cols = cols + 1
+            cell_w, thumb_h, cell_h, rows = wider
+        return {"margin": margin, "top": top, "hero_h": hero_h, "sub_top": sub_top,
+                "sub_h": sub_h, "gap": gap, "cols": cols, "cell_w": cell_w,
+                "cell_h": cell_h, "thumb_h": thumb_h, "grid_top": grid_top, "rows": rows}
 
     def _apply_filter(self, redraw=True):
         self.filtered = [entry for entry in self.entries
@@ -1246,10 +1323,10 @@ class GalleryView(tk.Frame):
         canvas, s = self.canvas, self.host.s
         x, top = metrics["margin"], metrics["top"]
         count = len(self.entries)
-        canvas.create_text(x, top, text="GALLERY", anchor="w", font=self.host.fonts.f_hero, fill=TEXT)
+        canvas.create_text(x, top, text="GALLERY", anchor="nw", font=self.host.fonts.f_hero, fill=TEXT)
         path = self._ellipsis(str(self.host.gallery_dir()), self.host.fonts.f_small,
                               int(self.size[0] * 0.44))
-        canvas.create_text(x, top + int(34 * s), anchor="w", font=self.host.fonts.f_small, fill=MUTED,
+        canvas.create_text(x, metrics["sub_top"], anchor="nw", font=self.host.fonts.f_small, fill=MUTED,
                            text=f"{count} photo{'s' if count != 1 else ''}  ·  {path}")
 
         # Filter chips on the right: All, then one per game.
@@ -1258,7 +1335,7 @@ class GalleryView(tk.Frame):
         cap_h = int(32 * s)
         gap = int(8 * s)
         right = self.size[0] - metrics["margin"]
-        y = top + int(2 * s)
+        y = top + max(0, (metrics["hero_h"] - cap_h) / 2)
         widths = []
         for value, label in chips:
             item = canvas.create_text(0, 0, text=label, font=font, anchor="w")
@@ -1280,7 +1357,10 @@ class GalleryView(tk.Frame):
             self.chips[value] = box
             x0 += chip_w + gap
 
-        # Open folder / Change folder, under the chips.
+        # Open folder / Change folder, under the chips. The empty state shows its own pair, so it
+        # does not repeat them at the top of the screen.
+        if not self.filtered:
+            return
         for name, label in (("open", "Open folder"), ("change", "Change folder")):
             item = canvas.create_text(0, 0, text=label, font=self.host.fonts.f_small, anchor="w")
             box = canvas.bbox(item)
@@ -1315,11 +1395,13 @@ class GalleryView(tk.Frame):
             round_rect(canvas, x, y, x + cell_w, y + thumb_h, max(2, int(10 * s)),
                        fill="", outline=WHITE, width=3)
         name = self._ellipsis(entry["name"], self.host.fonts.f_small, cell_w - int(4 * s))
-        canvas.create_text(x, y + thumb_h + int(9 * s), text=name, anchor="nw",
+        name_top = y + thumb_h + int(8 * s)
+        canvas.create_text(x, name_top, text=name, anchor="nw",
                            font=self.host.fonts.f_small, fill=TEXT if selected else MUTED)
-        game = entry.get("game") or ""
-        label = entry.get("game_name") or "Uncharted"
-        canvas.create_text(x, y + thumb_h + int(27 * s), text=label, anchor="nw",
+        label = self._ellipsis(entry.get("game_name") or "Uncharted", self.host.fonts.f_tiny,
+                               cell_w - int(4 * s))
+        label_top = name_top + metrics["sub_h"] + int(2 * s)
+        canvas.create_text(x, label_top, text=label, anchor="nw",
                            font=self.host.fonts.f_tiny, fill=DIM)
 
     def _draw_page_dots(self, metrics, total_rows, rows):
@@ -1336,26 +1418,57 @@ class GalleryView(tk.Frame):
     def _draw_empty(self, metrics):
         canvas, s = self.canvas, self.host.s
         width, height = self.size
-        cx, cy = width / 2, metrics["grid_top"] + int(90 * s)
-        round_rect(canvas, cx - int(210 * s), cy - int(76 * s), cx + int(210 * s), cy + int(96 * s),
-                   int(18 * s), fill=PANEL, outline=LINE)
-        canvas.create_text(cx, cy - int(28 * s), text="No photos yet", font=self.host.fonts.f_title,
-                           fill=TEXT)
-        canvas.create_text(cx, cy + int(8 * s), font=self.host.fonts.f_small, fill=MUTED,
-                           justify="center", width=int(360 * s),
-                           text="Put your Uncharted pictures in the folder below (or in its game "
-                                "subfolders) and they appear here.")
-        canvas.create_text(cx, cy + int(52 * s), font=self.host.fonts.f_small, fill=DIM,
-                           text=str(self.host.gallery_dir()))
-        self.buttons["open"] = (cx - int(150 * s), cy + int(66 * s), cx - int(10 * s),
-                                cy + int(94 * s))
-        self.buttons["change"] = (cx + int(10 * s), cy + int(66 * s), cx + int(150 * s),
-                                  cy + int(94 * s))
+        fonts = self.host.fonts
+        heading_font, body_font = fonts.f_title, fonts.f_small
+        pad = int(28 * s)
+        content_w = min(int(440 * s), width - 2 * metrics["margin"])
+        inner_w = content_w - 2 * pad
+        heading_h = text_metrics(canvas, heading_font)[0]
+
+        body_text = ("Put your Uncharted pictures in the folder below (or in its game subfolders) "
+                     "and they appear here.")
+        probe = canvas.create_text(-4000, -4000, text=body_text, font=body_font, anchor="nw",
+                                   justify="center", width=inner_w)
+        box = canvas.bbox(probe)
+        body_h = box[3] - box[1]
+        canvas.delete(probe)
+
+        path = self._ellipsis(str(self.host.gallery_dir()), body_font, inner_w)
+        path_h = text_metrics(canvas, body_font)[0]
+
+        button_h = int(30 * s)
+        button_gap = int(12 * s)
+        button_w = (inner_w - button_gap) / 2
+        gap_1, gap_2, gap_3 = int(10 * s), int(14 * s), int(20 * s)
+
+        content_h = heading_h + gap_1 + body_h + gap_2 + path_h + gap_3 + button_h
+        panel_w = content_w
+        panel_h = content_h + 2 * pad
+        cx = width / 2
+        room_top, room_bottom = metrics["grid_top"], height - int(28 * s)
+        panel_y = room_top + max(0, (room_bottom - room_top - panel_h) / 2)
+        panel_y = max(room_top, min(panel_y, room_bottom - panel_h))
+        x1 = cx - panel_w / 2
+        round_rect(canvas, x1, panel_y, x1 + panel_w, panel_y + panel_h, int(18 * s),
+                   fill=PANEL, outline=LINE)
+
+        y = panel_y + pad
+        canvas.create_text(cx, y + heading_h / 2, text="No photos yet", font=heading_font, fill=TEXT)
+        y += heading_h + gap_1
+        canvas.create_text(cx, y, text=body_text, font=body_font, fill=MUTED, justify="center",
+                           width=inner_w, anchor="n")
+        y += body_h + gap_2
+        canvas.create_text(cx, y + path_h / 2, text=path, font=body_font, fill=DIM)
+        y += path_h + gap_3
+
+        bx = cx - (button_w * 2 + button_gap) / 2
         for name, label in (("open", "Open folder"), ("change", "Change folder")):
-            box = self.buttons[name]
+            box = (bx, y, bx + button_w, y + button_h)
             round_rect(canvas, *box, int(12 * s), fill=PANEL_HI, outline=LINE)
             canvas.create_text((box[0] + box[2]) / 2, (box[1] + box[3]) / 2, text=label,
-                               font=self.host.fonts.f_small, fill=TEXT)
+                               font=body_font, fill=TEXT)
+            self.buttons[name] = box
+            bx += button_w + button_gap
 
     # -- thumbnails -----------------------------------------------------------------------------
 
@@ -1423,10 +1536,16 @@ class GalleryView(tk.Frame):
         width, height = self.size
         entry = self.filtered[self.index]
         canvas.create_rectangle(0, 0, width, height, fill="#030406", outline="")
-        top = int(84 * s) + int(24 * s)
-        bottom = height - int(34 * s)
+        pad = gutter(width, s)
+        # The caption gets its own band above the photo, so the two never overlap when the photo
+        # is wider than the space left beside the text.
+        title_h = text_metrics(canvas, self.host.fonts.f_body_bold)[0]
+        sub_h = text_metrics(canvas, self.host.fonts.f_small)[0]
+        head = int(84 * s) + int(20 * s)
+        top = head + title_h + int(2 * s) + sub_h + int(14 * s)
+        bottom = height - int(24 * s)
         image = self._original(entry)
-        if image is not None:
+        if image is not None and bottom > top:
             area_w, area_h = width, bottom - top
             if self.fit:
                 scale = min(area_w / image.width, area_h / image.height)
@@ -1437,14 +1556,14 @@ class GalleryView(tk.Frame):
             photo = ImageTk.PhotoImage(shown)
             self.photos["viewer"] = photo
             canvas.create_image(width / 2, top + (bottom - top) / 2, image=photo, anchor="center")
-        canvas.create_text(int(44 * s), top, anchor="nw", text=entry["name"],
+        canvas.create_text(pad, head, anchor="nw", text=entry["name"],
                            font=self.host.fonts.f_body_bold, fill=TEXT)
         detail = entry.get("game_name") or "Uncharted"
         if entry.get("when"):
             detail += f"  ·  {entry['when']}"
-        canvas.create_text(int(44 * s), top + int(22 * s), anchor="nw", text=detail,
+        canvas.create_text(pad, head + title_h + int(2 * s), anchor="nw", text=detail,
                            font=self.host.fonts.f_small, fill=MUTED)
-        canvas.create_text(width - int(44 * s), top + int(2 * s), anchor="ne",
+        canvas.create_text(width - pad, head + title_h / 2, anchor="e",
                            font=self.host.fonts.f_small, fill=MUTED,
                            text=f"{self.index + 1} / {len(self.filtered)}")
         for side in (-1, 1):
@@ -1652,16 +1771,52 @@ class DisplayView(tk.Frame):
     def _metrics(self):
         width, height = self.size
         s = self.host.s
-        margin = max(int(44 * s), int(width * 0.042))
-        top = int(100 * s)
-        panel_w = min(width - 2 * margin, int(1120 * s))
+        fonts = self.host.fonts
+        margin = gutter(width, s)
+        top = int(94 * s)
+        hero_h = text_metrics(self.canvas, fonts.f_hero)[0]
+        sub_h = text_metrics(self.canvas, fonts.f_small)[0]
+        sub_top = top + hero_h + int(6 * s)
+        panel_w = min(width - 2 * margin, int(width * 0.76), int(1120 * s))
         panel_x = (width - panel_w) / 2
-        panel_y = top + int(64 * s)
         rows = max(1, len(self.rows))
-        room = height - panel_y - int(66 * s)
-        row_h = max(int(44 * s), min(int(60 * s), int((room - int(24 * s)) / rows)))
-        return {"margin": margin, "top": top, "panel_w": panel_w, "panel_x": panel_x,
-                "panel_y": panel_y, "row_h": row_h, "rows": rows}
+        title_h = text_metrics(self.canvas, fonts.f_body_bold)[0]
+        pad = int(16 * s)
+        all_h = int(38 * s)
+        gap = int(18 * s)
+
+        subtitle = True
+        header_bottom = sub_top + sub_h
+        room = height - header_bottom - int(24 * s)
+
+        def fits(height_of_row):
+            return pad * 2 + height_of_row * rows + gap + all_h <= room
+
+        # A row is as tall as the two lines it holds, never a guessed constant: at 150% the hint
+        # line alone is 31 pixels, and a 60-pixel row used to draw the focus ring across it.
+        row_h = title_h + int(2 * s) + sub_h + int(18 * s)
+        hints = True
+        if not fits(row_h):
+            # No room for the second line: the explanation moves beside the title.
+            hints = False
+            row_h = title_h + int(24 * s)
+        if not fits(row_h):
+            # Still short: tighten the rows before giving up the header's subtitle.
+            row_h = max(title_h + int(10 * s), (room - gap - all_h - pad * 2) // rows)
+        if not fits(row_h):
+            # Last resort: the subtitle goes, then the rows fall to their title height.
+            subtitle = False
+            header_bottom = top + hero_h
+            room = height - header_bottom - int(24 * s)
+            row_h = max(title_h, (room - gap - all_h - pad * 2) // rows)
+        panel_h = pad * 2 + row_h * rows
+        block_h = panel_h + gap + all_h
+        panel_y = header_bottom + max(0, (room - block_h) / 2)
+        return {"margin": margin, "top": top, "hero_h": hero_h, "sub_top": sub_top,
+                "subtitle": subtitle, "header_bottom": header_bottom, "panel_w": panel_w,
+                "panel_x": panel_x, "panel_y": panel_y, "panel_h": panel_h, "row_h": row_h,
+                "rows": rows, "title_h": title_h, "hint_h": sub_h, "hints": hints,
+                "inline": not hints, "pad": pad, "all_h": all_h, "gap": gap}
 
     # -- drawing --------------------------------------------------------------------------------
 
@@ -1683,7 +1838,7 @@ class DisplayView(tk.Frame):
         panel_x, panel_y = metrics["panel_x"], metrics["panel_y"]
         panel_w = metrics["panel_w"]
         row_h = metrics["row_h"]
-        panel_h = row_h * len(self.rows) + int(24 * s)
+        panel_h = metrics["panel_h"]
         box = (panel_x, panel_y, panel_x + panel_w, panel_y + panel_h)
         surface = self.glass.surface(self.key, self.size, box, int(18 * s), 0.34,
                                      (9, 11, 16, 196), 58)
@@ -1692,8 +1847,8 @@ class DisplayView(tk.Frame):
         canvas.create_image(panel_x, panel_y, image=photo, anchor="nw")
 
         for index, entry in enumerate(self.rows):
-            self._draw_row(index, entry, metrics, panel_y + int(12 * s) + index * row_h)
-        self._draw_all_settings(metrics, panel_y + panel_h + int(16 * s))
+            self._draw_row(index, entry, metrics, panel_y + metrics["pad"] + index * row_h)
+        self._draw_all_settings(metrics, panel_y + panel_h + metrics["gap"])
 
     def _draw_background(self):
         image = None
@@ -1708,43 +1863,67 @@ class DisplayView(tk.Frame):
     def _draw_header(self, metrics):
         canvas, s = self.canvas, self.host.s
         x, top = metrics["margin"], metrics["top"]
-        canvas.create_text(x, top, text="DISPLAY", anchor="w", font=self.host.fonts.f_hero, fill=TEXT)
-        canvas.create_text(x, top + int(34 * s), anchor="w", font=self.host.fonts.f_small, fill=MUTED,
-                           text="Picture and performance. Changes save now and apply when a game starts.")
+        canvas.create_text(x, top, text="DISPLAY", anchor="nw", font=self.host.fonts.f_hero, fill=TEXT)
+        if metrics["subtitle"]:
+            canvas.create_text(x, metrics["sub_top"], anchor="nw", font=self.host.fonts.f_small,
+                               fill=MUTED,
+                               text="Picture and performance. Changes save now and apply when a "
+                                    "game starts.")
 
     def _draw_row(self, index, entry, metrics, y):
         canvas, s = self.canvas, self.host.s
-        x1 = metrics["panel_x"] + int(18 * s)
-        x2 = metrics["panel_x"] + metrics["panel_w"] - int(18 * s)
+        x1 = metrics["panel_x"] + int(10 * s)
+        x2 = metrics["panel_x"] + metrics["panel_w"] - int(10 * s)
         row_h = metrics["row_h"]
+        title_h, hint_h = metrics["title_h"], metrics["hint_h"]
         focused = index == self.focus
         if focused:
-            round_rect(canvas, x1, y, x2, y + row_h - int(6 * s), int(10 * s),
+            round_rect(canvas, x1, y + 1, x2, y + row_h - 1, int(12 * s),
                        fill="", outline=WHITE, width=2)
-        canvas.create_text(x1 + int(16 * s), y + int(14 * s), anchor="nw", text=entry["title"],
-                           font=self.host.fonts.f_body_bold, fill=TEXT)
-        hint_w = int(metrics["panel_w"] * 0.46)
-        hint = self._ellipsis(entry.get("hint", ""), self.host.fonts.f_small, hint_w)
-        canvas.create_text(x1 + int(16 * s), y + int(34 * s), anchor="nw", text=hint,
-                           font=self.host.fonts.f_small, fill=MUTED)
+        elif index < len(self.rows) - 1:
+            canvas.create_line(x1 + int(14 * s), y + row_h, x2 - int(14 * s), y + row_h,
+                               fill="#20242c")
 
-        control_w = min(int(330 * s), int(metrics["panel_w"] * 0.36))
+        text_x = x1 + int(16 * s)
+        content_h = title_h + (int(2 * s) + hint_h if metrics["hints"] else 0)
+        top = y + (row_h - content_h) / 2
+        title_item = canvas.create_text(text_x, top + title_h / 2, anchor="w", text=entry["title"],
+                                        font=self.host.fonts.f_body_bold, fill=TEXT)
+
+        control_w = min(int(320 * s), int(metrics["panel_w"] * 0.34))
         control_x = x2 - int(14 * s) - control_w
-        mid = y + (row_h - int(6 * s)) / 2
-        arrow = int(26 * s)
+        if metrics["hints"]:
+            hint_w = max(40, control_x - int(20 * s) - text_x)
+            hint = self._ellipsis(entry.get("hint", ""), self.host.fonts.f_small, hint_w)
+            canvas.create_text(text_x, top + title_h + int(2 * s), anchor="nw", text=hint,
+                               font=self.host.fonts.f_small, fill=MUTED)
+        elif metrics["inline"]:
+            # No vertical room for a second line: the explanation sits beside the title, where it
+            # still fits between the title and the value.
+            right = control_x - int(20 * s)
+            left = canvas.bbox(title_item)[2] + int(14 * s)
+            if right - left > int(70 * s):
+                hint = self._ellipsis(entry.get("hint", ""), self.host.fonts.f_small, right - left)
+                canvas.create_text(left, top + title_h / 2, anchor="w", text=hint,
+                                   font=self.host.fonts.f_small, fill=DIM)
+
+        mid = y + row_h / 2
+        control_h = min(int(30 * s), int(row_h - int(8 * s)))
+        arrow = min(int(26 * s), control_h)
         left_box = (control_x, mid - arrow / 2, control_x + arrow, mid + arrow / 2)
         right_box = (control_x + control_w - arrow, mid - arrow / 2, control_x + control_w,
                      mid + arrow / 2)
-        value_box = (left_box[2] + int(6 * s), mid - int(15 * s), right_box[0] - int(6 * s),
-                     mid + int(15 * s))
+        value_box = (left_box[2] + int(6 * s), mid - control_h / 2, right_box[0] - int(6 * s),
+                     mid + control_h / 2)
         fill = WHITE if focused else PANEL_HI
         ink = INK if focused else TEXT
         round_rect(canvas, *value_box, int(10 * s), fill=fill, outline=fill)
         canvas.create_text((value_box[0] + value_box[2]) / 2, mid, text=entry.get("label", ""),
                            font=self.host.fonts.f_body_bold, fill=ink)
+        arrow_font = (self.host.fonts.display, int(15 * s), "bold")
         for delta, box in ((-1, left_box), (1, right_box)):
             canvas.create_text((box[0] + box[2]) / 2, mid, text="‹" if delta < 0 else "›",
-                               font=self.host.fonts.f_h2, fill=TEXT if focused else MUTED)
+                               font=arrow_font, fill=TEXT if focused else MUTED)
             self.hits.append((index, delta, box))
         self.hits.append((index, 1, value_box))
 
@@ -1755,10 +1934,10 @@ class DisplayView(tk.Frame):
         box = canvas.bbox(item)
         canvas.delete(item)
         width = box[2] - box[0] + int(52 * s)
-        x2 = metrics["panel_x"] + metrics["panel_w"]
-        self.all_box = (x2 - width, y, x2, y + int(38 * s))
+        x2 = metrics["panel_x"] + metrics["panel_w"] - metrics["pad"]
+        self.all_box = (x2 - width, y, x2, y + metrics["all_h"])
         focused = self.focus >= len(self.rows)
-        surface = self.glass.surface(self.key, self.size, self.all_box, int(19 * s), 0.34,
+        surface = self.glass.surface(self.key, self.size, self.all_box, metrics["all_h"] / 2, 0.34,
                                      (255, 255, 255, 46) if focused else (9, 11, 16, 170),
                                      235 if focused else 62)
         photo = ImageTk.PhotoImage(surface)
@@ -1831,11 +2010,31 @@ class HintBar(tk.Canvas):
         self.items = []
         self.photos = {}
         self.progress = None
+        self.visible = True
         self.bind("<Configure>", lambda e: self.draw())
 
     def set_items(self, items):
-        self.items = list(items)
+        items = list(items)
+        self._show(bool(items))
+        if items == self.items:
+            return
+        self.items = items
         self.draw()
+
+    def _show(self, visible):
+        """The bar is not merely blank when hints are off: it is gone, so the art runs to the
+        bottom edge of the window instead of leaving a black band."""
+        if visible == self.visible:
+            return
+        self.visible = visible
+        if visible:
+            stage = getattr(self.host, "stage", None)
+            if stage is not None and stage.winfo_manager():
+                self.pack(side="bottom", fill="x", before=stage)
+            else:
+                self.pack(side="bottom", fill="x")
+        else:
+            self.pack_forget()
 
     def set_progress(self, fraction):
         if fraction is None and self.progress is None:
@@ -1860,7 +2059,8 @@ class HintBar(tk.Canvas):
         width, height = self.winfo_width(), self.winfo_height()
         if width <= 1:
             return
-        x, mid = int(34 * s), height / 2
+        self.create_line(0, 0, width, 0, fill="#1d222a")
+        x, mid = gutter(width, s), height / 2
         for button, label in self.items:
             photo = self.icon(button)
             if photo is not None:
@@ -1873,7 +2073,7 @@ class HintBar(tk.Canvas):
             item = self.create_text(x, mid, text=label, font=self.host.fonts.f_small, fill=MUTED, anchor="w")
             x = self.bbox(item)[2] + int(26 * s)
         if self.progress is not None:
-            self._draw_ring(width - int(40 * s), mid, self.progress)
+            self._draw_ring(width - gutter(width, s) - int(11 * s), mid, self.progress)
 
     def _draw_ring(self, cx, cy, fraction):
         s = self.scale

@@ -2128,7 +2128,7 @@ class Launcher:
         self.stage.pack(side="top", fill="both", expand=True)
 
     def build_hintbar(self):
-        self.hintbar = ps5_ui.HintBar(self, self.px(56))
+        self.hintbar = ps5_ui.HintBar(self, self.px(48))
         self.hintbar.pack(side="bottom", fill="x")
 
     def build_hub(self):
@@ -2759,7 +2759,9 @@ class Launcher:
             return "break"
         if self.screen == "home":
             if not self.classic and self.home is not None and not self.home.folder_ready:
-                self.choose_game_dir()
+                if self.choose_game_dir():
+                    # The folder is set: the legend now offers Play, not "Select folder".
+                    self.set_hints_for_hub()
                 return "break"
             self.play_or_stop()
         else:
@@ -2875,8 +2877,11 @@ class Launcher:
                         self.display.refresh()
         if not self.process:
             if self.home is not None:
-                self.home.set_status(f"Ready to play {self.current_game()['name']}.")
                 self.home.set_folder_ready(is_game_dir(self.game_dir()))
+                if self.home.status_text.startswith("Ready to play"):
+                    # The logo and the caption already name the game; the corner stays for real
+                    # news (an update, a launch, a crash).
+                    self.home.set_status("")
             elif self.classic_status is not None:
                 self.set_status(f"Ready to play {self.current_game()['name']}.")
         self.update_multiplayer_tab()
@@ -4649,23 +4654,23 @@ class Launcher:
 
         return [
             {"key": "resolution", "title": "Resolution",
-             "hint": "How sharp the picture is; higher needs a faster graphics card.",
+             "hint": "Sharper needs a faster graphics card.",
              "value": resolution, "options": resolutions,
              "label": label(resolutions, resolution)},
             {"key": "upscaling", "title": "Upscaling",
-             "hint": "Draw below the resolution and upscale each frame: more FPS.",
+             "hint": "Draw lower, then upscale each frame: more FPS.",
              "value": upscaler, "options": upscalers,
              "label": label(upscalers, upscaler)},
             {"key": "upscale", "title": "Upscaling quality",
-             "hint": "How far below the resolution the game draws.",
+             "hint": "How far below the resolution it draws.",
              "value": upscale, "options": UPSCALE_PRESETS,
              "label": label(UPSCALE_PRESETS, upscale)},
             {"key": "fps_limit", "title": "Frame rate limit",
-             "hint": "60 is how the games were made; higher is experimental.",
+             "hint": "60 is native; higher is experimental.",
              "value": fps, "options": fps_options,
              "label": label(fps_options, fps)},
             {"key": "display_mode", "title": "Display mode",
-             "hint": "A window, a borderless window, or fullscreen.",
+             "hint": "Window, borderless, or fullscreen.",
              "value": mode, "options": mode_options,
              "label": label(mode_options, mode)},
             {"key": "vsync", "title": "VSync",
@@ -4673,7 +4678,7 @@ class Launcher:
              "value": vsync, "options": vsync_options,
              "label": label(vsync_options, vsync)},
             {"key": "ui_motion", "title": "Launcher animations",
-             "hint": "Off stops every transition, and the glass blur with it.",
+             "hint": "Off also stops the glass blur.",
              "value": motion, "options": motion_options,
              "label": label(motion_options, motion)},
         ]
