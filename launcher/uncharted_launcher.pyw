@@ -1674,6 +1674,10 @@ class Launcher:
         self.process = None
         self.hidden = False  # withdrawn while a game runs (hide_for_game)
         self.ever_focused = False  # the window has had the foreground at least once (pad_tick)
+        self.quit_confirm = None  # the "close the launcher?" panel while it is up (ask_quit)
+        self.quit_canvas = None
+        self.pad_job = None  # the controller loop's pending after() call
+        self.poll_job = None  # the game process loop's pending after() call
         self.output = queue.Queue()
         self.last_output = 0.0
         self.game_started = False
@@ -1735,8 +1739,8 @@ class Launcher:
             self.take_foreground()
         write_config(self.config)  # keeps one-time updates (read_config) even without a change
         root.protocol("WM_DELETE_WINDOW", self.close)
-        root.after(150, self.poll)
-        root.after(200, self.pad_tick)
+        self.poll_job = root.after(150, self.poll)
+        self.pad_job = root.after(200, self.pad_tick)
         # Updates (launcher/updater.py): what an installed one left behind goes; a newer release
         # shows the UPDATE button.
         self.update_release = None
@@ -1869,7 +1873,15 @@ class Launcher:
 
     def quit_window(self):
         """Leaves fullscreen, then destroys: destroying a -fullscreen Tk 9 window on Windows can
-        panic inside tcl90.dll (a breakpoint exception, seen after a game closed)."""
+        panic inside tcl90.dll (a breakpoint exception, seen after a game closed). The timers are
+        cancelled first, so Tk does not run a callback of a window that is going away."""
+        for job in (self.poll_job, self.pad_job):
+            if job:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+        self.poll_job = self.pad_job = None
         try:
             if getattr(self, "fullscreen", False):
                 self.root.attributes("-fullscreen", False)
@@ -1877,6 +1889,65 @@ class Launcher:
         except tk.TclError:
             pass
         self.root.destroy()
+
+    # -- closing from the controller ------------------------------------------------------------
+
+    def ask_quit(self):
+        """B on the home screen (or Escape): a message box cannot be answered with a controller,
+        so the question is drawn in the window. The second B closes the launcher; A (or Escape)
+        cancels."""
+        if self.quit_confirm is not None:
+            return
+        frame = tk.Frame(self.root, bg=BG)
+        frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        canvas = tk.Canvas(frame, bg=BG, highlightthickness=0, bd=0, takefocus=0)
+        canvas.pack(fill="both", expand=True)
+        self.quit_confirm, self.quit_canvas = frame, canvas
+        canvas.bind("<Configure>", lambda event: self.draw_quit_confirm())
+        self.draw_quit_confirm()
+
+    def draw_quit_confirm(self):
+        canvas = self.quit_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width, height = canvas.winfo_width(), canvas.winfo_height()
+        if width < 2 or height < 2:
+            return
+        panel_w = min(width - self.px(80), self.px(640))
+        panel_h = self.px(270)
+        x1, y1 = (width - panel_w) / 2, (height - panel_h) / 2
+        x2, y2 = x1 + panel_w, y1 + panel_h
+        ps5_ui.round_rect(canvas, x1, y1, x2, y2, self.px(20), fill=PANEL, outline=LINE)
+        canvas.create_text(width / 2, y1 + self.px(48), text="CLOSE THE LAUNCHER", font=self.f_caps,
+                           fill=DIM)
+        canvas.create_text(width / 2, y1 + self.px(110), text="You sure want to close this launcher?",
+                           font=self.f_card_title, fill=TEXT, width=panel_w - self.px(60))
+        button_w, button_h, gap = self.px(170), self.px(46), self.px(20)
+        top = y2 - self.px(100)
+        left = width / 2 - button_w - gap / 2
+        for index, (tag, label, fill, ink) in enumerate((("close", "Close", GOLD, INK),
+                                                         ("cancel", "Cancel", PANEL_HI, TEXT))):
+            bx = left + index * (button_w + gap)
+            ps5_ui.round_rect(canvas, bx, top, bx + button_w, top + button_h, self.px(12),
+                              fill=fill, outline=fill, tags=(tag, "button"))
+            canvas.create_text(bx + button_w / 2, top + button_h / 2, text=label, font=self.f_play,
+                               fill=ink, tags=(tag, "button"))
+            canvas.tag_bind(tag, "<Button-1>", lambda event, name=tag: self.quit_confirm_click(name))
+        canvas.create_text(width / 2, top + button_h + self.px(24), text="B: close    A: cancel",
+                           font=self.f_small, fill=DIM)
+
+    def quit_confirm_click(self, tag):
+        if tag == "close":
+            self.close()
+        else:
+            self.cancel_quit()
+
+    def cancel_quit(self):
+        frame, self.quit_confirm = self.quit_confirm, None
+        self.quit_canvas = None
+        if frame is not None:
+            frame.destroy()
 
     def set_classic(self, on):
         """Switch layouts: `on` is the classic cards and tabs, off the PlayStation 5 hub (the
@@ -2375,7 +2446,7 @@ class Launcher:
         running = self.process is not None
         delay = 100 if running else 33 if getattr(self.gamepads, "pads", None) else 250
         try:
-            self.root.after(delay, self.pad_tick)
+            self.pad_job = self.root.after(delay, self.pad_tick)
         except tk.TclError:
             return
         if not getattr(self.gamepads, "sdl", None):
@@ -2412,6 +2483,14 @@ class Launcher:
 
     def pad_navigate(self, held, now, stick=(0.0, 0.0)):
         pressed = held - self.pad_prev
+        if self.quit_confirm is not None:
+            # The close question is up: B closes the launcher, A cancels, nothing else moves.
+            if "b" in pressed:
+                self.close()
+            elif "a" in pressed:
+                self.cancel_quit()
+            self.pad_repeat.pop("dir", None)
+            return
         direction = None
         for button, step in (("dpleft", (-1, 0)), ("dpright", (1, 0)), ("dpup", (0, -1)), ("dpdown", (0, 1))):
             if button in held:
@@ -2499,6 +2578,9 @@ class Launcher:
     def key_activate(self):
         if self.capturing is not None or self.pad_capture is not None:
             return None
+        if self.quit_confirm is not None:
+            self.close()  # Enter answers the close question
+            return "break"
         if self.screen == "home":
             self.play_or_stop()
         else:
@@ -2508,8 +2590,14 @@ class Launcher:
     def key_back(self, event=None):
         if self.capturing is not None or self.pad_capture is not None:
             return None
-        if self.screen == "settings":
+        if self.quit_confirm is not None:
+            self.cancel_quit()
+            return "break"
+        if self.screen == "settings" and not self.classic:
             self.show_home()
+        else:
+            # Back at the root screen: the close question (a second B closes the launcher).
+            self.ask_quit()
         return "break"
 
     # -- focus helpers ----------------------------------------------------------------------
@@ -4465,7 +4553,7 @@ class Launcher:
                 self.game_started = True
                 self.set_status(f"Playing {self.current_game()['name']}",
                                 "Insert or R3 + L2 opens the in-game menu. STOP closes the game.")
-        self.root.after(150, self.poll)
+        self.poll_job = self.root.after(150, self.poll)
 
     def latest_log(self):
         logs = [ROOT / "analysis" / g["log"] / "boot.log" for g in GAMES]
