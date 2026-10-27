@@ -326,6 +326,7 @@ LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_u
                      # L3 + R3 held for `pad_quit_hold` seconds closing the running game.
                      # `ui_controller_only` picks the shell: the hub (on) or the classic layout (off).
                      "ui_fullscreen": True, "ui_motion": "auto", "ui_hints": True, "ui_controller_only": True,
+                     "ui_tab": "games", "gallery_dir": "",
                      "pad_nav": True, "pad_quit": True, "pad_quit_hold": "2.0"}
 # Animations: Auto follows the graphics card (Fast on an integrated GPU), Fast halves the frame
 # rate of the transitions, Off turns them off entirely (nothing moves, nothing ticks).
@@ -363,6 +364,9 @@ def voice_languages(game_dir):
             ids.update(SPEECH_PACKS.get(pack.name.removesuffix("_ps4.psarc").lower(), ()))
     return ids
 GAME_KEYS = ("u1", "u2", "u3")
+# The Gallery reads these from the user's Pictures folder, one subfolder per game.
+GALLERY_FOLDERS = (("1", "Drake's Fortune"), ("2", "Among Thieves"), ("3", "Drake's Deception"))
+GALLERY_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 GAME_SETTING_DEFAULTS = {"preset": "medium", "resolution": "1920x1080", "aspect": "16:9", "multithreaded": False, "save_profile": "1",
                          "async_readback": False, "controls": None, "mouse": True, "mouse_sens": "1.0",
                          "mouse_invert": False, "prompts": "auto", "mouse_aim_sens": "1.0",
@@ -1416,7 +1420,11 @@ def read_config():
     for name in GAME_SETTING_DEFAULTS:
         config.pop(name, None)
     # Version 10: the shell is a choice now (`ui_controller_only`): the hub, or the classic layout.
-    config["version"] = 10
+    # Version 11: the hub's three capsules (Games, Gallery, Display), and the folder the Gallery
+    # reads. Older configs open on Games with the default Pictures folder.
+    if config.get("ui_tab") not in ("games", "gallery", "display"):
+        config["ui_tab"] = "games"
+    config["version"] = 11
     # Under Wine the game folder is also kept as a Linux path: another prefix can show the same
     # folder under another drive letter (Launcher.game_dir).
     folder = config.get("game_dir")
@@ -1637,7 +1645,7 @@ class ScrollBar(tk.Canvas):
         round_rect(self, x1, 1, x2, h - 1, r, fill=PANEL, outline=PANEL)
         top = min(int(self.first * h), h - 24)
         bottom = min(h, max(int(self.last * h), top + 24))
-        color = MUTED if self.hover or self.grab is not None else DIM
+        color = LINE if self.hover or self.grab is not None else PANEL_HI
         round_rect(self, x1, top + 1, x2, bottom - 1, r, fill=color, outline=color)
 
     def press(self, event):
@@ -1709,6 +1717,13 @@ class Launcher:
         self.cards = {}
         self.tab_buttons = {}
         self.tab_cells = {}
+        self.hub = None
+        self.topbar = None
+        self.gallery = None
+        self.display = None
+        self.glass = None
+        self.hub_tab = "games"
+        self.top_focus = False
         self.status_text = ""
         self.status_detail = ""
         self.pad_prev = set()
@@ -1976,6 +1991,12 @@ class Launcher:
         self.play_button = None
         self.update_button = None
         self.tab_strip = None
+        self.hub = None
+        self.topbar = None
+        self.gallery = None
+        self.display = None
+        self.glass = None
+        self.top_focus = False
         self.cards = {}
         self.tab_buttons = {}
         self.tab_cells = {}
@@ -1987,15 +2008,14 @@ class Launcher:
         if self.classic:
             self.build_classic()
         else:
-            self.build_home()
-            self.build_settings()
+            self.build_hub()
         self.select_game(self.config.get("game", "u1"), save=False)
         tab = self.config.get("tab", "setup")
         self.show_tab(tab if tab in self.pages else "setup", save=False)
         if self.classic:
             self.screen = "settings"
         else:
-            self.show_home()
+            self.show_hub_tab(self.config.get("ui_tab", "games"), save=False)
         self.update_play_state()
 
     def clear_page_state(self):
@@ -2033,6 +2053,10 @@ class Launcher:
         mode = self.config.get("ui_motion", "auto")
         self.animator.enabled = mode != "off"
         self.animator.interval = 33 if (mode == "fast" or (mode == "auto" and self.integrated_gpu())) else 16
+        if getattr(self, "glass", None) is not None:
+            self.glass.enabled = self.animator.enabled
+            if self.topbar is not None:
+                self.topbar.draw()
 
     def integrated_gpu(self):
         name = (self.gpu_name or "").lower()
@@ -2089,15 +2113,14 @@ class Launcher:
         if self.classic:
             self.build_classic()
         else:
-            self.build_home()
-            self.build_settings()
+            self.build_hub()
         self.select_game(self.config.get("game", "u1"), save=False)
         # The settings are built and ready, on the page they were left on; the hub is what opens (a
         # game console's home screen), unless the classic layout is the one chosen.
         self.show_tab(self.config.get("tab", "setup") if self.config.get("tab") in self.pages else "setup",
                       save=False)
         if not self.classic:
-            self.show_home()
+            self.show_hub_tab(self.config.get("ui_tab", "games"), save=False)
 
     def build_stage(self):
         """The two screens share one stage: the game hub, and the settings on top of it."""
@@ -2108,18 +2131,36 @@ class Launcher:
         self.hintbar = ps5_ui.HintBar(self, self.px(56))
         self.hintbar.pack(side="bottom", fill="x")
 
-    def build_home(self):
-        self.home = ps5_ui.HomeView(self, self.art, self.animator, self.stage)
+    def build_hub(self):
+        """The PlayStation 5 shell: the floating top strip over the three capsules' screens.
+
+        The strip is placed over the hub (not packed above it), so the artwork runs edge to edge
+        behind it and the capsules read as glass. Settings is packed into the same hub, with the
+        strip still on top: the gear is always there."""
+        self.glass = ps5_ui.Glass(self.art)
+        self.glass.enabled = self.animator.enabled
+        self.hub = tk.Frame(self.stage, bg=BG)
+        self.hub.pack(fill="both", expand=True)
+        self.home = ps5_ui.HomeView(self, self.art, self.animator, self.hub)
         self.home.set_games(GAMES)
+        self.gallery = ps5_ui.GalleryView(self, self.art, self.animator, self.glass, self.hub)
+        self.display = ps5_ui.DisplayView(self, self.art, self.animator, self.glass, self.hub)
+        self.build_settings()
+        self.topbar = ps5_ui.TopBar(self, self.hub, self.glass)
+        self.topbar.place(x=0, y=0, relwidth=1, height=self.px(84))
+        tk.Misc.lift(self.topbar)
 
     def build_settings(self):
-        """The settings: a PS5 category list on the left, the existing pages on the right."""
-        self.settings_view = tk.Frame(self.stage, bg=BG)
+        """The settings: a PS5 category list on the left, the existing pages on the right. In the
+        hub they sit below the top strip, which stays visible above them."""
+        parent = self.hub if self.hub is not None else self.stage
+        top = self.px(84) if self.hub is not None else 0
+        self.settings_view = tk.Frame(parent, bg=BG)
         self.sidebar = ps5_ui.Sidebar(self, self.settings_view, self.sidebar_width(), [], self.show_tab)
-        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack(side="left", fill="y", pady=(top, 0))
         content = tk.Frame(self.settings_view, bg=BG)
         content.pack(side="left", fill="both", expand=True, padx=(0, self.px(40)),
-                     pady=(self.px(28), self.px(18)))
+                     pady=(top + self.px(18), self.px(18)))
         header = tk.Frame(content, bg=BG)
         header.pack(side="top", fill="x", pady=(0, self.px(8)))
         self.settings_status = tk.Label(header, text="", font=self.f_small, bg=BG, fg=MUTED, anchor="e")
@@ -2393,32 +2434,69 @@ class Launcher:
     def show_home(self, save=True):
         if self.classic:
             return
-        self.settings_view.pack_forget()
-        self.home.pack(fill="both", expand=True)
-        self.screen = "home"
-        self.focus.clear()
-        self.home.set_running(self.process is not None)
-        self.set_hints_for_home()
+        self.show_hub_tab("games", save=save)
+
+    def show_hub_tab(self, name, save=True):
+        """One of the hub's three capsules: Games (the hero and the carousel), Gallery or Display.
+
+        The top strip stays; the view below it is swapped. The chosen capsule is remembered in
+        `ui_tab`, so the launcher opens where it was left."""
+        if self.classic:
+            return
+        name = name if name in ("games", "gallery", "display") else "games"
+        self.hub_tab = name
+        if save and self.config.get("ui_tab") != name:
+            self.config["ui_tab"] = name
+            write_config(self.config)
+        for view in (self.home, self.gallery, self.display, self.settings_view):
+            if view is not None:
+                view.pack_forget()
+        key = self.current_game()["key"]
+        if name == "games":
+            self.home.pack(fill="both", expand=True)
+            self.screen = "home"
+            self.focus.clear()
+            self.home.set_running(self.process is not None)
+            self.home.set_folder_ready(is_game_dir(self.game_dir()))
+        elif name == "gallery":
+            self.ensure_gallery_dir()
+            self.gallery.set_art(key)
+            self.gallery.set_entries(self.gallery_scan())
+            self.gallery.pack(fill="both", expand=True)
+            self.screen = "gallery"
+            self.focus.clear()
+            self.gallery.focus_first()
+        else:
+            self.display.set_art(key)
+            self.display.refresh()
+            self.display.pack(fill="both", expand=True)
+            self.screen = "display"
+            self.focus.clear()
+        self.top_focus = False
+        if self.topbar is not None:
+            self.topbar.set_tab(name)
+            self.topbar.set_art(key, 1.0 if name == "games" else 0.34)
+            self.topbar.set_focus(None)
+            tk.Misc.lift(self.topbar)
+        self.set_hints_for_hub()
 
     def open_settings(self, tab=None, save=True):
         if self.classic:
             self.show_tab(tab or self.config.get("tab", "setup"), save=save)
             return
-        self.home.pack_forget()
+        for view in (self.home, self.gallery, self.display):
+            if view is not None:
+                view.pack_forget()
         self.settings_view.pack(fill="both", expand=True)
         self.screen = "settings"
+        self.top_focus = False
+        if self.topbar is not None:
+            self.topbar.set_art(None)
+            # No capsule is "current" in Settings: the strip is there for the gear and the power.
+            self.topbar.set_tab(None)
+            self.topbar.set_focus(None)
+            tk.Misc.lift(self.topbar)
         self.show_tab(tab or self.config.get("tab", "setup"), save=save)
-
-    def set_hints_for_home(self):
-        if not hasattr(self, "hintbar"):
-            return
-        if self.process:
-            # A running game has the controller: only the L3 + R3 hold closes it (see pad_tick).
-            items = [("leftstick+rightstick", "Hold to close the game")]
-        else:
-            items = [("a", "Play"), ("start", "Settings"),
-                     ("leftshoulder", "Previous game"), ("rightshoulder", "Next game")]
-        self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
 
     def set_hints_for_settings(self):
         if not hasattr(self, "hintbar"):
@@ -2430,6 +2508,31 @@ class Launcher:
                      ("rightshoulder", "Category"), ("start", "Play")]
         else:
             items = [("a", "Select"), ("dpleft", "Adjust"), ("b", "Back"), ("start", "Home")]
+        self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
+
+    def set_hints_for_hub(self):
+        """The legend follows the capsule in view (and the gallery's viewer)."""
+        if not hasattr(self, "hintbar"):
+            return
+        if self.process:
+            items = [("leftstick+rightstick", "Hold to close the game")]
+        elif self.top_focus:
+            items = [("dpleft", "Change"), ("a", "Open"), ("dpdown", "Back")]
+        elif self.screen == "gallery":
+            if self.gallery is not None and self.gallery.viewer is not None:
+                items = [("dpleft", "Previous"), ("dpright", "Next"), ("a", "Fit / fill"),
+                         ("b", "Back")]
+            else:
+                items = [("a", "View"), ("b", "Back"), ("leftshoulder", "Filter"),
+                         ("rightshoulder", "Filter")]
+        elif self.screen == "display":
+            items = [("dpleft", "Adjust"), ("a", "Change"), ("b", "Back")]
+        elif self.home is not None and not self.home.folder_ready:
+            items = [("a", "Select folder"), ("start", "Settings"), ("leftshoulder", "Previous game"),
+                     ("rightshoulder", "Next game"), ("b", "Quit")]
+        else:
+            items = [("a", "Play"), ("start", "Settings"), ("leftshoulder", "Previous game"),
+                     ("rightshoulder", "Next game"), ("b", "Quit")]
         self.hintbar.set_items(items if self.config.get("ui_hints", True) else [])
 
     # -- controller -------------------------------------------------------------------------
@@ -2517,8 +2620,10 @@ class Launcher:
         if "start" in pressed:
             if self.classic:
                 self.play_or_stop()
+            elif self.screen == "settings":
+                self.show_hub_tab(self.hub_tab or "games")
             else:
-                self.show_home() if self.screen == "settings" else self.open_settings()
+                self.open_settings()
         if "leftshoulder" in pressed:
             self.pad_category(-1)
         if "rightshoulder" in pressed:
@@ -2529,19 +2634,78 @@ class Launcher:
             self.pad_scroll(1)
 
     def navigate(self, dx, dy):
+        if self.classic:
+            self.focus.move(dx, dy)
+            return
+        if self.quit_confirm is not None:
+            return
+        if self.top_focus:
+            # The capsules are focused: Left/Right moves along them, Down returns to the screen.
+            if dy > 0:
+                self.top_focus = False
+                self.topbar.set_focus(None)
+                self.refresh_hints()
+            elif dx:
+                self.topbar.move_focus(dx)
+            return
+        if self.screen == "settings":
+            # Up from the page's first row reaches the strip, as on the capsules' screens.
+            if dy < 0 and getattr(self.focus, "index", 0) <= 0 and self.topbar is not None:
+                self._focus_topbar()
+                return
+            self.focus.move(dx, dy)
+            return
         if self.screen == "home":
+            if dy < 0:
+                self._focus_topbar()
+                return
             if dx:
                 keys = [g["key"] for g in GAMES]
                 index = keys.index(self.config.get("game", "u1"))
                 self.select_game(keys[(index + dx) % len(keys)])
             return
-        self.focus.move(dx, dy)
+        if self.screen == "gallery":
+            if self.gallery.move(dx, dy):
+                self.set_hints_for_hub()
+                return
+            if dy < 0:
+                self._focus_topbar()
+            return
+        if self.screen == "display":
+            if self.display.move(dx, dy):
+                self.set_hints_for_hub()
+                return
+            if dy < 0:
+                self._focus_topbar()
+
+    def _focus_topbar(self):
+        self.top_focus = True
+        self.topbar.set_focus(self.hub_tab or "games")
+        self.refresh_hints()
+
+    def refresh_hints(self):
+        """The legend for whatever is in front: a capsule's screen, or the settings overlay."""
+        if self.classic or self.screen == "settings":
+            self.set_hints_for_settings()
+        else:
+            self.set_hints_for_hub()
 
     def pad_category(self, step):
-        if self.screen != "settings" or not getattr(self, "page_order", None):
+        if self.classic or self.screen == "settings":
+            if not getattr(self, "page_order", None):
+                return
+            index = self.page_order.index(self.current_tab) if self.current_tab in self.page_order else 0
+            self.show_tab(self.page_order[(index + step) % len(self.page_order)])
             return
-        index = self.page_order.index(self.current_tab) if self.current_tab in self.page_order else 0
-        self.show_tab(self.page_order[(index + step) % len(self.page_order)])
+        if self.screen == "home":
+            keys = [g["key"] for g in GAMES]
+            index = keys.index(self.config.get("game", "u1"))
+            self.select_game(keys[(index + step) % len(keys)])
+        elif self.screen == "gallery" and self.gallery is not None:
+            order = [None, "1", "2", "3"]
+            current = self.gallery.filter if self.gallery.filter in order else None
+            self.gallery.set_filter(order[(order.index(current) + step) % len(order)])
+            self.set_hints_for_hub()
 
     def pad_scroll(self, step):
         if self.screen != "settings":
@@ -2581,7 +2745,21 @@ class Launcher:
         if self.quit_confirm is not None:
             self.close()  # Enter answers the close question
             return "break"
+        if not self.classic and self.top_focus:
+            self.topbar.activate()
+            return "break"
+        if not self.classic and self.screen == "gallery":
+            self.gallery.activate()
+            self.set_hints_for_hub()
+            return "break"
+        if not self.classic and self.screen == "display":
+            self.display.activate()
+            self.set_hints_for_hub()
+            return "break"
         if self.screen == "home":
+            if not self.classic and self.home is not None and not self.home.folder_ready:
+                self.choose_game_dir()
+                return "break"
             self.play_or_stop()
         else:
             self.focus.activate()
@@ -2593,11 +2771,23 @@ class Launcher:
         if self.quit_confirm is not None:
             self.cancel_quit()
             return "break"
-        if self.screen == "settings" and not self.classic:
-            self.show_home()
-        else:
-            # Back at the root screen: the close question (a second B closes the launcher).
-            self.ask_quit()
+        if not self.classic:
+            if self.top_focus:
+                self.top_focus = False
+                self.topbar.set_focus(None)
+                self.refresh_hints()
+                return "break"
+            if self.screen == "gallery" and self.gallery is not None and self.gallery.back():
+                self.set_hints_for_hub()
+                return "break"
+            if self.screen in ("gallery", "display"):
+                self.show_hub_tab("games")
+                return "break"
+            if self.screen == "settings":
+                self.show_hub_tab(self.hub_tab or "games")
+                return "break"
+        # Back at the root screen: the close question (a second B closes the launcher).
+        self.ask_quit()
         return "break"
 
     # -- focus helpers ----------------------------------------------------------------------
@@ -2664,9 +2854,20 @@ class Launcher:
             # Each game keeps its own settings: show the selected game's.
             self.reload_ini()
             self.refresh_controls()
+            if not self.classic:
+                key = self.current_game()["key"]
+                if self.topbar is not None:
+                    self.topbar.set_art(key, 1.0 if self.screen == "home" else 0.34)
+                if self.gallery is not None:
+                    self.gallery.set_art(key)
+                if self.display is not None:
+                    self.display.set_art(key)
+                    if self.screen == "display":
+                        self.display.refresh()
         if not self.process:
             if self.home is not None:
                 self.home.set_status(f"Ready to play {self.current_game()['name']}.")
+                self.home.set_folder_ready(is_game_dir(self.game_dir()))
             elif self.classic_status is not None:
                 self.set_status(f"Ready to play {self.current_game()['name']}.")
         self.update_multiplayer_tab()
@@ -2781,6 +2982,8 @@ class Launcher:
         if getattr(self, "hero", None) is not None:
             self._hero_source = None
             self.draw_hero()
+        if self.home is not None:
+            self.home.set_folder_ready(is_game_dir(self.game_dir()))
         return True
 
     def chosen_update(self):
@@ -4094,10 +4297,10 @@ class Launcher:
         self.draw_play()
         if self.classic:
             self.set_hints_for_settings()
-        elif self.screen == "home":
-            self.set_hints_for_home()
-        else:
+        elif self.screen == "settings":
             self.set_hints_for_settings()
+        else:
+            self.set_hints_for_hub()
 
     def set_status(self, text, detail=None):
         """The hub shows it in its top right corner; the settings show the first line in the
@@ -4335,6 +4538,152 @@ class Launcher:
             self.root.after(10, lambda: self.set_classic(not value))
         if key in ("ui_hints", "pad_nav", "pad_quit", "pad_quit_hold"):
             self.update_play_state()
+
+    # -- the gallery and the display capsule -------------------------------------------------
+
+    def gallery_dir(self):
+        """Where the Gallery reads from: the chosen folder, else Pictures/Uncharted Launcher."""
+        folder = self.config.get("gallery_dir") or ""
+        if folder:
+            return Path(folder)
+        base = Path(os.environ.get("USERPROFILE") or Path.home())
+        return base / "Pictures" / "Uncharted Launcher"
+
+    def ensure_gallery_dir(self):
+        """Creates the folder and its per-game subfolders the first time the Gallery opens."""
+        folder = self.gallery_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            for number, name in GALLERY_FOLDERS:
+                (folder / f"{number} {name}").mkdir(exist_ok=True)
+        except OSError:
+            pass
+        return folder
+
+    def gallery_scan(self):
+        """Every picture under the folder, newest first, with its game from the subfolder name."""
+        folder = self.gallery_dir()
+        entries = []
+        if not folder.is_dir():
+            return entries
+        names = {number: f"Uncharted {number}: {name}" for number, name in GALLERY_FOLDERS}
+        for path in folder.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in GALLERY_SUFFIXES:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            game = ""
+            try:
+                parts = path.relative_to(folder).parts[:-1]
+            except ValueError:
+                parts = ()
+            for part in parts:
+                match = re.match(r"\s*([123])\b", part)
+                if match:
+                    game = match.group(1)
+                    break
+            if not game:
+                match = re.match(r"\s*([123])[\s_-]", path.name)
+                if match:
+                    game = match.group(1)
+            entries.append({
+                "path": str(path),
+                "stamp": stat.st_mtime,
+                "name": path.name,
+                "game": game,
+                "game_name": names.get(game, "Uncharted"),
+                "when": time.strftime("%d %b %Y  %H:%M", time.localtime(stat.st_mtime)),
+            })
+        entries.sort(key=lambda entry: entry["stamp"], reverse=True)
+        return entries
+
+    def open_gallery_folder(self):
+        folder = self.ensure_gallery_dir()
+        try:
+            os.startfile(str(folder))
+        except OSError:
+            messagebox.showinfo(APP_TITLE, f"Your photos folder is here:\n{folder}")
+
+    def change_gallery_folder(self):
+        from tkinter import filedialog
+        folder = filedialog.askdirectory(title="Select the folder with your Uncharted photos",
+                                         initialdir=str(self.gallery_dir()))
+        if not folder:
+            return
+        self.config["gallery_dir"] = folder
+        write_config(self.config)
+        if self.gallery is not None:
+            self.gallery.set_entries(self.gallery_scan())
+
+    def display_model(self):
+        """The Display capsule's rows: the settings that change the picture, in one place."""
+        settings = self.game_settings()
+        resolution = settings.get("resolution", "1920x1080")
+        resolutions = resolution_options(settings.get("aspect", "16:9"))
+        upscalers = upscaling_options()
+        upscaler = upscaling_choice(self.ini)
+        upscale = settings.get("upscale", "off")
+        fps = self.ini.get("fps_limit", "60")
+        mode = self.ini.get("display_mode", "windowed")
+        vsync = self.ini.get("vsync", "1")
+        motion = self.config.get("ui_motion", "auto")
+        fps_options = [(str(value), label) for value, label in FPS_LIMITS]
+        mode_options = [("windowed", "Windowed"), ("borderless", "Borderless"),
+                        ("fullscreen", "Fullscreen")]
+        vsync_options = [("1", "On"), ("0", "Off")]
+        motion_options = list(MOTION_MODES)
+
+        def label(options, value):
+            return next((text for option, text in options if option == value), str(value))
+
+        return [
+            {"key": "resolution", "title": "Resolution",
+             "hint": "How sharp the picture is; higher needs a faster graphics card.",
+             "value": resolution, "options": resolutions,
+             "label": label(resolutions, resolution)},
+            {"key": "upscaling", "title": "Upscaling",
+             "hint": "Draw below the resolution and upscale each frame: more FPS.",
+             "value": upscaler, "options": upscalers,
+             "label": label(upscalers, upscaler)},
+            {"key": "upscale", "title": "Upscaling quality",
+             "hint": "How far below the resolution the game draws.",
+             "value": upscale, "options": UPSCALE_PRESETS,
+             "label": label(UPSCALE_PRESETS, upscale)},
+            {"key": "fps_limit", "title": "Frame rate limit",
+             "hint": "60 is how the games were made; higher is experimental.",
+             "value": fps, "options": fps_options,
+             "label": label(fps_options, fps)},
+            {"key": "display_mode", "title": "Display mode",
+             "hint": "A window, a borderless window, or fullscreen.",
+             "value": mode, "options": mode_options,
+             "label": label(mode_options, mode)},
+            {"key": "vsync", "title": "VSync",
+             "hint": "Stops tearing when the camera turns.",
+             "value": vsync, "options": vsync_options,
+             "label": label(vsync_options, vsync)},
+            {"key": "ui_motion", "title": "Launcher animations",
+             "hint": "Off stops every transition, and the glass blur with it.",
+             "value": motion, "options": motion_options,
+             "label": label(motion_options, motion)},
+        ]
+
+    def display_change(self, key, value):
+        """A change from the Display capsule: through the same handlers the Settings pages use."""
+        if key == "resolution":
+            self.change_resolution(value)
+        elif key == "upscaling":
+            self.change_upscaling(value)
+        elif key == "upscale":
+            self.change_game_setting("upscale", value)
+            self.refresh_render_size()
+        elif key == "ui_motion":
+            self.change_ui("ui_motion", value)
+        else:
+            self.change(key, value)
+        if self.display is not None:
+            self.display.refresh()
 
     # -- game -------------------------------------------------------------------------------
 

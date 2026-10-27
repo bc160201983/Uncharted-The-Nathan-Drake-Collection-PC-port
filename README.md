@@ -45,13 +45,22 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
 
 **Launcher** (`Uncharted Launcher.exe`)
 - A PlayStation 5-style home screen: a full-screen background and logo per game, and the three
-  games on a carousel along the bottom. It opens here, on the game you played last. Play, Settings
-  and Quit sit together under the logo.
+  games on a carousel along the bottom. It opens here, on the game you played last. The wordmark is
+  top left; the **Games**, **Gallery** and **Display** capsules are across the top, with Settings and
+  Quit as the gear and the power button top right.
+- **Gallery:** your photo-mode pictures, in a grid with a filter per game and a full-screen viewer.
+  It reads `Pictures\Uncharted Launcher` (or a folder you choose) and its `1 Drake's Fortune`,
+  `2 Among Thieves` and `3 Drake's Deception` subfolders; anything you drop in appears on the next
+  visit, newest first. Thumbnails are cached, so opening it again is instant.
+- **Display:** resolution, upscaling and its quality, the frame rate limit, the display mode, VSync
+  and the launcher animations in one panel, with **All settings** going to the full page. Left/Right
+  changes a value; the settings pages and the config always agree.
 - **Controller first:** the D-pad or left stick moves, Cross chooses, Circle goes back, Options
-  opens the settings, L1 and R1 switch games. **Hold L3 + R3** for two seconds to close a running
-  game: the ring along the bottom fills while you hold, and the first five seconds after a launch
-  are ignored so a controller resting on a desk cannot close anything. Settings -> System turns
-  that shortcut and the on-screen hints off, and sets the hold time (1-3 s).
+  opens the settings, L1 and R1 switch games (or filter the Gallery). Up from a screen reaches the
+  capsules. **Hold L3 + R3** for two seconds to close a running game: the ring along the bottom
+  fills while you hold, and the first five seconds after a launch are ignored so a controller
+  resting on a desk cannot close anything. Settings -> System turns that shortcut and the on-screen
+  hints off, and sets the hold time (1-3 s).
 - **Controller only mode** (Settings -> System) picks the shell: on is the PlayStation 5 hub; off
   is the classic layout, with the game cards, the tab strip and the footer Play button, in the same
   window and with the same settings. It switches without restarting; both layouts work from the
