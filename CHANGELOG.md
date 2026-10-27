@@ -4,6 +4,59 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 27 October 2026 (unreleased)
+
+- **Launcher: PlayStation 5 home screen.** The launcher now opens on a hub with a full-screen
+  background and logo for each game and the three games on a carousel (Left/Right, or L1/R1 on a
+  controller). The **Games**, **Gallery** and **Display** capsules are across the top, with Settings
+  and Quit as the gear and the power button top right; Up from a screen reaches them. The old tab
+  strip is a category list on the left, and every setting is still there, with the same names and
+  the same pages (plus **System**, for the launcher's own screen and controller options). The new
+  shell is `launcher/ps5_ui.py`.
+- **Launcher: Gallery.** Your photo-mode pictures in a grid, newest first, with a filter per game
+  (All, 1, 2, 3) and a viewer (Left/Right to step, Cross to switch fit/fill, Circle back). It reads
+  `Pictures\Uncharted Launcher` and its `1 Drake's Fortune`, `2 Among Thieves` and `3 Drake's
+  Deception` subfolders; **Change folder** points it anywhere. Thumbnails are made once and cached
+  as small JPEGs in `%LOCALAPPDATA%\Uncharted Launcher\ui-cache\gallery`, so the tab opens without
+  re-reading full pictures.
+- **Launcher: Display.** Resolution, upscaling and its quality, frame rate limit, display mode,
+  VSync and launcher animations in one glass panel; Left/Right or the arrows change a value through
+  the same handlers the settings pages use, and **All settings** opens Settings -> Display.
+- **Launcher: liquid glass, cheaply.** The strip and the panels are a blurred crop of the screen's
+  own background, cached per artwork, size and brightness: nothing is blurred while the window is
+  idle, and Animations Off skips the blur altogether (flat glass), for weak integrated graphics.
+- **Launcher: Quit in the top right.** The hub's power button asks before closing; Settings -> System
+  still has a Quit row. A running game keeps running (L3 + R3 closes it).
+- **Launcher: controller-first navigation.** D-pad or left stick moves, Cross chooses or toggles,
+  Left/Right adjusts a setting, Circle goes back, Options opens Settings. Every row, preset card and
+  Controls slot shows a focus ring. Settings -> System turns the on-screen button hints and the
+  controller navigation off.
+- **Launcher: Controller only mode.** Settings -> System picks the shell: on is the PlayStation 5
+  hub; off is the classic layout (the game cards, the tab strip and the footer Play button) in the
+  same window, with the same settings pages and config. Switching keeps the page you were on and
+  needs no restart; both layouts work from the controller, and the keyboard still moves and chooses.
+  Config version 11 (10 adds the shell choice; 11 adds the capsules and the Gallery folder).
+- **Launcher: L3 + R3 closes the running game.** Hold both sticks in for two seconds (1, 1.5, 2 or
+  3 s in Settings -> System); a ring fills at the bottom of the window while you hold. The first
+  five seconds after a launch are ignored, so a controller resting on a desk cannot close anything.
+  The game is asked to quit first (`taskkill /T`) and killed only if it is still there two seconds
+  later.
+- **Launcher: the background cross-fades.** Choosing another game dissolves the art you are
+  looking at into the new one, top strip included, in about half a second, instead of sliding two
+  pictures across the screen. Changing the game again mid-fade carries on from the frame on screen,
+  so nothing jumps; the blend runs at 25 frames a second, leaving the carousel beside it its own
+  pace, and Animations Off still switches at once.
+- **Launcher: fullscreen by default**, borderless, with F11 (or Settings -> System) back to the
+  window it remembers. Animations are Auto / Fast / Off: Auto uses fewer frames on integrated
+  graphics, Off draws every transition at once and runs no timer. Backgrounds are pre-scaled into
+  `%LOCALAPPDATA%\Uncharted Launcher\ui-cache` on first start, so a screen change blends two
+  ready-made images rather than resizing one.
+- **Launcher: about 0.5% of a core while it idles.** The controller is read 30 times a second only
+  while one is connected; with none the launcher looks for one four times a second, and the
+  carousel's tiles are resized in memory rather than written to the cache for every window size.
+- The artwork in `launcher/assets/ps5/` is Uncharted key art (Sony / Naughty Dog): see its
+  `NOTICE.md`; it is not covered by the GPL, and the launcher works without it.
+
 ## 26 October 2026 (0.7.0)
 
 - **Uncharted 3 washed out / too bright on GeForce RTX 30 and 40 cards** (#199, #195, #204, #212):

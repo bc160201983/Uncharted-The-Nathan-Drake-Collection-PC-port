@@ -43,6 +43,9 @@ cp launcher/*.py launcher/*.pyw launcher/*.json "$stage/launcher/"
 # The package's version (tools/VERSION; the launcher's updates compare it with the releases).
 cp tools/VERSION "$stage/VERSION"
 cp launcher/assets/uncharted.ico launcher/assets/icon.png "$stage/launcher/assets/"
+# The PS5 shell's artwork (backgrounds, tiles, logos) and its notice.
+mkdir -p "$stage/launcher/assets/ps5"
+cp launcher/assets/ps5/* "$stage/launcher/assets/ps5/"
 # The runtime's optimizations known to break Uncharted (GOW3_TOGGLE_FILE).
 cp tools/defaults/disabled-optimizations.txt "$stage/analysis/uncharted-user/"
 cp tools/README-Windows.txt "$stage/README.txt"

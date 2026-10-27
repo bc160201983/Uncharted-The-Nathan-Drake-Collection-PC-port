@@ -44,6 +44,35 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
 ## Features
 
 **Launcher** (`Uncharted Launcher.exe`)
+- A PlayStation 5-style home screen: a full-screen background and logo per game, and the three
+  games on a carousel along the bottom. It opens here, on the game you played last, and moving
+  between games dissolves one game's art into the next. The wordmark is
+  top left; the **Games**, **Gallery** and **Display** capsules are across the top, with Settings and
+  Quit as the gear and the power button top right.
+- **Gallery:** your photo-mode pictures, in a grid with a filter per game and a full-screen viewer.
+  It reads `Pictures\Uncharted Launcher` (or a folder you choose) and its `1 Drake's Fortune`,
+  `2 Among Thieves` and `3 Drake's Deception` subfolders; anything you drop in appears on the next
+  visit, newest first. Thumbnails are cached, so opening it again is instant.
+- **Display:** resolution, upscaling and its quality, the frame rate limit, the display mode, VSync
+  and the launcher animations in one panel, with **All settings** going to the full page. Left/Right
+  changes a value; the settings pages and the config always agree.
+- **Controller first:** the D-pad or left stick moves, Cross chooses, Circle goes back, Options
+  opens the settings, L1 and R1 switch games (or filter the Gallery). Up from a screen reaches the
+  capsules. **Hold L3 + R3** for two seconds to close a running game: the ring along the bottom
+  fills while you hold, and the first five seconds after a launch are ignored so a controller
+  resting on a desk cannot close anything. Settings -> System turns that shortcut and the on-screen
+  hints off, and sets the hold time (1-3 s).
+- **Controller only mode** (Settings -> System) picks the shell: on is the PlayStation 5 hub; off
+  is the classic layout, with the game cards, the tab strip and the footer Play button, in the same
+  window and with the same settings. It switches without restarting; both layouts work from the
+  controller, and the keyboard still moves and chooses.
+- **Settings** keeps every option below, as a category list on the left and the same rows on the
+  right, all reachable from the controller.
+- The window opens **fullscreen** (F11, or Settings -> System, brings the window back where it was).
+  Animations are Auto / Fast / Off: Auto goes to Fast on integrated graphics, and Off draws every
+  transition at once and runs no timer at all.
+- Light on a laptop: about 0.5% of a core while it sits open. The controller is read 30 times a
+  second only while one is connected.
 - A card per game; settings are kept **per game**.
 - Quality presets:
 
@@ -183,7 +212,7 @@ tag `v0.1.1`; GitHub Actions then builds the package and publishes the release w
 
 | Path | Contents |
 |---|---|
-| `launcher/` | The Uncharted launcher (Tkinter + Pillow). |
+| `launcher/` | The Uncharted launcher (Tkinter + Pillow); `launcher/ps5_ui.py` the PlayStation 5 shell, `launcher/assets/ps5/` its artwork (see its `NOTICE.md`). |
 | `tools/probe_uncharted.py` | Prepares a game executable (patches, render resolution, update) and starts the runtime. |
 | `tools/package_windows.sh` | Builds the Windows package; `tools/windows_starter/` its `.exe`. |
 | `tools/release.sh`, `tools/release-notes/` | Publishes a release (see above). |
