@@ -2142,6 +2142,7 @@ class Launcher:
         self.hub = tk.Frame(self.stage, bg=BG)
         self.hub.pack(fill="both", expand=True)
         self.home = ps5_ui.HomeView(self, self.art, self.animator, self.hub)
+        self.home.frame_hook = self.home_frame
         self.home.set_games(GAMES)
         self.gallery = ps5_ui.GalleryView(self, self.art, self.animator, self.glass, self.hub)
         self.display = ps5_ui.DisplayView(self, self.art, self.animator, self.glass, self.hub)
@@ -2838,6 +2839,14 @@ class Launcher:
             canvas.yview_moveto(max(0.0, (top - 14) / total))
         elif bottom > first + view - 6:
             canvas.yview_moveto(min(1.0, (bottom - view + 14) / total))
+
+    def home_frame(self, image, key):
+        """Every frame of the home screen's background fade goes to the strip as well.
+
+        The strip paints its own slice of that same frame, so the art dissolves as one piece and
+        no line shows where the strip ends."""
+        if self.topbar is not None and self.screen == "home":
+            self.topbar.set_art(key, 1.0, frame=image)
 
     def select_game(self, key, save=True):
         if key not in GAME_KEYS:

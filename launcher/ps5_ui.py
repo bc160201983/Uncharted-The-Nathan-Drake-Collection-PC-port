@@ -47,7 +47,9 @@ class Animator:
     """One Tk timer for every running tween, stopped as soon as nothing is left to animate.
 
     Each tween gets `ease(0..1)` every `interval` ms and is dropped when it finishes, so an idle
-    launcher has no timer running at all."""
+    launcher has no timer running at all. A tween that is expensive per frame (the full-screen
+    background blend) can ask for a slower `interval` of its own: the cheap tweens beside it keep
+    the 16 ms cadence and only that one is sampled less often."""
 
     def __init__(self, root, interval=16):
         self.root = root
@@ -56,7 +58,7 @@ class Animator:
         self.job = None
         self.enabled = True
 
-    def add(self, duration, step, done=None, ease=ease_out_cubic):
+    def add(self, duration, step, done=None, ease=ease_out_cubic, interval=0):
         if not self.enabled or duration <= 0:
             try:
                 step(1.0)
@@ -66,7 +68,8 @@ class Animator:
                 done()
             return
         self.items.append({"start": time.perf_counter(), "duration": duration / 1000.0,
-                           "step": step, "done": done, "ease": ease})
+                           "step": step, "done": done, "ease": ease,
+                           "interval": interval / 1000.0, "next": 0.0})
         self.start()
 
     def start(self):
@@ -78,6 +81,10 @@ class Animator:
         now = time.perf_counter()
         live = []
         for tween in self.items:
+            if now < tween["next"]:
+                live.append(tween)
+                continue
+            tween["next"] = now + tween["interval"]
             k = min(1.0, (now - tween["start"]) / tween["duration"])
             try:
                 tween["step"](tween["ease"](k))
@@ -423,6 +430,10 @@ class TopBar(tk.Canvas):
         self.photos = {}
         self.caps = {}
         self.buttons = {}
+        self.base_item = None
+        self.frame = None
+        self._scrim = None
+        self._scrim_size = (0, 0)
         self.bind("<Configure>", self._on_configure)
         self.bind("<Button-1>", self._click)
         self.bind("<Motion>", self._motion)
@@ -430,11 +441,27 @@ class TopBar(tk.Canvas):
 
     # -- state ----------------------------------------------------------------------------------
 
-    def set_art(self, key, dim=1.0):
-        if (key, dim) == (self.key, self.dim):
+    def set_art(self, key, dim=1.0, frame=None):
+        """`frame` is a whole screen of art the caller is already showing: the strip then paints
+        its own slice of that frame instead of the artwork, so a background fade carries the strip
+        with it and no seam shows at the strip's edge."""
+        if (key, dim) == (self.key, self.dim) and frame is None:
             return
         self.key, self.dim = key, dim
-        self.draw()
+        if frame is not None:
+            self.set_frame(frame)
+        else:
+            self.frame = None
+            self.draw()
+
+    def set_frame(self, image):
+        """Repaints only the strip's background from `image`; the capsules and buttons stay put."""
+        self.frame = image
+        if self.base_item is None:
+            return
+        photo = ImageTk.PhotoImage(self._strip(image))
+        self.photos["base"] = photo
+        self.itemconfig(self.base_item, image=photo)
 
     def set_tab(self, name):
         if name != self.tab:
@@ -469,14 +496,23 @@ class TopBar(tk.Canvas):
         self.size = (event.width, event.height)
         self.after_idle(self.draw)
 
-    def _base(self, width, height):
-        """The strip of the screen's own background, under a dark gradient for legibility."""
+    def _art(self, width, height):
+        """The artwork for the strip's slice, at the screen's size so the pixels line up with the
+        screen behind it."""
         key = self.key
-        image = None
-        if key is not None:
-            full = (width, max(height, self.parent.winfo_height()))
-            image = self.glass.art.dim(key, full, self.dim) if self.dim < 1 \
-                else self.glass.art.background(key, full)
+        if key is None:
+            return None
+        full = (width, max(height, self.parent.winfo_height()))
+        if self.frame is not None and self.frame.size == full:
+            return self.frame
+        return self.glass.art.dim(key, full, self.dim) if self.dim < 1 \
+            else self.glass.art.background(key, full)
+
+    def _strip(self, image):
+        """`image` cropped to the strip, under a dark gradient for legibility."""
+        width, height = self.winfo_width(), self.winfo_height()
+        if width <= 1 or height <= 1:
+            return None
         if image is None:
             image = Image.new("RGB", (width, height), BG)
         else:
@@ -485,12 +521,19 @@ class TopBar(tk.Canvas):
                 padded = Image.new("RGB", (width, height), BG)
                 padded.paste(image, (0, 0))
                 image = padded
-        scrim = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(scrim)
-        for y in range(height):
-            alpha = int(148 * (1 - y / max(1, height - 1)) ** 1.4)
-            draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
+        scrim = self._scrim_for(width, height)
         return Image.alpha_composite(image.convert("RGBA"), scrim).convert("RGB")
+
+    def _scrim_for(self, width, height):
+        """The gradient is the same for every frame of a fade: built once per strip size."""
+        if self._scrim is None or self._scrim_size != (width, height):
+            scrim = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(scrim)
+            for y in range(height):
+                alpha = int(148 * (1 - y / max(1, height - 1)) ** 1.4)
+                draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
+            self._scrim, self._scrim_size = scrim, (width, height)
+        return self._scrim
 
     def _image(self, surface, box, tag):
         photo = ImageTk.PhotoImage(surface)
@@ -501,14 +544,15 @@ class TopBar(tk.Canvas):
         self.delete("all")
         self.photos = {}
         self.caps, self.buttons = {}, {}
+        self.base_item = None
         width, height = self.winfo_width(), self.winfo_height()
         if width <= 1 or height <= 1:
             return
         s = self.scale
         full = (width, max(height, self.parent.winfo_height()))
-        photo = ImageTk.PhotoImage(self._base(width, height))
+        photo = ImageTk.PhotoImage(self._strip(self._art(width, height)))
         self.photos["base"] = photo
-        self.create_image(0, 0, image=photo, anchor="nw")
+        self.base_item = self.create_image(0, 0, image=photo, anchor="nw")
 
         pad = int(34 * s)
         word = self.create_text(pad, int(29 * s), text=spaced("UNCHARTED"), anchor="w",
@@ -618,8 +662,14 @@ class HomeView(tk.Frame):
         self.photos = {}
         self.tiles = {}
         self.geom = {}
+        self.anim_geom = {}
         self.metrics = None
         self.bg_key = None
+        self.bg_frame = None
+        self.bg_blend = None
+        self.fade = 0
+        self.motion = 0
+        self.frame_hook = None
         self.hover = None
         self._pending = None
         self.canvas.bind("<Configure>", self._on_configure)
@@ -634,6 +684,7 @@ class HomeView(tk.Frame):
         self.photos.clear()
         self.tiles.clear()
         self.geom.clear()
+        self.anim_geom.clear()
         self.bg_key = None
         self.key = self.key or self.games[0]["key"]
         if self.size != (0, 0):
@@ -714,6 +765,7 @@ class HomeView(tk.Frame):
         canvas.delete("all")
         self.tiles.clear()
         self.geom.clear()
+        self.anim_geom.clear()
         self.photos.clear()
         width, height = self.size
         s = self.host.s
@@ -721,9 +773,11 @@ class HomeView(tk.Frame):
         self.metrics = metrics
 
         self.bg_items = [canvas.create_image(0, 0, anchor="nw", tags="bg"),
-                         canvas.create_image(width, 0, anchor="nw", tags="bg")]
-        self.bg_index = 0
+                         canvas.create_image(0, 0, anchor="nw", tags="bg")]
+        self.bg_blend = None
+        self.bg_frame = None
         self.bg_key = None
+        self.fade += 1  # any fade still running belongs to the old canvas
         self._set_background(self.key or self.games[0]["key"], animate=False)
 
         self.logo_height = max(int(70 * s), min(int(height * 0.125), int(146 * s)))
@@ -795,35 +849,61 @@ class HomeView(tk.Frame):
             x += width + int(12 * s)
 
     def _set_background(self, key, animate=True):
-        width, _ = self.size
-        image = self.art.background(key, self.size)
-        photo = ImageTk.PhotoImage(image if image is not None else Image.new("RGB", self.size, BG))
+        """The art behind the hub, cross-dissolving from whatever is on screen.
+
+        A slide of two whole images reads as a cut when the tiles move with it; a dissolve keeps
+        the change calm and hides that the art is a different photograph. One Tk photo is reused for
+        every frame (`PhotoImage.paste`), so no image is handed to Tk per frame, and the strip is
+        handed the same frame so the art runs edge to edge through it."""
+        size = self.size
+        image = self.art.background(key, size)
+        if image is None:
+            image = Image.new("RGB", size, BG)
+        photo = ImageTk.PhotoImage(image)
         self.photos[f"bg-{key}"] = photo
-        if animate and self.bg_key is not None:
-            outgoing = self.bg_items[self.bg_index]
-            incoming = self.bg_items[1 - self.bg_index]
-            self.canvas.itemconfig(incoming, image=photo)
-            self.canvas.coords(outgoing, 0, 0)
-            self.canvas.coords(incoming, width, 0)
-            self.canvas.tag_lower("bg")
+        base, top = self.bg_items
+        old = self.bg_frame
+        self.fade += 1
+        fade = self.fade
 
-            def step(k):
-                self.canvas.coords(outgoing, -width * k, 0)
-                self.canvas.coords(incoming, width - width * k, 0)
+        if not animate or old is None or old.size != size:
+            self.bg_frame = image
+            self.canvas.itemconfig(base, image=photo)
+            self.canvas.coords(base, 0, 0)
+            self.canvas.itemconfig(top, image="")
+            self.bg_key = key
+            return
 
-            def done():
-                self.canvas.coords(incoming, 0, 0)
-                self.canvas.coords(outgoing, width, 0)
-                self.canvas.itemconfig(outgoing, image="")
-                self.bg_index = 1 - self.bg_index
+        if self.bg_blend is None or self.bg_blend.width() != size[0] \
+                or self.bg_blend.height() != size[1]:
+            self.bg_blend = ImageTk.PhotoImage(old)
+        blend = self.bg_blend
+        blend.paste(old)
+        self.canvas.itemconfig(top, image=blend)
+        self.canvas.coords(top, 0, 0)
+        self.canvas.tag_lower("bg")
+        self.canvas.tag_raise(top, base)
 
-            self.anim.add(340, step, done, ease_in_out)
-        else:
-            current = self.bg_items[self.bg_index]
-            other = self.bg_items[1 - self.bg_index]
-            self.canvas.itemconfig(current, image=photo)
-            self.canvas.coords(current, 0, 0)
-            self.canvas.coords(other, width, 0)
+        def step(k):
+            if fade != self.fade:
+                return
+            frame = Image.blend(old, image, k)
+            self.bg_frame = frame
+            blend.paste(frame)
+            if self.frame_hook is not None:
+                self.frame_hook(frame, key)
+
+        def done():
+            if fade != self.fade:
+                return
+            self.bg_frame = image
+            self.canvas.itemconfig(base, image=photo)
+            self.canvas.coords(base, 0, 0)
+            self.canvas.itemconfig(top, image="")
+            if self.frame_hook is not None:
+                self.frame_hook(image, key)
+
+        self.anim.add(460, step, done, ease_in_out, interval=40)
         self.bg_key = key
 
     def _draw_selection(self, animate=True):
@@ -840,15 +920,32 @@ class HomeView(tk.Frame):
             photo = ImageTk.PhotoImage(logo)
             self.photos["logo"] = photo
             self.canvas.itemconfig(self.logo_item, image=photo)
-        self.canvas.coords(self.logo_item, *self.logo_pos)
         self.canvas.itemconfig(self.subtitle_item, text=f"{game['name']}  ·  {game.get('year', '')}".strip(" ·"))
 
+        self.motion += 1
+        motion = self.motion
         if animate:
-            for item, (x, y) in ((self.logo_item, self.logo_pos), (self.subtitle_item, self.subtitle_pos)):
-                self.anim.add(280, lambda k, i=item, px=x, py=y: self.canvas.coords(i, px, py + (1 - k) * 18 * s))
-            self._set_background(self.key, animate=True)
+            # The logo and the caption rise into place from wherever they are: holding a direction
+            # repeats every 110 ms, and starting each move from the last frame stops them from
+            # dropping back down while you flick through the games.
+            for item, (x, y) in ((self.logo_item, self.logo_pos),
+                                 (self.subtitle_item, self.subtitle_pos)):
+                current = self.canvas.coords(item)[1]
+                start = min(y + 18 * s, max(y, current)) if current else y
+                self.canvas.coords(item, x, start)
 
-        old = dict(self.geom)
+                def rise(k, i=item, px=x, py=y, sy=start):
+                    if motion != self.motion:
+                        return
+                    self.canvas.coords(i, px, py + (sy - py) * (1 - k))
+
+                self.anim.add(280, rise)
+            self._set_background(self.key, animate=True)
+        else:
+            self.canvas.coords(self.logo_item, *self.logo_pos)
+            self.canvas.coords(self.subtitle_item, *self.subtitle_pos)
+
+        old = dict(self.anim_geom)
         self.geom = {}
         for i, key in enumerate(keys):
             x, width = self._slot(metrics, i, index)
@@ -863,9 +960,11 @@ class HomeView(tk.Frame):
         self._draw_status()
 
     def _animate_tiles(self, old):
-        s = self.host.s
+        motion = self.motion
 
         def step(k):
+            if motion != self.motion:
+                return
             for key, (nx, nw) in self.geom.items():
                 ox, ow = old.get(key, (nx, nw))
                 self._apply_tile(key, ox + (nx - ox) * k, ow + (nw - ow) * k)
@@ -890,6 +989,7 @@ class HomeView(tk.Frame):
         s = self.host.s
         items = self.tiles[key]
         height = width * 9 / 16
+        self.anim_geom[key] = (x, width)
         y = self.metrics["bottom"] - height
         photo = self._tile_photo(key, width)
         if photo is not None:

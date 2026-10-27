@@ -45,7 +45,8 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
 
 **Launcher** (`Uncharted Launcher.exe`)
 - A PlayStation 5-style home screen: a full-screen background and logo per game, and the three
-  games on a carousel along the bottom. It opens here, on the game you played last. The wordmark is
+  games on a carousel along the bottom. It opens here, on the game you played last, and moving
+  between games dissolves one game's art into the next. The wordmark is
   top left; the **Games**, **Gallery** and **Display** capsules are across the top, with Settings and
   Quit as the gear and the power button top right.
 - **Gallery:** your photo-mode pictures, in a grid with a filter per game and a full-screen viewer.

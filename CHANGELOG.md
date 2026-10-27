@@ -41,11 +41,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   five seconds after a launch are ignored, so a controller resting on a desk cannot close anything.
   The game is asked to quit first (`taskkill /T`) and killed only if it is still there two seconds
   later.
+- **Launcher: the background cross-fades.** Choosing another game dissolves the art you are
+  looking at into the new one, top strip included, in about half a second, instead of sliding two
+  pictures across the screen. Changing the game again mid-fade carries on from the frame on screen,
+  so nothing jumps; the blend runs at 25 frames a second, leaving the carousel beside it its own
+  pace, and Animations Off still switches at once.
 - **Launcher: fullscreen by default**, borderless, with F11 (or Settings -> System) back to the
   window it remembers. Animations are Auto / Fast / Off: Auto uses fewer frames on integrated
   graphics, Off draws every transition at once and runs no timer. Backgrounds are pre-scaled into
-  `%LOCALAPPDATA%\Uncharted Launcher\ui-cache` on first start, so a screen change is a canvas move,
-  not an image resize.
+  `%LOCALAPPDATA%\Uncharted Launcher\ui-cache` on first start, so a screen change blends two
+  ready-made images rather than resizing one.
 - **Launcher: about 0.5% of a core while it idles.** The controller is read 30 times a second only
   while one is connected; with none the launcher looks for one four times a second, and the
   carousel's tiles are resized in memory rather than written to the cache for every window size.
