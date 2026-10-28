@@ -1,4 +1,5 @@
 // gow3: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <atomic>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -70,6 +71,10 @@ const Placement& WindowPlacement() {
     }();
     return placement;
 }
+// gow3 24 Oct 2026: the game window is the foreground window (Windows' own answer, set each
+// event poll). The gamepad is read only then (runtime_pad.c, gow3gpu_window_foreground).
+std::atomic<bool> window_foreground{true};
+
 void SendToBack(SDL_Window* window) {
 #ifdef _WIN32
     if (void* hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window),
@@ -91,11 +96,13 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
         SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     }
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
-    // gow3 25 Oct 2026: with GOW3_PAD_INDEX (local co-op: two windows, one controller each) the
-    // controller also works while the other window has the focus.
-    if (const char* pad = std::getenv("GOW3_PAD_INDEX"); pad && std::atoi(pad) > 0) {
-        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-    }
+    // gow3 24 Oct 2026 (user: the controller stopped responding until a key was pressed): SDL
+    // drops gamepad events while it thinks no window has the keyboard focus, and its idea of
+    // that focus can be lost while the window stays in front (a key press restores it). The
+    // events always come now; whether the game is in front is decided from Windows instead
+    // (window_foreground; with GOW3_PAD_INDEX, local co-op, each window's own controller works
+    // while the other window is in front).
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
@@ -246,6 +253,39 @@ void WindowSDL::UpdateTextTitle() {
 }
 
 bool WindowSDL::PollEvents() {
+#ifdef _WIN32
+    {
+        void* hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window),
+                                            SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+        // gow3 27 Oct 2026 (user: exclusive fullscreen, the keyboard works, the controller
+        // doesn't): Windows' foreground window can be another one (an owned or overlay window)
+        // while the game has the input. The keyboard focus counts too.
+        const HWND foreground = GetForegroundWindow();
+        const bool windows_front = !hwnd || foreground == static_cast<HWND>(hwnd) ||
+                                   GetAncestor(foreground, GA_ROOTOWNER) == static_cast<HWND>(hwnd);
+        const bool front = windows_front || SDL_GetKeyboardFocus() == window;
+        window_foreground = front;
+        static bool other_reported = false;
+        if (front && !windows_front && !other_reported) {
+            char name[128] = {};
+            GetClassNameA(foreground, name, sizeof(name));
+            std::printf("Input: another window is in front (class '%s') while the game has the "
+                        "keyboard focus; the controller works\n", name);
+            std::fflush(stdout);
+        }
+        other_reported = other_reported || (front && !windows_front);
+        // Diagnosis: in front, but SDL without the keyboard focus (the state that used to stop
+        // the controller); once per occurrence.
+        static bool reported = false;
+        const bool lost = front && SDL_GetKeyboardFocus() != window;
+        if (lost && !reported) {
+            std::printf("Input: the window is in front but SDL has no keyboard focus; the "
+                        "controller keeps working\n");
+            std::fflush(stdout);
+        }
+        reported = lost;
+    }
+#endif
     {
         std::scoped_lock lock{text_mutex};
         if (text_requested) { // SDL text input must be toggled from the window thread
@@ -320,3 +360,7 @@ bool WindowSDL::PollEvents() {
 }
 
 } // namespace Frontend
+
+extern "C" int gow3gpu_window_foreground(void) {
+    return Frontend::window_foreground.load(std::memory_order_relaxed) ? 1 : 0;
+}
