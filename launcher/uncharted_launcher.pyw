@@ -290,9 +290,9 @@ CONTROL_GROUPS = (
                   ("rs_left", "Look left"), ("rs_right", "Look right"))),
     ("WEAPONS (D-PAD)", (("left", "Left"), ("right", "Right"), ("up", "Up"), ("down", "Down"))),
     ("ACTIONS", (("cross", "Jump, climb"), ("circle", "Cover, roll, drop"),
-                 ("square", "Melee"), ("triangle", "Reload, pick up"),
-                 ("l2", "Aim"), ("r2", "Fire"), ("l1", "Grenade aim"),
-                 ("r1", "Grenade throw"), ("l3", "Left stick press"), ("r3", "Right stick press"),
+                 ("square", "Melee"), ("triangle", "Interact, pick up"),
+                 ("l2", "Aim"), ("r2", "Fire"), ("l1", "Grenade (hold, release to throw)"),
+                 ("r1", "Reload"), ("l3", "Left stick press"), ("r3", "Right stick press"),
                  ("options", "Pause menu"), ("touchpad_left", "Touch left"),
                  ("touchpad_right", "Touch right"))),
 )
@@ -793,6 +793,22 @@ def has_update_102_code(folder):
 
 def has_update_100_code(folder):
     return _executable_codes(folder)[1]
+
+
+def dark_title_bar(window):
+    """The window's title bar in Windows' dark style, to match the launcher (GitHub #215).
+    Windows 10 20H1+ and 11 (attribute 20; 19 on older Windows 10 builds); a no-op elsewhere."""
+    if os.name != "nt" or WINE:
+        return
+    try:
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
+        value = ctypes.c_int(1)
+        for attribute in (20, 19):
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value),
+                                                          ctypes.sizeof(value)) == 0:
+                break
+    except (AttributeError, OSError):
+        pass
 
 
 def desktop_folder():
@@ -1558,6 +1574,7 @@ class Launcher:
             pass
         self.build()
         root.update_idletasks()
+        dark_title_bar(root)
         root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
         self.fit_to_screen()
         self.restore_window_position()
@@ -2458,6 +2475,13 @@ class Launcher:
             button = controls.get(action) if action in PAD_DEFAULTS else PAD_FIXED.get(action)
             if not button:
                 cell.config(image="", text="—", fg=TEXT, bg=PANEL, width=14, height=1)
+                continue
+            # GitHub #214: a PlayStation controller's touchpad click is both touchpad actions (the
+            # finger's side picks one); Share / L1+Share are the stand-ins for other controllers.
+            if style == "playstation" and button == PAD_DEFAULTS.get(action, PAD_FIXED.get(action)) \
+                    and action in ("touchpad_left", "touchpad_right"):
+                side = "left" if action == "touchpad_left" else "right"
+                cell.config(image="", text=f"Touchpad {side}", fg=TEXT, bg=PANEL, width=14, height=1)
                 continue
             key = (button, style, height)
             if key not in self.pad_images:

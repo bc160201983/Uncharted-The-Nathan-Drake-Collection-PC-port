@@ -1764,3 +1764,24 @@ folder, the layout of #43/#29/#58/#73).
   chime, menu Trophies tab; label 1/2/3 = trophy01/02/03.trp, 54/53/59 trophies; names are in
   encrypted ESFM and the dump has no npbind.dat, so not shown). Tests: services-test (trophy
   logic), GOW3_TEST_TROPHY screenshots in all three games, audio dumps.
+
+## 28 October 2026 (night): open issues pass (analysis/issues-1028/MORNING.md, TRIAGE.md)
+
+- Treasure model invisible with upscaling (#260 #225 #209 #136): drawn into the display buffer with
+  its own render-size depth; colour redirected to the output-size host display, depth not -> "pass
+  not redirected" -> drawn into the hidden guest buffer. TemporalUpscaler::RedirectDepth(...,
+  color_redirected) now adopts such a depth (UI phase, or display_redirect after the composite):
+  EnsureUiResources + PrepareUiDepth (clear + nearest blit) at first use per frame
+  (ui_display_depth, in RedirectState bit 3). GOW3_UI_DEPTH_ADOPT=0 = off. Verified U3 Treasures
+  1280x720 -> 1080p FSR 3: old exe empty, new exe shows the model.
+- AMD device lost with FSR/TAA (#273 #272): reproduced on the desktop AMD iGPU (RDNA2) via
+  VK_LOADER_DRIVERS_DISABLE=*nv-vk64* (SELECT=*amd* also matches NVIDIA's "amd64" path): ReadInvalid
+  0x3ec00000 on the first upscaled frame (2/2), none with GOW3_OBJECT_MOTION=0. Root cause: the motion
+  VS built its buffer-device addresses as 64-bit sums (constant base + index * stride); AMD's
+  compiler kept the low 32 bits (params at 0x3'3ec00000 read at 0x3ec00000). EmitVertexMotion now
+  adds the 32-bit offset to the low half with OpIAddCarry and bitcasts U32[2] to U64; the first
+  "off on 0x1002" workaround is removed. Verified AMD iGPU + RTX 5080 (U1 FSR 3, 220 s each,
+  7200/7200 draws stored and matched).
+- Starter (tools/windows_starter/starter.c) waits for the launcher (#267 Steam play time);
+  launcher dark title bar (#215), PlayStation touchpad labels (#214).
+- Deployed c151bcd0 (old = out/before-issues-1028.exe); package built.

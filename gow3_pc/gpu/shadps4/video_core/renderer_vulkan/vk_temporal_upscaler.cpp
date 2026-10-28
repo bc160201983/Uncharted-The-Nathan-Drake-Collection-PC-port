@@ -378,6 +378,7 @@ bool TemporalUpscaler::OnFrameStart() {
     // HUD and menu draws of the frame just upscaled still go to its host display buffer.
     display_redirect = ui_phase || composite_done;
     composite_done = false;
+    ui_display_depth = false;
     tonemap_pending = false;
     ui_phase = false;
     ui_read_barrier = false;
@@ -2179,8 +2180,47 @@ bool TemporalUpscaler::OnComposite(u64 ps_hash, VideoCore::ImageId color) {
     return true;
 }
 
-bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target) {
-    if (!ui_phase || depth != ui_depth) {
+bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target,
+                                     bool color_redirected) {
+    // gow3 28 Oct 2026 (#260 #225 #209): the treasure model (pickup popup, Treasures screen)
+    // is drawn into the display buffer with a render-size depth target of its own. The color
+    // went to the output-size host display, the depth did not, so the pass fell back to the
+    // guest display buffer, which is not shown: the model was invisible with upscaling. Such a
+    // depth target now gets the output-size UI depth too, filled from it (clear + blit) at its
+    // first use in a frame. GOW3_UI_DEPTH_ADOPT=0: off.
+    static const bool adopt_on = [] {
+        const char* env = std::getenv("GOW3_UI_DEPTH_ADOPT");
+        return !(env && env[0] == '0');
+    }();
+    // In the UI phase a new depth target is adopted; after the composite (the HUD of the frame
+    // just shown, ui_phase off) the first depth target of the frame is filled again.
+    const bool adopt = ui_phase ? depth != ui_depth : (depth != ui_depth || !ui_display_depth);
+    if (adopt_on && color_redirected && depth && (ui_phase || display_redirect) && ui_image &&
+        ui_width && adopt) {
+        const auto& image = texture_cache.GetImage(depth);
+        const bool depth_format = image.info.pixel_format == vk::Format::eD32SfloatS8Uint ||
+                                  image.info.pixel_format == vk::Format::eD32Sfloat ||
+                                  image.info.pixel_format == vk::Format::eD16Unorm;
+        if (depth_format && image.info.resources.levels == 1 &&
+            image.info.size.width <= ui_width && image.info.size.height <= ui_height &&
+            image.info.size.width * 2 >= render_width && image.info.size.height * 2 >= render_height) {
+            static u32 logged = 0;
+            if (logged < 4) {
+                ++logged;
+                std::printf("Upscaler: UI depth %#llx %ux%u follows the output size (%ux%u)\n",
+                            (unsigned long long)image.info.guest_address, image.info.size.width,
+                            image.info.size.height, ui_width, ui_height);
+            }
+            EnsureUiResources(ui_width, ui_height, ui_format, image.info.pixel_format);
+            PrepareUiDepth(depth);
+            ui_depth = depth;
+            if (!ui_phase) {
+                ui_display_depth = true;
+            }
+        }
+    }
+    if (!(ui_phase || (ui_display_depth && display_redirect && color_redirected)) ||
+        depth != ui_depth) {
         return false;
     }
     target = {*ui_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height, true};

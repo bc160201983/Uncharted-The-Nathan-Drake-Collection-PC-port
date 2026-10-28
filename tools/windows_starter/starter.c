@@ -27,6 +27,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
         return 1;
     }
     CloseHandle(process.hThread);
+    /* 28 Oct 2026 (#267): stay until the launcher closes. Steam counts a non-Steam game's play
+     * time while the program it started runs; a starter that ended at once left the per-game
+     * entries (--play: the launcher lives as long as the game) at zero. */
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(process.hProcess, &code);
     CloseHandle(process.hProcess);
-    return 0;
+    return (int)code;
 }

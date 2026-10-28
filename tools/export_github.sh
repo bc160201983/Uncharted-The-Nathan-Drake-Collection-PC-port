@@ -40,12 +40,13 @@ git -C gow3_pc ls-files -co --exclude-standard | while read -r path; do
     [[ -f gow3_pc/$path ]] && copy "gow3_pc/$path"
 done
 find tools launcher -type f ! -path '*/__pycache__/*' ! -name 'PkgTool-*.zip' \
-    ! -name '*.pyc' | while read -r path; do copy "$path"; done
+    ! -name '*.pyc' ! -path 'tools/uc2mp_net_paks/*' ! -name 'uc2mp_objectives.json' | while read -r path; do copy "$path"; done  # converted PS3 paks: game data
 copy Start-Uncharted.cmd
 copy analysis/STATUS.md
 copy analysis/PLAN.md
 for doc in analysis/MULTIPLAYER-*.md; do copy "$doc"; done   # multiplayer notes (PR #231 by Sparks)
-find u3mp -type f ! -path '*/__pycache__/*' | while read -r path; do copy "$path"; done   # U3 multiplayer research (PR #244 by fidalgojoao)
+find u3mp -type f ! -path '*/__pycache__/*' ! -path 'u3mp/work/*' ! -path 'u3mp/builds/*' \
+    ! -path 'u3mp/user/*' ! -path 'u3mp/dctools/*' | while read -r path; do copy "$path"; done   # U3 multiplayer research (PR #244 by fidalgojoao)
 cp -r tools/github/. "$dest/"
 cp -r tools/github-overlay/. "$dest/"
 
@@ -69,6 +70,25 @@ if [[ -n $forbidden ]]; then
 fi
 
 cd "$dest"
+# Unreleased multiplayer work stays out of the public repo: multiplayer files keep the version
+# already published (new ones stay out); shared files that also carry multiplayer code are listed
+# for a manual check before pushing.
+mp_pattern='(^|/)(MULTIPLAYER-[^/]*|runtime_coop[^/]*|runtime_net\.c|runtime_uc2mp[^/]*|uc2mp_[^/]*|test_uc2mp[^/]*|net_lan\.py|net_overlay\.py|runtime_env_utf8\.h)$|^u3mp/'
+git ls-files -co --exclude-standard | grep -E "$mp_pattern" | while read -r path; do
+    if git cat-file -e "HEAD:$path" 2>/dev/null; then
+        git checkout -q HEAD -- "$path"
+    else
+        rm -f -- "$path"
+    fi
+done
+mixed=$(git diff --name-only HEAD -- tools/probe_uncharted.py tools/package_windows.sh gow3_pc/src/probe.c \
+    gow3_pc/src/runtime.h gow3_pc/src/runtime_redzone.c gow3_pc/src/runtime_pad.c gow3_pc/gpu/CMakeLists.txt \
+    gow3_pc/gpu/gow3gpu.h gow3_pc/gpu/shim launcher 'gow3_pc/gpu/shadps4/video_core/renderer_vulkan/vk_camera_motion.cpp' \
+    'gow3_pc/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp' 2>/dev/null)
+if [[ -n $mixed ]]; then
+    echo "Check these for multiplayer code before pushing (keep campaign changes only):" >&2
+    echo "$mixed" >&2
+fi
 git add -A
 while read -r path; do
     sha=$(git -C "$src/gow3_pc/$path" rev-parse HEAD)

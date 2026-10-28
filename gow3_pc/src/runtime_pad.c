@@ -5,7 +5,7 @@
  * apply_button_map; the launcher's Controls tab writes them):
  *   WASD left stick, mouse (or the arrow keys) right stick, right mouse L2 (aim), left mouse
  *   R2 (fire), Space Cross (jump), Left Ctrl Circle (cover, roll), F Square (melee),
- *   R Triangle (reload, pick up), Q / mouse X1 L1, E / mouse X2 R1, Left Shift L3,
+ *   R Triangle (interact, pick up), Q / mouse X1 L1 (grenade), E / mouse X2 R1 (reload), Left Shift L3,
  *   V / middle mouse R3, Escape or Enter Options, Tab left touchpad, Backspace right touchpad,
  *   1 2 3 4 d-pad left right up down, mouse wheel d-pad right (up) and left (down).
  * GOW3_KEYBOARD=0 turns the keyboard off. The controls (maps, mouse on, its sensitivity and

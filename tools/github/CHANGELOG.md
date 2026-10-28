@@ -4,6 +4,24 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 28 October 2026 (0.7.1)
+
+- **AMD Radeon: crash with upscaling or TAA** (#273, #272): the character motion-vector vertex
+  shader built its buffer addresses as 64-bit sums (constant base + index * stride); AMD's shader
+  compiler kept only the low 32 bits, so the parameter buffer at 0x3'3ec00000 was read at
+  0x3ec00000 and the device was lost on the first upscaled frame. The sums are now done in 32-bit
+  halves with a carry (emit_spirv_special.cpp). Verified on an AMD RDNA2 iGPU and an RTX 5080
+  (Uncharted 1, FSR 3, 220 s each, every stored motion draw matched).
+- **Treasures with upscaling** (#260, #225, #209, #136): the treasure model (pickup popup and the
+  Treasures screen) is drawn with a depth buffer of its own at the render size; the upscaler sent
+  its colour to the output-size picture but not that depth buffer, so the pass fell back to the
+  game's own buffer, which is never shown. Such a depth buffer now gets an output-size copy too
+  (vk_temporal_upscaler.cpp; GOW3_UI_DEPTH_ADOPT=0 turns it off).
+- **Save mounts**: the mount table holds 32 entries (was 16, with 5 fixed), and a save mount now
+  fails when its guest path can't be mapped instead of reporting success.
+- Launcher: Steam play time for the per-game entries (the starter waits for the launcher, #267);
+  dark title bar (#215); PlayStation touchpad on the Controls page (#214); control labels (#256).
+
 ## 26 October 2026 (0.7.0)
 
 - **Uncharted 3 washed out / too bright on GeForce RTX 30 and 40 cards** (#199, #195, #204, #212):
