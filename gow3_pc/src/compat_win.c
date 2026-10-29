@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "compat_win.h"
 
@@ -108,10 +109,99 @@ int compat_random(void *buffer, size_t size) {
     return 0;
 }
 
+/* gow3 28 Oct 2026 (threads work, analysis/optimization-1028/THREADS.md): the process never asked
+ * for a timer resolution, so every timed wait outside compat_sleep_ns (condition variables with a
+ * timeout, std::this_thread::sleep_for, WaitForSingleObject(ms), the guest's timed cond/sema/equeue
+ * waits) rounded up to Windows' default 15.6 ms tick. On 4 cores the game's frame then took
+ * 9-10 ms, 16 ms or 31 ms (one or two ticks lost) while the GPU thread waited for it.
+ *   GOW3_TIMER_RES: 1 ms tick (timeBeginPeriod), DEFAULT ON since 29 Oct (A/B all 3 games x 4 cores /
+ *   Deck sim / full CPU: +9..+22% FPS; 15-minute soaks clean); GOW3_TIMER_RES=0 keeps 15.6 ms.
+ *   The process opts out of power throttling by DEFAULT (29 Oct, with the tick); GOW3_POWER_THROTTLE=1
+ *   keeps Windows' throttling (opting out = no EcoQoS
+ *   on hybrid CPUs/laptops, and Windows 11 keeps the 1 ms tick while the window is hidden). */
+#include <mmsystem.h>
+static int env_switch(const char *name, int fallback) {
+    const char *v = getenv(name);
+    return v && *v ? strcmp(v, "0") != 0 : fallback;
+}
+void runtime_host_scheduling_init(void) {
+    if (env_switch("GOW3_TIMER_RES", 1)) {
+        MMRESULT r = timeBeginPeriod(1);
+        printf("Host scheduling: 1 ms timer resolution%s (GOW3_TIMER_RES=0 keeps 15.6 ms)\n",
+               r == TIMERR_NOERROR ? "" : " REFUSED");
+    }
+    if (!env_switch("GOW3_POWER_THROTTLE", 0)) {
+        PROCESS_POWER_THROTTLING_STATE state = {0};
+        state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED |
+                            PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        state.StateMask = 0; /* both controlled, both off: full speed, timer request honoured */
+        BOOL ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof state);
+        printf("Host scheduling: power throttling off%s (GOW3_POWER_THROTTLE=1 keeps it)\n",
+               ok ? "" : " - REFUSED");
+    }
+}
+
+/* gow3 28 Oct 2026 (threads work): a high-resolution waitable timer wakes ~0.5 ms late on this
+ * Windows 11 (measured: 1, 10 and 100 us -> 517 us, 1000 us -> 1.5 ms). The engines call
+ * sceKernelUsleep(1) at ~330 sites in Uncharted 2 alone (back-off in spin waits, ~µs on the PS4)
+ * and usleep(1000) while polling job counters: each cost half a millisecond or more of a
+ * frame. GOW3_PRECISE_SLEEP=1 (DEFAULT OFF until proven): the timer sleeps the part
+ * longer than GOW3_SLEEP_SLACK_US (default 600) and the rest yields the core in a loop
+ * (SwitchToThread runs any ready thread first; pause when none). GOW3_SLEEP_STATS=1 prints the
+ * guest sleeps every 5 s. */
+static LONGLONG qpc_now(void) { LARGE_INTEGER c; QueryPerformanceCounter(&c); return c.QuadPart; }
+static LONGLONG qpc_per_us(void) {
+    static LONGLONG f;
+    if (!f) { LARGE_INTEGER q; QueryPerformanceFrequency(&q); f = q.QuadPart / 1000000; if (!f) f = 1; }
+    return f;
+}
+static void sleep_stats(uint64_t ns, LONGLONG took) {
+    static int on = -1;
+    if (on < 0) on = env_switch("GOW3_SLEEP_STATS", 0);
+    if (!on) return;
+    static volatile LONG64 count[3], spent_us, window_start;
+    InterlockedIncrement64(&count[ns <= 100000 ? 0 : ns <= 2000000 ? 1 : 2]);
+    InterlockedAdd64(&spent_us, took / qpc_per_us());
+    LONGLONG now = qpc_now(), start = window_start;
+    if (!start) { InterlockedCompareExchange64(&window_start, now, 0); return; }
+    if (now - start >= 5000000 * qpc_per_us() &&
+        InterlockedCompareExchange64(&window_start, now, start) == start) {
+        printf("Guest sleeps (5 s): %lld <=100 us, %lld <=2 ms, %lld longer; %.1f ms asleep in all\n",
+               (long long)InterlockedExchange64(&count[0], 0), (long long)InterlockedExchange64(&count[1], 0),
+               (long long)InterlockedExchange64(&count[2], 0), InterlockedExchange64(&spent_us, 0) / 1000.0);
+    }
+}
+
 /* One high-resolution timer per thread (Windows 10 1803+); a plain waitable timer before. */
 static __thread HANDLE sleep_timer;
+static void timer_sleep_ns(uint64_t ns);
 void compat_sleep_ns(uint64_t ns) {
     if (!ns) { SwitchToThread(); return; }
+    timer_sleep_ns(ns);
+}
+/* The guest's usleep/nanosleep (runtime_kernel.c); host threads keep compat_sleep_ns. */
+void compat_guest_sleep_ns(uint64_t ns) {
+    if (!ns) { SwitchToThread(); return; }
+    static int precise = -1, slack_us = 600;
+    if (precise < 0) {
+        const char *s = getenv("GOW3_SLEEP_SLACK_US");
+        if (s && *s) slack_us = atoi(s);
+        precise = env_switch("GOW3_PRECISE_SLEEP", 0);
+    }
+    LONGLONG start = qpc_now();
+    if (precise) {
+        const LONGLONG deadline = start + (LONGLONG)(ns / 1000) * qpc_per_us() + (LONGLONG)(ns % 1000) * qpc_per_us() / 1000;
+        if (ns > (uint64_t)slack_us * 1000) timer_sleep_ns(ns - (uint64_t)slack_us * 1000);
+        while (qpc_now() < deadline) {
+            if (!SwitchToThread()) __builtin_ia32_pause();
+        }
+    } else {
+        timer_sleep_ns(ns);
+    }
+    sleep_stats(ns, qpc_now() - start);
+}
+static void timer_sleep_ns(uint64_t ns) {
     if (!sleep_timer) {
         sleep_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         if (!sleep_timer) sleep_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);

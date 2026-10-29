@@ -66,6 +66,11 @@ int compat_random(void *buffer, size_t size);
 /* Sleeps with sub-millisecond precision (high-resolution waitable timer; winpthreads'
  * nanosleep rounds up to the 15.6 ms scheduler tick). */
 void compat_sleep_ns(uint64_t ns);
+/* The guest's sleeps: as precise as asked (timer for the bulk, yielding loop for the rest). */
+void compat_guest_sleep_ns(uint64_t ns);
+/* Process-wide host scheduling at start: timer resolution, power throttling (GOW3_TIMER_RES,
+ * GOW3_POWER_THROTTLE). */
+void runtime_host_scheduling_init(void);
 /* rm -rf: 0 when the tree is gone (or never existed). */
 int compat_remove_tree(const char *path);
 /* errno for a Win32 error code. */

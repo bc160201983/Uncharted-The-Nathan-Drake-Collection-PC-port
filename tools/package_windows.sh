@@ -33,7 +33,7 @@ done
 
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/install_update.py \
-    tools/net_overlay.py "$stage/tools/"
+    tools/net_overlay.py tools/check_game_files.py tools/game_files_102.json.gz "$stage/tools/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
 mkdir -p "$stage/tools/pkgtool"
 cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool/"

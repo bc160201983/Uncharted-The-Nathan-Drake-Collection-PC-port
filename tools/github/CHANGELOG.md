@@ -4,6 +4,29 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 29 October 2026 (0.7.2)
+
+- **Performance**: the GPU command thread waited on Windows and on its own memory housekeeping.
+  1 ms timer resolution and the process's power-throttling opt-out (GOW3_TIMER_RES,
+  GOW3_POWER_THROTTLE), guest condition variables on WaitOnAddress (GOW3_FUTEX_COND), pooled
+  draw-preparation submissions and CPU trims (GOW3_PREP_POOL, GOW3_CPU_TRIMS) are now on by
+  default; each `=0` turns it off. Measured against 0.7.1 at the same spots (user's saves, 60 s,
+  alternating): U2 93.3 -> 116.4 FPS (1% low 67 -> 84), U2 4 cores 67.4 -> 83.5, U1 94.0 -> 119.9
+  (cap, 1% low 56 -> 104), U3 115.7 -> 120.0 (cap); 15-minute soaks clean (U2 MT on/off, U3 MT on).
+- **Aim blur with multithreaded rendering** (#276): above 1080p the aim-focus box constants of ps
+  9f801363 reached the GPU through the constant ring, which FixAimFocusCentre never saw; the ring
+  copy is now corrected too (vk_rasterizer.cpp FixAimFocusCentreRing). U2 and U3 focus distance
+  verified with MT on and off, DLAA and DLSS Quality.
+- **Uncharted 3 "Stay in the Light" assert** (#284): a degenerate light direction made the light
+  ortho camera NaN (CreateOrthographicProjection assert); the call at image 0xf3cad8 now skips that
+  light's update for the frame when its matrices or far value are NaN/inf
+  (UNCHARTED_LIGHT_ORTHO_GUARD=0: off).
+- Gamepad after a focus loss / in exclusive fullscreen (#281 by vladector); Windows' cursor in the
+  in-game menu (#300); texture filtering override (GOW3_ANISOTROPY / launcher), the engines'
+  hi-res local shadow buffer and full-resolution textures switches for U2/U3 (launcher, off by
+  default); launcher menu shortcut choice and Check game files (tools/check_game_files.py, a list
+  of the base game's files and sizes, no game data).
+
 ## 28 October 2026 (0.7.1)
 
 - **AMD Radeon: crash with upscaling or TAA** (#273, #272): the character motion-vector vertex

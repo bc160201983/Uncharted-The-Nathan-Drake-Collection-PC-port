@@ -68,8 +68,11 @@ u32 DefaultWorkerCount() {
 /// what was copied). The prepared draws are value-initialized again as before.
 bool ChunkPoolEnabled() {
     static const bool enabled = [] {
+        // gow3 29 Oct 2026: DEFAULT ON (threads work, analysis/optimization-1028/THREADS.md: U2/U1/U3
+        // full CPU +5..+14% FPS, 1% low +3..+30%, Deck sim 1% low +7..+23%, 4 cores neutral; 15-minute
+        // soaks clean). GOW3_PREP_POOL=0 turns it off.
         const char* env = std::getenv("GOW3_PREP_POOL");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     return enabled;
 }
@@ -77,8 +80,11 @@ bool ChunkPoolEnabled() {
 /// gow3 21 Oct 2026 (GOW3_CPU_TRIMS=1): see PreparedDraw::key_hash.
 bool CpuTrimsEnabled() {
     static const bool enabled = [] {
+        // gow3 29 Oct 2026: DEFAULT ON (threads work, analysis/optimization-1028/THREADS.md: U2/U1/U3
+        // full CPU +5..+14% FPS, 1% low +3..+30%, Deck sim 1% low +7..+23%, 4 cores neutral; 15-minute
+        // soaks clean). GOW3_CPU_TRIMS=0 turns it off.
         const char* env = std::getenv("GOW3_CPU_TRIMS");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     return enabled;
 }

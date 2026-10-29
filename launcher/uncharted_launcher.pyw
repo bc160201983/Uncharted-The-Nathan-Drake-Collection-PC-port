@@ -2701,6 +2701,45 @@ class Launcher:
                  "your Windows sound output (Sound settings -> speaker setup); headphones get stereo.",
                  speakers)
 
+        def menu_shortcut(parent):
+            # 29 Oct 2026 (GitHub #300): L2 + R3 also zooms the scope with some guns. Written to
+            # probe-u*.ini like the in-game menu does (menu_shortcut, gow3_settings.cpp); a custom
+            # combination set in the game stays until another choice is made here.
+            def save(value):  # all three games: the menu is the same in each
+                self.ini["menu_shortcut"] = value
+                for game in ("u1", "u2", "u3"):
+                    if game != self.config["game"]:
+                        write_ini(game, {"menu_shortcut": value})
+                self.save_ini({"menu_shortcut": value})
+            return Segmented(parent, (("lt_r3", "L2 + R3"), ("view_menu", "Select + Start"),
+                                      ("keyboard", "Keyboard only")),
+                             self.ini.get("menu_shortcut", "lt_r3"), save, self.f_small)
+        self.row(page, "In-game menu shortcut",
+                 "The controller buttons that open the in-game menu. L2 + R3 also zooms the scope with some "
+                 "guns: pick Select + Start (View + Menu on Xbox) or Keyboard only (Insert) then.", menu_shortcut)
+
+        def anisotropy(parent):
+            return Segmented(parent, (("0", "Game"), ("4", "4x"), ("8", "8x"), ("16", "16x")),
+                             str(self.config.get("anisotropy", "0")),
+                             lambda v: self.change_config("anisotropy", v), self.f_small, recommended="16")
+        self.row(page, "Texture filtering",
+                 "Sharper ground and wall textures seen at an angle, in all three games. 16x costs "
+                 "almost no frame rate. Game = as on the PS4.", anisotropy)
+
+        def hires_shadows(parent):
+            return Toggle(parent, self.s, self.config.get("hires_shadows", False),
+                          lambda v: self.change_config("hires_shadows", v))
+        self.row(page, "Sharper lamp shadows (Uncharted 2 and 3)",
+                 "The game's own high-resolution shadow buffer for lamps and flashlights (off on the "
+                 "PS4). Extra quality, being tested. Needs update 1.02.", hires_shadows)
+
+        def full_res_textures(parent):
+            return Toggle(parent, self.s, self.config.get("full_res_textures", False),
+                          lambda v: self.change_config("full_res_textures", v))
+        self.row(page, "Full-resolution textures (Uncharted 2 and 3)",
+                 "Always the sharpest version of every texture, no blurry ones while the game streams "
+                 "(off on the PS4). Extra quality, being tested. Needs update 1.02.", full_res_textures)
+
         def unlock(parent):
             return Toggle(parent, self.s, self.config.get("unlock", False),
                           lambda v: self.change_config("unlock", v))
@@ -2754,7 +2793,8 @@ class Launcher:
                 "A non-Steam game in your library: the Collection, or one entry per game.")
         section("FOLDERS", (("Open log folder", self.open_logs), ("Open save folder", self.open_saves),
                             ("Change game folder", self.choose_game_dir),
-                            ("Install game from .pkg", self.install_game_pkg)))
+                            ("Install game from .pkg", self.install_game_pkg),
+                            ("Check game files", self.check_game_files)))
         self.game_dir_label = tk.Label(page, text=f"Game files: {self.game_dir()}", font=self.f_small,
                                        bg=BG, fg=DIM, anchor="w")
         self.game_dir_label.pack(side="top", fill="x", pady=(self.px(6), 0))
@@ -3298,6 +3338,9 @@ class Launcher:
         env["UNCHARTED_LANGUAGE"] = str(self.config.get("language", "1"))
         env["UNCHARTED_SPEAKERS"] = str(self.config.get("speakers", "auto"))
         env["UNCHARTED_U3_EXPOSURE"] = str(self.config.get("u3_exposure", "0"))
+        env["UNCHARTED_ANISOTROPY"] = str(self.config.get("anisotropy", "0"))
+        env["UNCHARTED_HIRES_SHADOWS"] = "1" if self.config.get("hires_shadows", False) else "0"
+        env["UNCHARTED_FULL_RES_TEXTURES"] = "1" if self.config.get("full_res_textures", False) else "0"
         env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"
         env["UNCHARTED_UNLOCK_REWARDS"] = "1" if self.config.get("unlock_rewards", False) else "0"
         if self.chosen_update():
@@ -3715,6 +3758,31 @@ class Launcher:
                 messagebox.showinfo(APP_TITLE, f"Update installed:\n{state['path']}\n\nThe games use it from "
                                                "their next start.")
         poll()
+
+    def check_game_files(self):
+        """Every file of the base game present with the right size (tools/check_game_files.py: a
+        list of names and sizes, no game data). 29 Oct 2026: Uncharted 3 chapter 8 stopped for
+        players whose dump lacked one script file (#247, #296)."""
+        folder = self.game_dir()
+        if not folder:
+            messagebox.showwarning(APP_TITLE, "Choose the game folder first.")
+            return
+        try:
+            result = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "check_game_files.py"), "check",
+                                     str(folder)], capture_output=True, text=True, timeout=600,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError) as error:
+            messagebox.showerror(APP_TITLE, f"The check could not run:\n\n{error}")
+            return
+        lines = result.stdout.splitlines()
+        if result.returncode == 0:
+            messagebox.showinfo(APP_TITLE, "Your game files are complete.\n\n" + (lines[0] if lines else ""))
+            return
+        problems = lines[1:]
+        shown = "\n".join(problems[:15]) + (f"\n... and {len(problems) - 15} more" if len(problems) > 15 else "")
+        messagebox.showerror(APP_TITLE, "Your game files are incomplete, so the game will stop where it needs "
+                             "them. Extract or dump the base game again.\n\n" + (lines[0] if lines else "")
+                             + "\n\n" + shown)
 
     def install_game_pkg(self):
         """The player's own game PKG (for example the US copy, CUSA02320) unpacked into a folder

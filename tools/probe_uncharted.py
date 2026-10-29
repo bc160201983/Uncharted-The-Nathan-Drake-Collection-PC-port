@@ -238,6 +238,62 @@ FOCUS_NAN_PATCHES = {
     ],
 }
 
+
+def u3_light_ortho_guard_patch():
+    """28 Oct 2026, GitHub #284 (Uncharted 3 1.02, "Stay in the Light", RTX 4070, after 38 min):
+    the game asserts "zscale*n+zoffset" in CreateOrthographicProjection (render-camera.h:441,
+    int 0x41 at image 0xf77095). The ortho builder 0xf768d0 fits a light camera around the main
+    camera's view slice (near 0.01 m, far from the light's settings or 50 m) and asserts its own
+    near plane maps to depth 0, which fails only when the box's depth is 0, infinite or NaN. Its
+    caller 0xf3c7e0 (scene-view light camera, called from 0xee64b4 when a light entry is active)
+    normalises the light direction and has 0x11c3390 build a light basis by Gram-Schmidt against
+    (1,0,0), both with rsqrt and no guard: a zero direction, or one exactly along +-X, gives
+    0 * inf = NaN in both light matrices (and a NaN/inf far does the same to the corners). The
+    call site (0xf3cad8) now calls a stub that checks the two light matrices (rbp-0x1b0, 8 rows)
+    and the far value for NaN/inf: good -> on to 0xf768d0 as before; bad -> this frame's update
+    of that light camera is skipped (the ortho build and its follow-up 0x11c0d30 both), so it
+    keeps the last good frame's matrices instead of NaN ones. The stub sits in the dead path of
+    the neighbouring far-plane assert (0xf770b7, 171 bytes), which still starts with int 0x41;
+    the near-plane assert itself is unchanged. UNCHARTED_LIGHT_ORTHO_GUARD=0: not applied."""
+    pattern = "c5fa100524ed5000 c5fa108d0cfeffff e8f39d0300 4c89e7 e84b422800"  # 0xf3cac8
+    path = 0xf770b7 - 0xf3cac8                # the far-plane assert's path, from the pattern start
+    builder = 0xf768d0 - 0xf3cac8
+    original = bytes.fromhex(
+        "488b05fab6c7004885c00f8499000000488d3dcf4c5300488d352a2252004989d6488d15a14c53004989dc"
+        "4889cb488d0d6451430041b8ba0100004531c9c57829adf0feffffc57829b5e0feffffc57829bdd0feffff"
+        "c5f82995c0feffffc5f829a5b0feffffc5f829ada0feffffffd0c5f828ada0feffffc5f828a5b0feffff"
+        "c5f82895c0feffffc57828bdd0feffffc57828b5e0feffffc57828adf0feffff4889d94c89e34c89f2cd41")
+    stub = bytes.fromhex("cd41")                                       # int 0x41 (the old path's start)
+    stub += bytes.fromhex("c5f8289d50feffff c5e05cdb")                 # xmm3 = row0 - row0 (NaN if not finite)
+    for row in range(1, 8):                                            # + (row - row) for rows 1..7
+        stub += bytes.fromhex("c5f828a5") + struct.pack("<i", -0x1b0 + 0x10 * row)  # vmovaps xmm4, [rbp-..]
+        stub += bytes.fromhex("c5d85ce4 c5e058dc")                     # vsubps xmm4,xmm4,xmm4; vaddps xmm3,xmm3,xmm4
+    stub += bytes.fromhex("c5f25ce1 c5e258dc")                         # + (far - far) (xmm1)
+    stub += bytes.fromhex("c5e0c2db03 c5f850c3 85c0 7505")             # any lane NaN? -> bad
+    stub += b"\xe9" + struct.pack("<i", builder - (path + len(stub) + 5))  # good: jmp 0xf768d0
+    stub += bytes.fromhex("4883042408 c3")                             # bad: return past the follow-up call
+    assert len(stub) <= len(original)
+    call = b"\xe8" + struct.pack("<i", (path + 2) - (0x10 + 5))
+    return ("Uncharted 3 light camera: skip a NaN light ortho instead of asserting (#284)", [
+        (pattern, [(0x10, bytes.fromhex("e8f39d0300"), call),
+                   (path, original, stub.ljust(len(original), b"\xcc"))]),
+    ])
+
+
+# Test knob for the #284 guard (UNCHARTED_TEST_LIGHT_ORTHO_NAN=1, never in the launcher): the light
+# direction's normalisation (0xf3c964 vmulps xmm0, xmm0, xmm1) becomes vxorps xmm0, xmm0, xmm0, so
+# every active light camera gets a zero direction -> NaN light matrices -> the #284 assert. The
+# Chateau save has no such light active, so the knob also opens the caller's gate (0xee6481 je and
+# 0xee649a jae, both skipping the light camera, become nops): the camera is built every frame.
+U3_TEST_LIGHT_ORTHO_NAN = ("Uncharted 3 TEST: zero light-camera direction (UNCHARTED_TEST_LIGHT_ORTHO_NAN)", [
+    ("c5e8591db41d4f00 c5e059c9 c5e85cc9 c5f859c1 c5f8298510feffff", 16,
+     bytes.fromhex("c5f859c1"), bytes.fromhex("c5f857c0")),
+])
+U3_TEST_LIGHT_ORTHO_GATE = ("Uncharted 3 TEST: light camera built every frame (UNCHARTED_TEST_LIGHT_ORTHO_NAN)", [
+    ("488b8360010000 c5f82e8010050000 7436 c5fa1005e94f5600 488b8360010000 c5f82e80680a0000 731d",
+     [(15, bytes.fromhex("7436"), bytes.fromhex("9090")), (40, bytes.fromhex("731d"), bytes.fromhex("9090"))]),
+])
+
 # The most common Drake's Fortune crash (GitHub #27, #30, #42, #62: "execute access to 0", called
 # from 0x64011f; Uncharted 2 and 3 have the same code). For each shader the constant-update code
 # fills a table (a 0x28-byte header, then 0x30-byte entries whose 16-bit word picks the member
@@ -354,6 +410,16 @@ def _ammo_reader(pattern, jne_at):
 REWARD_POKES = {
     "big2-ps4_Shipping.elf": ["1114178", "1114179"],
     "big3-ps4_Shipping.elf": ["17b2a94", "17b2a95"],
+}
+# Extra quality (launcher -> Advanced, 29 Oct 2026, the user's own build): debug-menu render
+# switches of the engine kept set like the cheats (GOW3_POKE). Measured in Uncharted 2 (train yard,
+# 1440p): hi-res local (lamp / flashlight) shadow buffer, PS4 default off, ~0% FPS; full resolution
+# textures (no streamed lower mips), PS4 default off, ~1% FPS. Update 1.02 image offsets from
+# analysis/big2-ps4_Shipping/eboot.elf (menu items at 0xba2ad0 and 0xbaa4f4); U1 not mapped yet.
+QUALITY_POKES = {
+    "big2-ps4_Shipping.elf": {"hires_shadows": ["1247d04"], "full_res_textures": ["1248300"]},
+    # Uncharted 3: the same render-settings block at 0x18c6280 (menu items at 0xe0ac90, 0xe127f1).
+    "big3-ps4_Shipping.elf": {"hires_shadows": ["18c6444"], "full_res_textures": ["18c6a40"]},
 }
 # Drake's Fortune keeps each reward's status in its own record (bit 0 unlocked) and its debug
 # switch also writes them, so its checks are patched instead: every reward reads as unlocked,
@@ -636,6 +702,50 @@ def job_sleep_enabled():
     Spinning job threads starve 4-6 core CPUs (GPU thread 5% of a core), heat laptops and, on a
     16-core desktop, used about 4 more cores for 2% fewer FPS."""
     return os.environ.get("UNCHARTED_JOB_SLEEP", "auto").strip().lower() not in ("0", "off", "no")
+
+
+def host_hardware_threads():
+    """Logical processors this process may run on (its affinity mask; the game inherits it)."""
+    if os.name == "nt":
+        import ctypes
+        process, system = ctypes.c_size_t(), ctypes.c_size_t()
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        if kernel32.GetProcessAffinityMask(ctypes.c_void_p(kernel32.GetCurrentProcess()),
+                                           ctypes.byref(process), ctypes.byref(system)) and process.value:
+            return bin(process.value).count("1")
+    elif hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 8
+
+
+def job_worker_count():
+    """UNCHARTED_JOB_WORKERS=<1..6> | auto | 0/off (the engine's own 6). Threads work 28 Oct 2026
+    (analysis/optimization-1028/THREADS.md): the job manager's init parameters (U2 0x5766e8, U1
+    0x126543, U3 0x5acd80/0x5ad750, `mov qword [rbp-0x68], 6`) ask for six NdJobWorkerThreads, one
+    per PS4 game core (affinity 1 << i, priority 767). auto: the host's hardware threads minus two
+    (the GPU command thread and the game's main/submission threads), 2..6."""
+    value = os.environ.get("UNCHARTED_JOB_WORKERS", "0").strip().lower()
+    if value in ("", "0", "off", "no"):
+        return 0
+    if value == "auto":
+        return max(2, min(6, host_hardware_threads() - 2))
+    try:
+        return max(1, min(6, int(value)))
+    except ValueError:
+        return 0
+
+
+def job_worker_patches(executable, count):
+    """The job manager's worker count (6) in its init parameters; Uncharted 3 has two init sites
+    (the same code with r13/r15)."""
+    tail = "48c7458800080000 48c7459000040000 48c74598"
+    new = bytes([count])
+    description = f"job workers: {count} instead of 6 (UNCHARTED_JOB_WORKERS)"
+    if executable == "big3-ps4_Shipping.elf":
+        return [(description + f" (site {i})", [(f"4c89{reg}68ffffff 48899d70ffffff " + tail + " 06000000 48c745a0", 34, b"\x06", new)])
+                for i, reg in enumerate(("ad", "bd"))]
+    return [(description, [(tail + " 06000000 48c745a0 80000000", 20, b"\x06", new)])]
 
 
 def u3_exposure_bias():
@@ -1250,6 +1360,11 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         patches.extend(REWARD_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_FOCUS_RESET", "1") != "0":
         patches.extend(FOCUS_NAN_PATCHES.get(executable, []))
+    if executable == "big3-ps4_Shipping.elf":
+        if os.environ.get("UNCHARTED_LIGHT_ORTHO_GUARD", "1") != "0":
+            patches.append(u3_light_ortho_guard_patch())
+        if os.environ.get("UNCHARTED_TEST_LIGHT_ORTHO_NAN") == "1":
+            patches.extend([U3_TEST_LIGHT_ORTHO_NAN, U3_TEST_LIGHT_ORTHO_GATE])
     if os.environ.get("UNCHARTED_CUE_PRETOUCH", "1") != "0":
         patches.extend(CUE_PRETOUCH_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_RUN_GROUP_FIX", "1") != "0":
@@ -1265,6 +1380,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             patches.extend(hor_plus_patches(executable))
     if executable == "big3-ps4_Shipping.elf" and (bias := u3_exposure_bias()):
         patches.append(u3_exposure_patch(bias))
+    if workers := job_worker_count():
+        patches.extend(job_worker_patches(executable, workers))
     if job_sleep_enabled():
         patches.extend(JOB_SLEEP_PATCHES)
         # Diagnostics: UNCHARTED_JOB_SLEEP_SPINS=<n> idle spins before a worker sleeps (1000).
@@ -1314,7 +1431,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     env = os.environ.copy()
     wanted = cheat_names(executable)
     rewards = os.environ.get("UNCHARTED_UNLOCK_REWARDS", "0") == "1"
-    if (wanted or rewards) and "GOW3_POKE" not in env:
+    quality = [name for name in ("hires_shadows", "full_res_textures")
+               if os.environ.get("UNCHARTED_" + name.upper(), "0") == "1"
+               and name in QUALITY_POKES.get(executable, {})]
+    if (wanted or rewards or quality) and "GOW3_POKE" not in env:
         if (game_version(game) or "") >= "01.02":
             pokes = [CHEATS[executable][name] for name in wanted if name in CHEATS.get(executable, {})]
             if wanted:
@@ -1322,10 +1442,19 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             if rewards and REWARD_POKES.get(executable):
                 pokes += REWARD_POKES[executable]
                 print("Unlock all rewards: on")
+            for name in quality:
+                pokes += QUALITY_POKES[executable][name]
+            if quality:
+                print(f"Extra quality: {', '.join(quality)}")
             if pokes:
                 env["GOW3_POKE"] = ",".join(pokes)
         else:
             print("Cheats and unlocked rewards: need update 1.02 (not used)")
+    # Texture filtering (launcher -> Advanced -> Texture filtering): sampler.cpp GOW3_ANISOTROPY raises
+    # mipmapped colour textures to at least that ratio (~0% FPS measured in Uncharted 2).
+    if (aniso := os.environ.get("UNCHARTED_ANISOTROPY", "0")) in ("2", "4", "8", "16"):
+        env.setdefault("GOW3_ANISOTROPY", aniso)
+        print(f"Texture filtering: {aniso}x")
     # Measurement logging and live trigger files (frame/fault/wait statistics every 5 s, GPU
     # checkpoints, capture/readback/DMA triggers). On unless the launcher turns it off.
     diagnostics = env.get("UNCHARTED_DIAGNOSTICS", "1") != "0"

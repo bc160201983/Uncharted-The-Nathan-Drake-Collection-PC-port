@@ -201,7 +201,9 @@ void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
         return;
     }
-    ImGui::GetIO().MouseDrawCursor = value;
+    // gow3 29 Oct 2026 (#300): Windows' own cursor is shown while the menu is open (window.cpp),
+    // so the menu no longer draws one of its own (two cursors otherwise).
+    ImGui::GetIO().MouseDrawCursor = false;
     CancelCapture();
     if (value) {
         requested_tab = std::clamp(Gow3Settings::Get().menu_tab.load(), 0, 4);

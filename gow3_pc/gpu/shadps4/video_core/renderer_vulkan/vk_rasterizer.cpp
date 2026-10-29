@@ -40,6 +40,10 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+namespace VideoCore {
+extern bool g_dma_sync_obtain; // buffer_cache.cpp (GOW3_BUFFER_STATS=2: DMA-sync uploads by MiB)
+}
+
 namespace Vulkan {
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
@@ -82,8 +86,11 @@ bool DepthFeedbackGeneral() {
 // per-draw path that change no result (each one names this switch).
 bool CpuTrims() {
     static const bool enabled = [] {
+        // gow3 29 Oct 2026: DEFAULT ON (threads work, analysis/optimization-1028/THREADS.md: U2/U1/U3
+        // full CPU +5..+14% FPS, 1% low +3..+30%, Deck sim 1% low +7..+23%, 4 cores neutral; 15-minute
+        // soaks clean). GOW3_CPU_TRIMS=0 turns it off.
         const char* env = std::getenv("GOW3_CPU_TRIMS");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     return enabled;
 }
@@ -1516,6 +1523,8 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     return false;
 }
 
+static void FixAimFocusCentreRing(u8* dst, VAddr address, u64 size); // aim focus (#276), below
+
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                            boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
     const PreparedStage* prepared_stage = nullptr;
@@ -1576,6 +1585,10 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             std::memcpy(dst, source, size);
         } else {
             memory->CopySparseMemory(address, dst, size);
+            // gow3 28 Oct 2026 (#276): the aim focus box centre, as BindBuffers corrects it.
+            if (stage.pgm_hash == 0x9f801363) {
+                FixAimFocusCentreRing(dst, address, size);
+            }
         }
         constant_ring->Flush(*offset, size);
         if (LateConstantsEnabled()) {
@@ -2826,6 +2839,13 @@ void Rasterizer::NoteDisplayStorageWrite(const Shader::Info& cs) {
     }
 }
 
+// GOW3_DISPATCH_STATS=1: time in DispatchRecord's phases (resource binding, barriers,
+// descriptor push, recording + reset), for the dispatch just timed.
+static bool g_dispatch_phases = false;
+static u64 g_dispatch_phase_ns[4] = {};
+// Compute BindResources split: poll readbacks, push-ud/prepare (time between), buffers, textures, DMA sync, all.
+static u64 g_bind_phase_ns[6] = {};
+
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
@@ -2842,7 +2862,73 @@ void Rasterizer::DispatchDirect() {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
         return;
     }
+    // gow3 28 Oct 2026 (GOW3_DISPATCH_STATS=1, multithreaded rendering off): GPU-thread time per
+    // compute shader, every 5 s, top 12 by time: dispatches, thread groups, us per dispatch.
+    static const bool dispatch_stats = [] {
+        const char* env = std::getenv("GOW3_DISPATCH_STATS");
+        return env && env[0] == '1';
+    }();
+    if (!dispatch_stats) {
+        DispatchRecord(pipeline);
+        return;
+    }
+    const auto& regs = CsRegs();
+    const u64 groups = u64(regs.dim_x) * regs.dim_y * regs.dim_z;
+    const u64 hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
+    // gow3 29 Oct 2026 (threads work, basis for GOW3_DISPATCH_FAST): back-to-back dispatches of
+    // the same shader, and of those how many also have the same user data (SGPR) words.
+    static u64 prev_hash = 0, same_shader = 0, same_user_data = 0;
+    static AmdGpu::UserData prev_user_data{};
+    if (hash == prev_hash) {
+        ++same_shader;
+        same_user_data += regs.user_data == prev_user_data;
+    }
+    prev_hash = hash;
+    prev_user_data = regs.user_data;
+    g_dispatch_phases = true;
+    const auto start = std::chrono::steady_clock::now();
     DispatchRecord(pipeline);
+    const auto end = std::chrono::steady_clock::now();
+    struct Entry {
+        u64 count = 0, groups = 0, ns = 0, one_group = 0;
+    };
+    static std::unordered_map<u64, Entry> entries;
+    static auto last = end;
+    auto& e = entries[hash];
+    ++e.count;
+    e.groups += groups;
+    e.one_group += groups == 1;
+    e.ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+    if (end - last >= std::chrono::seconds{5}) {
+        last = end;
+        std::vector<std::pair<u64, u64>> order;
+        u64 total_ns = 0, total = 0;
+        for (const auto& [h, x] : entries) {
+            order.emplace_back(x.ns, h);
+            total_ns += x.ns;
+            total += x.count;
+        }
+        std::ranges::sort(order, std::greater{});
+        std::string text;
+        for (size_t i = 0; i < std::min<size_t>(order.size(), 12); ++i) {
+            const auto& x = entries[order[i].second];
+            text += fmt::format(" {:08x}: {} x {:.1f} us ({} 1-group, {:.0f} groups avg);", order[i].second,
+                                x.count, x.ns / 1e3 / x.count, x.one_group, double(x.groups) / x.count);
+        }
+        std::printf("Dispatch phases (5 s): bind resources %.1f ms, barriers %.1f ms, descriptor push %.1f ms, record+reset %.1f ms\n",
+                    g_dispatch_phase_ns[0] / 1e6, g_dispatch_phase_ns[1] / 1e6, g_dispatch_phase_ns[2] / 1e6, g_dispatch_phase_ns[3] / 1e6);
+        std::fill(std::begin(g_dispatch_phase_ns), std::end(g_dispatch_phase_ns), 0);
+        std::printf("Dispatch bind split (5 s): poll readbacks %.1f ms, user data %.1f ms, buffers %.1f ms, textures %.1f ms, DMA sync %.1f ms, all %.1f ms\n",
+                    g_bind_phase_ns[0] / 1e6, g_bind_phase_ns[1] / 1e6, g_bind_phase_ns[2] / 1e6, g_bind_phase_ns[3] / 1e6, g_bind_phase_ns[4] / 1e6, g_bind_phase_ns[5] / 1e6);
+        std::fill(std::begin(g_bind_phase_ns), std::end(g_bind_phase_ns), 0);
+        std::printf("Dispatch stats (5 s): %llu dispatches, %.1f ms on the GPU thread;%s\n",
+                    static_cast<unsigned long long>(total), total_ns / 1e6, text.c_str());
+        std::printf("Dispatch repeats (5 s): %llu after the same shader, %llu of them with the same user data\n",
+                    static_cast<unsigned long long>(same_shader), static_cast<unsigned long long>(same_user_data));
+        same_shader = same_user_data = 0;
+        std::fflush(stdout);
+        entries.clear();
+    }
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
@@ -2924,9 +3010,11 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             runtime.FlushBarriers();
         }
     }
+    const auto phase_t0 = g_dispatch_phases ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (!BindResources(pipeline)) {
         return;
     }
+    const auto phase_t1 = g_dispatch_phases ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     if (needs_barrier) {
         runtime.FlushBarriers();
@@ -2949,8 +3037,10 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         return !(env && env[0] == '0');
     }();
     const u64 serial_before_bind = scheduler.RecordSerial();
+    const auto phase_t2 = g_dispatch_phases ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     pipeline->BindResources(set_writes, push_data);
     const u64 serial_after_bind = scheduler.RecordSerial();
+    const auto phase_t3 = g_dispatch_phases ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     const vk::Pipeline handle = pipeline->Handle();
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
@@ -2992,6 +3082,14 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     DebugState.IncDispatch();
 
     ResetBindings(true);
+    if (g_dispatch_phases) {
+        const auto phase_t4 = std::chrono::steady_clock::now();
+        const auto ns = [](auto d) { return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count()); };
+        g_dispatch_phase_ns[0] += ns(phase_t1 - phase_t0);
+        g_dispatch_phase_ns[1] += ns(phase_t2 - phase_t1);
+        g_dispatch_phase_ns[2] += ns(phase_t3 - phase_t2);
+        g_dispatch_phase_ns[3] += ns(phase_t4 - phase_t3);
+    }
     if (ClothTraceEnabled() && (cs.pgm_hash == 0x1c957b01 || cs.pgm_hash == 0x809864d3)) {
         g_cloth_epoch = runtime.AccessEpoch();
         g_cloth_epoch_shader = cs.pgm_hash;
@@ -3258,7 +3356,9 @@ void Rasterizer::SyncDmaMemory(const Shader::Info* stage) {
         // cover fiber stacks: those stay writable (gow3gpu.cpp Gow3KeepWritable).
         for (const VAddr base : bases) {
             if (IsMapped(base, window)) {
+                VideoCore::g_dma_sync_obtain = true;
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(base, static_cast<u32>(window), false);
+                VideoCore::g_dma_sync_obtain = false;
                 if (std::ranges::find(dma_read_arenas, buffer) == dma_read_arenas.end()) {
                     dma_read_arenas.push_back(buffer);
                 }
@@ -3975,7 +4075,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     set_writes.clear();
     buffer_infos.clear();
     image_infos.clear();
+    const bool bind_timed = g_dispatch_phases && pipeline->IsCompute();
+    const auto bt0 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     buffer_cache.PollReadbacks();
+    const auto bt1 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // gow3: G-buffer passes sample material textures for a scene rendered below the output
     // size; the temporal upscaler restores the detail of the output's mip level (FSR guide:
     // log2(render / output)). Shadows, post-processing and UI keep the guest's bias.
@@ -4026,8 +4129,16 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                               stage->samplers.size());
             stage->PushUd(binding, push_data);
             const PreparedStage* prepared = FindPreparedStage(*stage);
+            const auto bt2 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             BindBuffers(*stage, prepared, binding, push_data, set_write_index);
+            const auto bt3 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
+            if (bind_timed) {
+                const auto bt4 = std::chrono::steady_clock::now();
+                g_bind_phase_ns[1] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt2 - bt1).count());
+                g_bind_phase_ns[2] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt3 - bt2).count());
+                g_bind_phase_ns[3] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt4 - bt3).count());
+            }
             uses_dma |= stage->uses_dma;
             if (stage->uses_dma) {
                 dma_stage = stage;
@@ -4097,9 +4208,16 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         }
     }
 
+    const auto bt5 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (uses_dma) {
         SyncDmaMemory(dma_stage);
         fault_process_pending = true;
+    }
+    if (bind_timed) {
+        const auto bt6 = std::chrono::steady_clock::now();
+        g_bind_phase_ns[0] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt1 - bt0).count());
+        g_bind_phase_ns[4] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt6 - bt5).count());
+        g_bind_phase_ns[5] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt6 - bt0).count());
     }
 
     return true;
@@ -4754,76 +4872,138 @@ static void CheckClothInputs(Core::MemoryManager* memory, VideoCore::BufferCache
 // resolution above 1080p the box left the crosshair (4K: uv 0.25 instead of 0.5, the depth of the
 // wall beside Nate) and everything behind the target was blurred while aiming. The centre is
 // corrected to the HUD space for every render size (no change at 1080p). GOW3_AIM_FOCUS_FIX=0: off.
-static void FixAimFocusCentre(Core::MemoryManager* memory, VideoCore::BufferCache& buffer_cache,
-                              VAddr address) {
+namespace {
+// gow3 28 Oct 2026 (GitHub #276): the state of the correction, shared by its two paths: the
+// bind (BindBuffers, single-threaded rendering) and the constant ring copy (CollectRingBindings,
+// multithreaded rendering).
+struct AimFocusState {
+    // gow3 20 Oct 2026: what the fix did per 5 s (calls, skips by reason, corrections, writes
+    // through to the GPU's copy), printed while the shader runs.
+    std::atomic<u32> calls{0}, unmapped{0}, odd{0}, native{0}, same{0}, fixed{0}, through{0},
+        ring{0};
+    std::atomic<s64> last{0};
+    std::mutex mutex;
+    std::unordered_map<VAddr, std::pair<float, float>> corrected;
+    bool reported = false;
+};
+
+AimFocusState& AimFocus() {
+    static AimFocusState state;
+    return state;
+}
+
+bool AimFocusEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_AIM_FOCUS_FIX");
         return !(env && env[0] == '0');
     }();
-    // gow3 20 Oct 2026: what the fix did per 5 s (calls, skips by reason, corrections, writes
-    // through to the GPU's copy), printed while the shader runs.
-    static std::atomic<u32> n_calls{0}, n_unmapped{0}, n_odd{0}, n_native{0}, n_same{0}, n_fixed{0},
-        n_through{0};
-    static std::atomic<s64> n_last{0};
-    ++n_calls;
+    return enabled;
+}
+
+void AimFocusCount() {
+    auto& s = AimFocus();
+    ++s.calls;
     if (const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count();
-        now - n_last.load() >= 5) {
-        n_last = now;
+        now - s.last.load() >= 5) {
+        s.last = now;
         std::printf("Aim focus (5 s): %u binds; skipped %u unmapped, %u not the box constants, %u at "
-                    "1080p, %u already corrected; %u corrected (%u through to the GPU copy)\n",
-                    n_calls.exchange(0), n_unmapped.exchange(0), n_odd.exchange(0), n_native.exchange(0),
-                    n_same.exchange(0), n_fixed.exchange(0), n_through.exchange(0));
+                    "1080p, %u already corrected; %u corrected (%u through to the GPU copy, %u in "
+                    "the constant ring)\n",
+                    s.calls.exchange(0), s.unmapped.exchange(0), s.odd.exchange(0), s.native.exchange(0),
+                    s.same.exchange(0), s.fixed.exchange(0), s.through.exchange(0), s.ring.exchange(0));
         std::fflush(stdout);
     }
-    if (!enabled || !memory->IsValidGpuMapping(address, 32)) {
-        ++n_unmapped;
+}
+
+/// The corrected box centre for the 8 floats `c` of the block at `address`; false when they need
+/// none. Called with AimFocus().mutex held.
+bool AimFocusCorrection(const float* c, VAddr address, float fixed[2]) {
+    auto& s = AimFocus();
+    const float inv_width = c[6], inv_height = c[7];
+    if (!(inv_width > 0.0f && inv_width < 1.0f && inv_height > 0.0f && inv_height < 1.0f)) {
+        ++s.odd;
+        return false;
+    }
+    const float x_scale = 1920.0f * inv_width, y_scale = 1080.0f * inv_height;
+    if (std::abs(x_scale - 1.0f) < 1e-4f && std::abs(y_scale - 1.0f) < 1e-4f) {
+        ++s.native;
+        return false; // 1080p: already right
+    }
+    // The block may be bound by more than one draw: values corrected once stay as they are.
+    if (const auto it = s.corrected.find(address);
+        it != s.corrected.end() && it->second == std::pair{c[0], c[1]}) {
+        ++s.same;
+        return false;
+    }
+    ++s.fixed;
+    fixed[0] = c[0] / x_scale;
+    fixed[1] = c[1] / y_scale;
+    if (s.corrected.size() >= 512) {
+        s.corrected.clear();
+    }
+    s.corrected[address] = {fixed[0], fixed[1]};
+    if (!s.reported) {
+        s.reported = true;
+        std::printf("Aim focus: crosshair box centre %.4f,%.4f -> %.4f,%.4f (render %ux%u)\n", c[0], c[1],
+                    fixed[0], fixed[1], u32(1.0f / inv_width + 0.5f), u32(1.0f / inv_height + 0.5f));
+        std::fflush(stdout);
+    }
+    return true;
+}
+} // namespace
+
+static void FixAimFocusCentre(Core::MemoryManager* memory, VideoCore::BufferCache& buffer_cache,
+                              VAddr address) {
+    auto& s = AimFocus();
+    AimFocusCount();
+    if (!AimFocusEnabled() || !memory->IsValidGpuMapping(address, 32)) {
+        ++s.unmapped;
         return;
     }
     float c[8];
     memory->CopySparseMemory(address, reinterpret_cast<u8*>(c), sizeof(c));
-    const float inv_width = c[6], inv_height = c[7];
-    if (!(inv_width > 0.0f && inv_width < 1.0f && inv_height > 0.0f && inv_height < 1.0f)) {
-        ++n_odd;
+    std::scoped_lock lock{s.mutex};
+    float fixed[2];
+    if (!AimFocusCorrection(c, address, fixed)) {
         return;
     }
-    const float x_scale = 1920.0f * inv_width, y_scale = 1080.0f * inv_height;
-    if (std::abs(x_scale - 1.0f) < 1e-4f && std::abs(y_scale - 1.0f) < 1e-4f) {
-        ++n_native;
-        return; // 1080p: already right
-    }
-    // The block may be bound by more than one draw: values corrected once stay as they are.
-    static std::mutex mutex;
-    static std::unordered_map<VAddr, std::pair<float, float>> corrected;
-    std::scoped_lock lock{mutex};
-    if (const auto it = corrected.find(address);
-        it != corrected.end() && it->second == std::pair{c[0], c[1]}) {
-        ++n_same;
-        return;
-    }
-    ++n_fixed;
-    const float fixed[2] = {c[0] / x_scale, c[1] / y_scale};
     // gow3 20 Oct 2026: written through to the GPU's copy as well (BufferCache::WriteThrough).
     // A write to the backing view alone is not seen by the page tracking: when another draw had
     // already uploaded the block in that frame, the GPU kept the uncorrected centre. The user
     // saw the aim blur again in Uncharted 2 at 4K: the focus read back alternated between the
     // target's 2.1 m and 5.64 m, the wall beside Nate.
     if (buffer_cache.WriteThrough(address, fixed, sizeof(fixed))) {
-        ++n_through;
+        ++s.through;
     } else {
         memory->TryWriteBacking(reinterpret_cast<void*>(address), fixed, sizeof(fixed));
     }
-    if (corrected.size() >= 512) {
-        corrected.clear();
+}
+
+// gow3 28 Oct 2026 (GitHub #276, aim blur with DLAA at 3440x1440 and 4K, Uncharted 2 and 3):
+// with multithreaded rendering (GOW3_DRAW_PIPE) the box constants reach the GPU as a copy in the
+// constant ring made when the draw is queued, and BindBuffers binds that copy without calling
+// FixAimFocusCentre: the centre stayed uncorrected (3440x1440: uv 0.28,0.38 instead of 0.5,0.5)
+// and the focus came from beside the crosshair. The ring copy `dst` is corrected here; the
+// game's own block is left as it wrote it.
+static void FixAimFocusCentreRing(u8* dst, VAddr address, u64 size) {
+    if (size < 32) {
+        return;
     }
-    corrected[address] = {fixed[0], fixed[1]};
-    static bool reported = false;
-    if (!reported) {
-        reported = true;
-        std::printf("Aim focus: crosshair box centre %.4f,%.4f -> %.4f,%.4f (render %ux%u)\n", c[0], c[1],
-                    fixed[0], fixed[1], u32(1.0f / inv_width + 0.5f), u32(1.0f / inv_height + 0.5f));
-        std::fflush(stdout);
+    auto& s = AimFocus();
+    AimFocusCount();
+    if (!AimFocusEnabled()) {
+        ++s.unmapped;
+        return;
+    }
+    float c[8];
+    std::memcpy(c, dst, sizeof(c));
+    std::scoped_lock lock{s.mutex};
+    float fixed[2];
+    if (AimFocusCorrection(c, address, fixed)) {
+        std::memcpy(dst, fixed, sizeof(fixed));
+        ++s.ring;
     }
 }
 

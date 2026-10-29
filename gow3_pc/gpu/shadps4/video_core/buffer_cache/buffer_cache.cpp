@@ -3114,6 +3114,8 @@ void BufferCache::EraseLazyPages(VAddr address, u64 size) {
     lazy_pages.erase(first, last);
 }
 
+std::array<std::atomic<u64>, 16> g_static_reasons{}; // GOW3_BUFFER_STATS=2, see NoteStaticReason
+
 namespace {
 // gow3: GOW3_BUFFER_STATS=1 — how buffer bindings reach the GPU, by guest region (256 MiB),
 // printed every 5 s: small read-only copies into the stream buffer, arena bindings, and the
@@ -3121,6 +3123,7 @@ namespace {
 struct BufferStats {
     struct Region {
         u64 stream_count{}, stream_bytes{}, arena_count{}, arena_bytes{}, upload_bytes{};
+        u64 dma_upload_bytes{};
     };
     std::map<u64, Region> regions;
     /// Hot window: frame of the last binding per 64 KiB block, and the distribution of the
@@ -3147,16 +3150,39 @@ void NoteHotUse(VAddr address, u32 size) {
         }
     }
 }
+// gow3 28 Oct 2026: GOW3_BUFFER_STATS=2 — the same per 1 MiB everywhere, plus CPU write faults
+// and DMA-sync uploads per MiB, as "BR" lines for analysis/optimization-1028/regions.py (memory
+// by the engine's allocation type).
+int BufferStatsMode() {
+    static const int mode = [] {
+        const char* value = std::getenv("GOW3_BUFFER_STATS");
+        return value && (value[0] == '1' || value[0] == '2') ? value[0] - '0' : 0;
+    }();
+    return mode;
+}
 u64 RegionKey(VAddr address) {
+    if (BufferStatsMode() == 2) {
+        return (address >> 20) | (1ull << 40);
+    }
     return (address >> 28) == 0x104 ? (address >> 20) | (1ull << 40) : address >> 28;
 }
-bool BufferStatsEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("GOW3_BUFFER_STATS");
-        return value && value[0] == '1';
-    }();
-    return enabled;
+void PrintStaticReasons() {
+    std::printf("  static reasons (count/MB): small %llu/%.1f slot %llu/%.1f demoted %llu/%.1f warming %llu/%.1f kept %llu/%.1f backing %llu/%.1f gpuwin %llu/%.1f cpuwrite %llu/%.1f\n",
+                (unsigned long long)g_static_reasons[0].exchange(0), g_static_reasons[1].exchange(0) / 1e6,
+                (unsigned long long)g_static_reasons[2].exchange(0), g_static_reasons[3].exchange(0) / 1e6,
+                (unsigned long long)g_static_reasons[4].exchange(0), g_static_reasons[5].exchange(0) / 1e6,
+                (unsigned long long)g_static_reasons[6].exchange(0), g_static_reasons[7].exchange(0) / 1e6,
+                (unsigned long long)g_static_reasons[8].exchange(0), g_static_reasons[9].exchange(0) / 1e6,
+                (unsigned long long)g_static_reasons[10].exchange(0), g_static_reasons[11].exchange(0) / 1e6,
+                (unsigned long long)g_static_reasons[12].exchange(0), g_static_reasons[13].exchange(0) / 1e6,
+                (unsigned long long)g_static_reasons[14].exchange(0), g_static_reasons[15].exchange(0) / 1e6);
 }
+bool BufferStatsEnabled() {
+    return BufferStatsMode() != 0;
+}
+constexpr VAddr FaultRegionBase = 0x1000000000ULL;
+constexpr size_t FaultRegionCount = 0x3000; // 1 MiB each: 0x1000000000-0x1300000000
+std::array<std::atomic<u32>, FaultRegionCount> g_region_faults{};
 BufferStats& Stats() {
     static BufferStats stats;
     return stats;
@@ -3180,6 +3206,33 @@ void PrintBufferStats() {
                 (unsigned long long)st.reuse[4], (unsigned long long)st.reuse[5],
                 (unsigned long long)st.reuse[6]);
     st.reuse = {};
+    if (BufferStatsMode() == 2) {
+        // Per MiB: BR base stream_copies stream_bytes arena_binds arena_bytes uploads dma_uploads
+        // write_faults (totals over the window).
+        static std::unordered_map<u64, u32> faults_scratch;
+        for (size_t i = 0; i < FaultRegionCount; ++i) {
+            if (const u32 n = g_region_faults[i].exchange(0, std::memory_order_relaxed)) {
+                (void)st.regions[((FaultRegionBase >> 20) + i) | (1ull << 40)];
+                faults_scratch[(FaultRegionBase >> 20) + i] = n;
+            }
+        }
+        std::printf("Buffer region stats (%.1f s totals)\n", seconds);
+        for (const auto& [region, r] : st.regions) {
+            const u64 mib = region & ((1ull << 40) - 1);
+            const auto f = faults_scratch.find(mib);
+            std::printf("  BR %#012llx %llu %llu %llu %llu %llu %llu %u\n",
+                        static_cast<unsigned long long>(mib << 20), (unsigned long long)r.stream_count,
+                        (unsigned long long)r.stream_bytes, (unsigned long long)r.arena_count,
+                        (unsigned long long)r.arena_bytes, (unsigned long long)r.upload_bytes,
+                        (unsigned long long)r.dma_upload_bytes, f == faults_scratch.end() ? 0u : f->second);
+        }
+        PrintStaticReasons();
+        std::fflush(stdout);
+        faults_scratch.clear();
+        st.regions.clear();
+        st.window = now;
+        return;
+    }
     for (const auto& [region, r] : st.regions) {
         const u64 base = (region >> 40) ? (region & ((1ull << 40) - 1)) << 20 : region << 28;
         if ((region >> 40) && r.stream_bytes + r.upload_bytes < 1e6 * seconds) {
@@ -3195,6 +3248,27 @@ void PrintBufferStats() {
     st.window = now;
 }
 } // namespace
+
+bool g_dma_sync_obtain = false;
+
+// GOW3_BUFFER_STATS=2: why read-only small bindings stream instead of using the arena (count, bytes):
+// 0 below the minimum size, 1 slot held by another range, 2 demoted before, 3 warming up (< 3
+// submissions), 4 kept-writable memory, 5 runtime wrote the backing, 6 GPU-written window, 7 CPU rewrote it.
+void NoteStaticReason(u32 reason, u32 size) {
+    if (BufferStatsMode() == 2) {
+        g_static_reasons[reason * 2].fetch_add(1, std::memory_order_relaxed);
+        g_static_reasons[reason * 2 + 1].fetch_add(size, std::memory_order_relaxed);
+    }
+}
+
+void NoteWriteFaultRegion(VAddr address) {
+    if (BufferStatsMode() != 2 || address < FaultRegionBase) {
+        return;
+    }
+    if (const u64 i = (address - FaultRegionBase) >> 20; i < FaultRegionCount) {
+        g_region_faults[i].fetch_add(1, std::memory_order_relaxed);
+    }
+}
 
 // gow3 17 Oct 2026: Uncharted 3's crowd skinning shader (cs 8f067540, ~1,500 dispatches a frame)
 // reads each character's mesh arrays (5 of 1-8 KB, never written after loading) as small read-only
@@ -3213,6 +3287,7 @@ int BufferCache::UseArenaForStatic(VAddr device_addr, u32 size) {
         return env ? std::strtoull(env, nullptr, 10) : 1024ull;
     }();
     if (!enabled || size < min_bytes) {
+        NoteStaticReason(0, size);
         return 0;
     }
     // Direct-mapped: a promoted range used in the last 256 submissions keeps its slot (others
@@ -3222,11 +3297,13 @@ int BufferCache::UseArenaForStatic(VAddr device_addr, u32 size) {
     const u64 tick = scheduler.CurrentTick();
     if (range.key != key) {
         if (range.uploaded && !range.demoted && tick - range.last_tick < 256) {
+            NoteStaticReason(1, size);
             return 0;
         }
         range = {.key = key};
     }
     if (range.demoted) {
+        NoteStaticReason(2, size);
         return 0;
     }
     if (range.ticks >= 3) {
@@ -3237,10 +3314,12 @@ int BufferCache::UseArenaForStatic(VAddr device_addr, u32 size) {
             ++range.ticks;
         }
         if (range.ticks < 3) {
+            NoteStaticReason(3, size);
             return 0;
         }
         if (Core::MemoryManager::KeptWritable(device_addr, size)) {
             range.demoted = true;
+            NoteStaticReason(4, size);
             return 0;
         }
         ++static_promoted;
@@ -3256,12 +3335,14 @@ int BufferCache::UseArenaForStatic(VAddr device_addr, u32 size) {
         MayBeGpuWritten(page_lo, page_hi - page_lo)) {
         range.demoted = true;
         ++static_demoted;
+        NoteStaticReason(Core::MemoryManager::BackingWritten(device_addr, size) ? 5 : 6, size);
         return 0;
     }
     const bool clean = range.uploaded;
     if (range.uploaded && memory_tracker->IsRegionCpuModified(device_addr, size)) {
         range.demoted = true;
         ++static_demoted;
+        NoteStaticReason(7, size);
         return 0;
     }
     range.uploaded = true;
@@ -3414,8 +3495,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         auto& region = Stats().regions[RegionKey(device_addr)];
         ++region.arena_count;
         region.arena_bytes += size;
-        region.upload_bytes +=
+        const u64 uploaded =
             Gow3Stats::buffer_upload_bytes.load(std::memory_order_relaxed) - uploaded_before;
+        region.upload_bytes += uploaded;
+        if (g_dma_sync_obtain) {
+            region.dma_upload_bytes += uploaded;
+        }
     }
     if (is_written) {
         // Small writes only (counters, constant blocks: at most two pages): the CPU writes next
