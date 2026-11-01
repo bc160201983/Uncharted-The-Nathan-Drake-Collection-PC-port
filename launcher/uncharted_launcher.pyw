@@ -2319,12 +2319,27 @@ class Launcher:
             multithreaded)
 
         def job_threads(parent):
-            value = "off" if self.config.get("job_sleep", "auto") == "off" else "on"
-            return Segmented(parent, (("on", "Sleep"), ("off", "Spin")), value,
-                             lambda v: self.change_config("job_sleep", v), self.f_small, recommended="on")
+            value = str(self.config.get("job_sleep", "auto"))
+            return Segmented(parent, (("auto", "Auto"), ("on", "Sleep"), ("off", "Spin")),
+                             value if value in ("auto", "on", "off") else "auto",
+                             lambda v: self.change_config("job_sleep", v), self.f_small, recommended="auto")
         self.row(page, "Idle game threads",
                  "Sleep: the game's helper threads rest while they wait, which keeps 4-6 core CPUs fast "
-                 "and saves power. Spin keeps their cores busy, as on the PS4.", job_threads)
+                 "and saves power. Spin keeps their cores busy, as on the PS4: smoother on CPUs with "
+                 "many cores. Auto picks Spin in Uncharted 1 on CPUs with 8 or more threads (it smooths "
+                 "the camera there) and Sleep in Uncharted 2 and 3.", job_threads)
+
+        # 1 Nov 2026 (0.8.0): experimental, so off unless the player picks it (not yet tried on a
+        # real 2 GB card).
+        def video_memory(parent):
+            value = str(self.config.get("low_vram", "off"))
+            return Segmented(parent, (("off", "Off"), ("on", "On"), ("auto", "Auto")),
+                             value if value in ("auto", "on", "off") else "off",
+                             lambda v: self.change_config("low_vram", v), self.f_small)
+        self.row(page, "Save video memory (experimental)",
+                 "For graphics cards with 2-4 GB: smaller memory reserves, about 0.5 GB less video "
+                 "memory (Uncharted 2 at 720p: 2.1 -> 1.5 GB). New and not yet tried on a real 2 GB "
+                 "card. Auto turns it on for cards with 4 GB or less.", video_memory)
 
         self.fps_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=GOLD, anchor="w")
         self.fps_note.pack(side="top", fill="x")
@@ -2739,6 +2754,20 @@ class Launcher:
         self.row(page, "Full-resolution textures (Uncharted 2 and 3)",
                  "Always the sharpest version of every texture, no blurry ones while the game streams "
                  "(off on the PS4). Extra quality, being tested. Needs update 1.02.", full_res_textures)
+
+        def no_dof(parent):
+            return Toggle(parent, self.s, self.config.get("no_dof", False),
+                          lambda v: self.change_config("no_dof", v))
+        self.row(page, "No depth of field (Uncharted 2 and 3)",
+                 "Turns off the background blur (while aiming, in cutscenes and in gameplay). Needs "
+                 "update 1.02.", no_dof)
+
+        def movie_stretch(parent):
+            return Toggle(parent, self.s, self.config.get("movie_stretch", False),
+                          lambda v: self.change_config("movie_stretch", v))
+        self.row(page, "Stretch movies to the screen",
+                 "The prerecorded cutscenes are 16:9 videos. Off: they keep their shape with black bars on "
+                 "ultrawide screens. On: they fill the whole screen, stretched.", movie_stretch)
 
         def unlock(parent):
             return Toggle(parent, self.s, self.config.get("unlock", False),
@@ -3334,13 +3363,17 @@ class Launcher:
                 env["UNCHARTED_NET_TITLE"] = net["title"]
         env["UNCHARTED_DIAGNOSTICS"] = "1" if self.config.get("diagnostics", True) else "0"
         env["UNCHARTED_TORCH_FORWARD"] = "1" if self.config.get("torch_forward", True) else "0"
-        env["UNCHARTED_JOB_SLEEP"] = "0" if self.config.get("job_sleep", "auto") == "off" else "1"
+        env["UNCHARTED_JOB_SLEEP"] = {"off": "0", "on": "1"}.get(str(self.config.get("job_sleep", "auto")), "auto")
+        # renderer_vulkan/vk_instance.cpp: 1 on, auto (cards of 4.5 GiB or less), anything else off
+        env["GOW3_LOW_VRAM"] = {"on": "1", "auto": "auto"}.get(str(self.config.get("low_vram", "off")), "0")
         env["UNCHARTED_LANGUAGE"] = str(self.config.get("language", "1"))
         env["UNCHARTED_SPEAKERS"] = str(self.config.get("speakers", "auto"))
         env["UNCHARTED_U3_EXPOSURE"] = str(self.config.get("u3_exposure", "0"))
         env["UNCHARTED_ANISOTROPY"] = str(self.config.get("anisotropy", "0"))
         env["UNCHARTED_HIRES_SHADOWS"] = "1" if self.config.get("hires_shadows", False) else "0"
         env["UNCHARTED_FULL_RES_TEXTURES"] = "1" if self.config.get("full_res_textures", False) else "0"
+        env["UNCHARTED_NO_DOF"] = "1" if self.config.get("no_dof", False) else "0"
+        env["GOW3_MOVIE_STRETCH"] = "1" if self.config.get("movie_stretch", False) else "0"
         env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"
         env["UNCHARTED_UNLOCK_REWARDS"] = "1" if self.config.get("unlock_rewards", False) else "0"
         if self.chosen_update():

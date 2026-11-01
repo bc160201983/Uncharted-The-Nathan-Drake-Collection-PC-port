@@ -444,9 +444,34 @@ static void u1_follow_turn(unsigned char *camera, float *dir, const float *tune,
         }
     }
 }
+/* gow3 1 Nov 2026 (user: Uncharted 1's camera feels jerky at a steady frame rate): GOW3_U1_CAMERA_TRACE=<file>,
+ * one line per update of the camera the player steers: host time (us), the game's frame counter,
+ * its frame time (dt), the heading (degrees). With the stick held at a constant angle, an even turn
+ * gives the same heading step per unit of host time; a jerk shows as uneven steps. A test aid. */
+static void u1_camera_trace(const unsigned char *camera, const unsigned char *params) {
+    static FILE *file;
+    static int state = -1;
+    if (state < 0) {
+        const char *path = getenv("GOW3_U1_CAMERA_TRACE");
+        file = path && path[0] ? fopen(path, "w") : NULL;
+        if (file) setvbuf(file, NULL, _IOFBF, 1 << 16);
+        state = file != NULL;
+    }
+    if (!state || !camera || !params || !params[0x08]) return;
+    const float *d = (const float *)(camera + 0x1310);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const float *input = *(const float *const *)(params + 0x10);
+    fprintf(file, "%llu %d %.6f %.4f %.3f\n",
+            (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000ull, u1_frame(),
+            *(const float *)(image + 0xa4cb10), atan2f(d[0], d[2]) * 57.29578f, input ? input[2] : 0.0f);
+    static unsigned lines;
+    if (++lines % 256 == 0) fflush(file);
+}
 static ABI void *u1_follow_camera_input(unsigned char *location, unsigned char *camera, unsigned char *params) {
     (void)location;
     if (look_debug()) u1_follow_debug(camera, params);
+    u1_camera_trace(camera, params);
     if (!u1_enabled() || !camera || !params) return NULL;
     float *dir = (float *)(camera + 0x1310);
     const float *tune = *(const float *const *)(camera + 0x1e0);

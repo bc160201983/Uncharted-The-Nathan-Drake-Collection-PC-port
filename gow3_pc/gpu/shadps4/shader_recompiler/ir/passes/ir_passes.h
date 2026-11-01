@@ -43,6 +43,10 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
                              const Profile& profile);
 /// gow3: whether the shader gets LDS barriers for groups of several waves on 32-lane subgroups.
 bool MultiwaveLdsBarriers(u64 pgm_hash);
+/// gow3 1 Nov 2026: clamps the per-vertex loop bound of the effect/crowd skinning shaders
+/// (effect_loop_clamp_pass.cpp); EffectLoopClamp tells whether a shader gets it (cache names).
+void EffectLoopClampPass(IR::Program& program);
+bool EffectLoopClamp(u64 pgm_hash);
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);
 void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_info,
                                const Profile& profile);

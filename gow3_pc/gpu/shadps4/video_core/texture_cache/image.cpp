@@ -284,9 +284,11 @@ namespace {
 class SpareBlockKeeper {
 public:
     static void Note(VmaAllocator allocator, u32 memory_type) {
+        // gow3 1 Nov 2026: not with low video memory (a 64 MiB spare is a whole block there).
         static SpareBlockKeeper* const keeper = [allocator]() -> SpareBlockKeeper* {
             const char* env = std::getenv("GOW3_SPARE_IMAGE_BLOCK");
-            return env && env[0] == '0' ? nullptr : new SpareBlockKeeper(allocator); // process-long
+            const bool off = env ? env[0] == '0' : Vulkan::g_low_video_memory;
+            return off ? nullptr : new SpareBlockKeeper(allocator); // process-long
         }();
         if (keeper) {
             keeper->Wake(memory_type);

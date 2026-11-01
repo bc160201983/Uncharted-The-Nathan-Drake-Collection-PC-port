@@ -48,6 +48,8 @@ int vulkan_smoke(void);
 /* runtime_redzone.c: guest leaf functions' red zones kept clear of exception frames. */
 uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint64_t *segments, uint64_t count);
 void runtime_redzone_after_fault(void *context);
+int runtime_isa_configure(uint32_t leaf1_ecx, uint32_t leaf7_ebx, uint32_t ext1_ecx, char *missing, size_t size);
+int runtime_isa_emulate(void *context);
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
@@ -439,7 +441,29 @@ static void cover_current_stack(const CONTEXT *context) {
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    if (code==EXCEPTION_STACK_OVERFLOW) {
+        /* gow3 1 Nov 2026: a stack overflow leaves almost no stack for the report below (the
+         * 2 GB card simulation died silently). First a few fixed lines written with no stack use:
+         * thread id, rip, rsp and the thread's stack bounds (TEB). */
+        static char line[160];
+        static const char hex[]="0123456789abcdef";
+        const NT_TIB *tib=(const NT_TIB *)NtCurrentTeb();
+        const unsigned long long values[5]={GetCurrentThreadId(),info->ContextRecord->Rip,info->ContextRecord->Rsp,
+                                            (unsigned long long)(uintptr_t)tib->StackBase,(unsigned long long)(uintptr_t)tib->StackLimit};
+        static const char *const names[5]={"STACK OVERFLOW thread ","  rip ","  rsp ","  stack base ","  limit "};
+        int n=0;
+        for (int v=0;v<5;++v) {
+            for (const char *s=names[v];*s;) line[n++]=*s++;
+            for (int shift=60;shift>=0;shift-=4) line[n++]=hex[(values[v]>>shift)&15];
+        }
+        line[n++]='\n';
+        DWORD written=0;
+        WriteFile(GetStdHandle(STD_OUTPUT_HANDLE),line,(DWORD)n,&written,NULL);
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE),line,(DWORD)n,&written,NULL);
+    }
     cover_current_stack(info->ContextRecord);
+    /* gow3 1 Nov 2026: an instruction this CPU lacks (runtime_isa.c). */
+    if (code==EXCEPTION_ILLEGAL_INSTRUCTION && runtime_isa_emulate(info->ContextRecord)) return EXCEPTION_CONTINUE_EXECUTION;
     if (code==EXCEPTION_SINGLE_STEP && (info->ContextRecord->Dr6&0xf)) return watch_hit(info);
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
         /* GOW3_FAULT_TRACE=1: the first 64 access violations (diagnostics), written directly so
@@ -779,6 +803,30 @@ static int install_jump(uint64_t at, unsigned length, unsigned char *stub) {
     return 1;
 }
 
+/* gow3 1 Nov 2026: stub space for runtime_isa.c (the old-CPU instruction stubs, 64 KiB chunks)
+ * within relative-jump range of the image, from the free space around it. */
+unsigned char *runtime_near_image_alloc(size_t bytes, int executable) {
+#ifdef _WIN32
+    bytes = (bytes + 0xffff) & ~(size_t)0xffff;
+    const uintptr_t lo = (uintptr_t)image > UINT64_C(0x60000000) ? (uintptr_t)image - UINT64_C(0x60000000) : 0x10000;
+    const uintptr_t hi = (uintptr_t)image + UINT64_C(0x60000000);
+    MEMORY_BASIC_INFORMATION info;
+    for (uintptr_t address = lo; address < hi && VirtualQuery((void *)address, &info, sizeof(info));
+         address = (uintptr_t)info.BaseAddress + info.RegionSize) {
+        if (info.State != MEM_FREE) continue;
+        const uintptr_t start = ((uintptr_t)info.BaseAddress + 0xffff) & ~(uintptr_t)0xffff;
+        if (start + bytes > (uintptr_t)info.BaseAddress + info.RegionSize || start + bytes > hi) continue;
+        void *p = VirtualAlloc((void *)start, bytes, MEM_RESERVE | MEM_COMMIT,
+                               executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE);
+        if (p) return p;
+    }
+    return NULL;
+#else
+    (void)bytes; (void)executable;
+    return NULL;
+#endif
+}
+
 /* A page for hook stubs within relative-jump range of the image (the image sits below 2 GiB with
  * --low-image; a page anywhere may be out of range). */
 static unsigned char *allocate_near_image(uint64_t size) {
@@ -1043,16 +1091,33 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--validate-uc2mp] [--no-game-hooks] [--content-profile file] [--app0 dir] [--app0-overlay dir]... [--user dir] [--patches file] [--timeout seconds] [--guest-path /app0/file] [--guest-arg value]... | --vulkan-only\n", argv[0]);
         return 1;
     }
-    /* The guest code needs the PS4's instruction sets (#33, #66); GOW3_CPU_CHECK=0 skips this. */
+    /* The guest code needs the PS4's instruction sets (#33, #66); GOW3_CPU_CHECK=0 skips this.
+     * gow3 1 Nov 2026 (#154, #299): MOVBE, BMI1, LZCNT and F16C are emulated where the CPU lacks
+     * them (runtime_isa.c; GOW3_ISA_COMPAT=0: off); SSE4.2, POPCNT and AVX are still needed. */
     const char *cpu_check = getenv("GOW3_CPU_CHECK");
+    const CpuFeatureWords cpu_words = cpu_feature_words();
+    char emulated[64];
+    const int isa_emulation = runtime_isa_configure(cpu_words.leaf1_ecx, cpu_words.leaf7_ebx, cpu_words.ext1_ecx,
+                                                    emulated, sizeof emulated);
+    const char *isa_env = getenv("GOW3_ISA_COMPAT");
+    const int isa_allowed = !(isa_env && isa_env[0] == '0');
     if (!cpu_check || strcmp(cpu_check, "0")) {
         char missing[128];
-        if (cpu_missing_features(cpu_feature_words(), missing, sizeof missing)) {
-            printf("STOP: this CPU lacks instruction sets the game's code uses: %s "
-                   "(Intel Haswell 2013 or newer, or AMD Ryzen or newer, is needed)\n", missing);
+        CpuFeatureWords checked = cpu_words;
+        if (isa_emulation) {
+            checked.leaf1_ecx |= (1u << 22) | (1u << 29);   /* MOVBE, F16C */
+            checked.leaf7_ebx |= 1u << 3;                   /* BMI1 */
+            checked.ext1_ecx |= 1u << 5;                    /* LZCNT */
+        }
+        if (cpu_missing_features(checked, missing, sizeof missing)) {
+            printf("STOP: this CPU lacks instruction sets the game's code uses: %s (%s)\n", missing,
+                   isa_allowed ? "a CPU with AVX is needed: Intel Sandy Bridge 2011 or newer, AMD FX or newer"
+                               : "Intel Haswell 2013 or newer, or AMD Ryzen or newer, is needed");
             return 20;
         }
     }
+    if (isa_emulation == 1)
+        printf("CPU: %s emulated (this CPU lacks them; the game's code runs them in an exception handler)\n", emulated);
     if (content_profile) {
         FILE *profile=fopen(content_profile,"rb");
         unsigned char data[28];
@@ -1357,6 +1422,8 @@ int main(int argc, char **argv) {
     }
 #ifdef _WIN32
     typedef void (ABI *Entry)(void *, void (ABI *)(void));
+    extern void runtime_thread_widen_stack_limit(void);
+    runtime_thread_widen_stack_limit();   /* the guest main thread runs fibers too */
     ((Entry)(image + entry))(&params, guest_exit);
 #else
     /* The guest main thread runs on a stack below 1 TiB like PS4 stacks. */

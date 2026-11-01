@@ -4,6 +4,58 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 1 November 2026 (0.8.0)
+
+- **Frame pacing with VSync at the display's rate** (user report, Uncharted 1 at 75 FPS on 75 Hz,
+  both PCs): with the vblank following the display, the present slots caught up after a late flip
+  (next_flip = max(+T, now - T)); with FIFO each catch-up pair left one more frame queued for the
+  display, which never drained at one flip per refresh. Once full, the presenter's copy waited for
+  the swapchain image on the graphics queue, the game's next GPU work queued behind it and its
+  end-of-pipe interrupts arrived two at once: the game ran two frames back to back and skipped a
+  vblank (23 + 3 ms). Now: no catch-up while following the display (GOW3_DISPLAY_QUEUE), a full
+  queue skips one flip slot to drain it, and the present thread waits for the acquired image on
+  the CPU (acquire fence, GOW3_ACQUIRE_FENCE) so game GPU work never waits for the display. U1 at
+  the user's settings: 18 of 19 sessions smooth with the first part, 17 of 17 with the image wait,
+  against 4 of 17 before. Swapchain recreation also resets the frame index (it could index past
+  the semaphores when the image count shrank).
+- **#274**: UNCHARTED_JOB_SLEEP auto spins from 8 hardware threads in Uncharted 1; Uncharted 2
+  and 3 keep Sleep (no measured gain from Spin there).
+- **Options**: "No depth of field" for U2/U3 (#169, the debug menus' depth-of-field switches,
+  UNCHARTED_NO_DOF) and "Stretch movies to the screen" (#145, GOW3_MOVIE_STRETCH).
+- **Garbage T#/S# bindings** (seen before the NVIDIA ReadInvalid losses #316 #314 #277 #76 #224
+  #249, not shown to cause them): a null descriptor now has the binding's own type and count,
+  and a sampler's maxLod is never below its minLod (GOW3_TSHARP_GUARD=0: as before).
+- **Heavy scenes** (GPU command thread): SubmitGfx keeps its order under its own lock and holds
+  the queue lock only for the push (GOW3_SUBMIT_ORDER_LOCK); a scanned buffer wakes one
+  draw-preparation worker instead of all of them (GOW3_PREP_WAKE_ONE); readback watch scans only
+  when the tick moved. Gate against 0.7.2 (1080p, limit 120, the same saves,
+  60 s alternating): U2 112.2 -> 117.1 FPS (1% low 81.0 -> 89.5); U3 4 cores 1% low 56.3 -> 59.9
+  (frames over 2x the median 117 -> 76 a minute); U1 unchanged at the cap; U2 4 cores 79.5 -> 77.6
+  (within the run-to-run spread). Uncapped A/B at the U2 spot: about 121 -> 132 FPS. 5-minute soaks
+  of U1/U2/U3 and U3 with DLSS, FSR 4 and TAA: no problems.
+- **Older CPUs** (#154, #299): MOVBE, ANDN, BEXTR, BLSI/BLSMSK/BLSR, LZCNT/TZCNT and F16C are
+  rewritten at load time into native sequences or small stubs (runtime_isa.c, GOW3_ISA_COMPAT);
+  any CPU with AVX runs the games. Unit test: 42 forms against the CPU.
+- **Experimental, off by default: low video memory mode** (launcher "Save video memory",
+  GOW3_LOW_VRAM=1|auto): 64 MiB VMA blocks, a smaller residency pool, no spare image block, idle
+  staging freed, and the 128 MiB BDA page table as a sparse buffer (16 MiB cleared up front).
+  Uncharted 2 at 720p 2083 -> 1499 MiB, U1 1802 -> 1284, U3 1813 -> 1215; same frame rate and
+  picture. Not yet tried on a real 2 GB card.
+- **AMD menu flicker at 1080p/1440p** (#236, #278, #325): the presenter transitioned the display
+  image for fragment shaders only, but RCAS (fsr_pass, which runs when the picture is the
+  window's size) reads it in a compute shader; the barrier now covers compute too. RCAS loads are
+  clamped to the picture (#297: a bright line at the right/bottom edges).
+- **Crashes**: game jobs run without parameters ("read at 0x20", #205 #304 #326; job params
+  guard); Uncharted 3 chapter 2 effect shaders 8f067540/7d7e7206 looping on garbage counts (#328);
+  start-up stack overflow with a nearly full video memory (thread stack bounds); invalid graphics
+  commands for empty textures; Uncharted 3 movies at double speed with a 60 Hz vblank and a limit
+  above 60.
+- **#293**: the player's move-action pool in Uncharted 1 and 2 has 256 slots instead of 64
+  (UNCHARTED_MOVE_POOL=0: off).
+- **Saves** (#311): a save the game could write is flushed to disk at unmount and copied to
+  <title>/.backup/<dir>/; a mount puts back files that are empty or all zeros from that copy
+  (GOW3_SAVE_BACKUP=0: off). Unit test tests/test_savedata.c.
+
 ## 29 October 2026 (0.7.2)
 
 - **Performance**: the GPU command thread waited on Windows and on its own memory housekeeping.

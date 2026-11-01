@@ -30,6 +30,7 @@ namespace {
 // upload ring keeps GOW3_STAGING_KEEP_MB (512) and is populated at startup.
 constexpr u64 RING_IDLE_FRAMES = 3000;
 constexpr u64 LARGE_IDLE_FRAMES = 3000;
+constexpr u64 LARGE_IDLE_FRAMES_LOW_VRAM = 120;
 constexpr u64 PREWARM_BLOCKS = 8;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
@@ -189,11 +190,18 @@ void StagingBufferPool::FreeDeferred(const StagingBufferRef& ref) {
 
 void StagingBufferPool::TickFrame() {
     ++frame;
-    for (Ring& ring : rings) {
-        TrimRing(ring);
+    // gow3 1 Nov 2026 (2 GB cards): with low video memory, idle video-memory staging buffers
+    // (texture detiling, up to tens of MiB each) are freed after 120 frames, not 3000, and the
+    // video-memory ring keeps 2 blocks (not 32).
+    for (u32 i = 0; i < NUM_TYPES; ++i) {
+        const bool low = i == u32(MemoryType::DeviceLocal) && g_low_video_memory;
+        TrimRing(rings[i], low ? 2 : keep_blocks,
+                 low ? LARGE_IDLE_FRAMES_LOW_VRAM : RING_IDLE_FRAMES);
     }
-    for (auto& cache : large_caches) {
-        TrimLarge(cache);
+    for (u32 i = 0; i < NUM_TYPES; ++i) {
+        TrimLarge(large_caches[i], i == u32(MemoryType::DeviceLocal) && g_low_video_memory
+                                       ? LARGE_IDLE_FRAMES_LOW_VRAM
+                                       : LARGE_IDLE_FRAMES);
     }
     PublishStats();
     // gow3 statistics: the pool's size over time (a growing pool means growing per-use scans
@@ -219,11 +227,11 @@ void StagingBufferPool::TickFrame() {
     }
 }
 
-void StagingBufferPool::TrimRing(Ring& ring) {
+void StagingBufferPool::TrimRing(Ring& ring, u64 keep, u64 idle_frames) {
     auto& blocks = ring.blocks;
     for (size_t i = blocks.size(); i-- > 0;) {
         const Block& block = blocks[i];
-        if (blocks.size() <= keep_blocks || frame - block.last_used_frame < RING_IDLE_FRAMES ||
+        if (blocks.size() <= keep || frame - block.last_used_frame < idle_frames ||
             !scheduler.IsFree(block.buffer->LastTick())) {
             continue;
         }
@@ -239,9 +247,9 @@ void StagingBufferPool::TrimRing(Ring& ring) {
     }
 }
 
-void StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache) {
-    std::erase_if(cache, [this](const LargeBuffer& entry) {
-        return !entry.held && frame - entry.last_used_frame >= LARGE_IDLE_FRAMES &&
+void StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache, u64 idle_frames) {
+    std::erase_if(cache, [this, idle_frames](const LargeBuffer& entry) {
+        return !entry.held && frame - entry.last_used_frame >= idle_frames &&
                scheduler.IsFree(entry.tick);
     });
 }

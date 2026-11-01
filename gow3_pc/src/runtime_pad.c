@@ -130,8 +130,30 @@ static int pad_index(void) {
     return index;
 }
 /* Opens the first gamepad SDL knows about (or the GOW3_PAD_INDEX-th); called under lock. */
+/* gow3 1 Nov 2026 (GitHub #309: the Treasure Vault lever in Uncharted 1 asks to mash Triangle,
+ * and fast DualSense taps did nothing; a keyboard key, held longer, worked): the pad is sampled
+ * when the game reads it, so a press and release between two reads was never seen. Every button
+ * that went down since the last read now counts as pressed in that read (SDL event watch on the
+ * window thread; read and cleared in sample_host). GOW3_PAD_LATCH=0: off. */
+static unsigned long long pad_taps; /* bit = SDL_GamepadButton, set on BUTTON_DOWN */
+static bool SDLCALL pad_tap_watch(void *userdata, SDL_Event *event) {
+    (void)userdata;
+    if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN && event->gbutton.button<64 &&
+        (!gamepad || event->gbutton.which==SDL_GetGamepadID(gamepad)))
+        __atomic_or_fetch(&pad_taps,1ull<<event->gbutton.button,__ATOMIC_RELAXED);
+    return true;
+}
+static int pad_latch_enabled(void) {
+    static int value=-1;
+    if (value<0) { const char *e=getenv("GOW3_PAD_LATCH"); value=!(e && e[0]=='0'); }
+    return value;
+}
+
 static SDL_Gamepad *current_gamepad(void) {
-    if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+    if (!sdl_ready) {
+        sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+        if (sdl_ready>0 && pad_latch_enabled()) SDL_AddEventWatch(pad_tap_watch,NULL);
+    }
     if (sdl_ready<0) return NULL;
     if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
     if (!gamepad) {
@@ -589,9 +611,13 @@ static void sample_host(PadData *d) {
     /* SDL delivers gamepad events in the background too (window.cpp): the game takes them
      * only while its window is in front, or always with its own controller (GOW3_PAD_INDEX,
      * local co-op: two windows, one controller each). */
+    const unsigned long long taps=__atomic_exchange_n(&pad_taps,0ull,__ATOMIC_RELAXED);
     if (g && (pad_index() || gow3gpu_window_foreground())) {
-        for (size_t i=0;i<pad_map.count;++i)
-            if (SDL_GetGamepadButton(g,(SDL_GamepadButton)pad_map.entries[i].source)) d->buttons|=pad_map.entries[i].ps;
+        for (size_t i=0;i<pad_map.count;++i) {
+            const int source=pad_map.entries[i].source;
+            if (SDL_GetGamepadButton(g,(SDL_GamepadButton)source) ||
+                (source>=0 && source<64 && (taps>>source & 1ull))) d->buttons|=pad_map.entries[i].ps;
+        }
         const uint32_t mapped=d->buttons;
         d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
         d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));

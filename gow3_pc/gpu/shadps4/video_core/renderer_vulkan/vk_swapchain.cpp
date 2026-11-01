@@ -54,6 +54,9 @@ void Swapchain::Create(u32 width_, u32 height_) {
     needs_recreation = false;
 
     Destroy();
+    // gow3 1 Nov 2026: the semaphores and fences are new and the image count may have shrunk
+    // (frame_index indexed past image_acquired after such a recreate).
+    image_index = frame_index = 0;
 
     if (headless) {
         ASSERT_MSG(width && height, "Offscreen rendering requires nonzero dimensions");
@@ -141,11 +144,50 @@ bool Swapchain::AcquireNextImage() {
     if (headless) return true; // Presenter synchronously finishes each offscreen submission.
     vk::Device device = instance.GetDevice();
     vk::Result result;
+    // gow3 1 Nov 2026 (user: Uncharted 1 jerky at 75 FPS on a 75 Hz monitor): the image is
+    // waited for here, on the present thread, before the frame's copy into it is submitted.
+    // Before, only the copy's semaphore waited for it: with the display's queue full the
+    // graphics queue stalled behind that copy until the display let an image go, the game's
+    // next frame of GPU work with it, and its end-of-pipe interrupts came two at once (the game
+    // then ran two frames back to back and skipped a vblank). Waiting on the CPU keeps the
+    // game's GPU work flowing, and the presentation waits it causes show up where the display
+    // queue drain sees them (VideoOutDriver::PresentThread). GOW3_ACQUIRE_FENCE=0: semaphore only.
+    static const bool fence_wait = [] {
+        const char* env = std::getenv("GOW3_ACQUIRE_FENCE");
+        return !(env && env[0] == '0');
+    }();
+    vk::Fence fence{};
+    if (fence_wait && frame_index < acquire_fences.size()) {
+        // Only an acquire that took an image signals its fence (a failed one leaves it as it
+        // was), so only such a fence is waited for before its reset. One still not signaled
+        // after the wait is left to its signal and replaced (a reset or destroy would be invalid).
+        if (acquire_armed[frame_index]) {
+            if (device.waitForFences(acquire_fences[frame_index], VK_TRUE, 1'000'000'000ULL) ==
+                vk::Result::eTimeout) {
+                auto [create_result, created] = device.createFence({});
+                if (create_result == vk::Result::eSuccess) {
+                    acquire_fences[frame_index] = created;
+                }
+            }
+            acquire_armed[frame_index] = 0;
+        }
+        fence = acquire_fences[frame_index];
+        (void)device.resetFences(fence);
+    }
     {
         Gow3Stats::WaitTimer timer{Gow3Stats::acquire_ns};
         result = device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
-                                            image_acquired[frame_index], VK_NULL_HANDLE,
-                                            &image_index);
+                                            image_acquired[frame_index], fence, &image_index);
+        if (fence && (result == vk::Result::eSuccess || result == vk::Result::eSuboptimalKHR)) {
+            // Bounded: a display that never lets the image go must not stop presenting (the
+            // copy's semaphore still orders the GPU side).
+            const auto wait_start = std::chrono::steady_clock::now();
+            acquire_armed[frame_index] =
+                device.waitForFences(fence, VK_TRUE, 200'000'000ULL) != vk::Result::eSuccess;
+            if (std::chrono::steady_clock::now() - wait_start > std::chrono::milliseconds(2)) {
+                long_acquire_waits.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
     }
 
     switch (result) {
@@ -375,6 +417,18 @@ void Swapchain::Destroy() {
 
     image_acquired.clear();
     present_ready.clear();
+
+    for (size_t i = 0; i < acquire_fences.size(); ++i) {
+        // The presentation engine signals them, not a queue: waitIdle does not cover them. A
+        // fence whose signal still has not come is left alone (destroying it would be invalid).
+        if (i < acquire_armed.size() && acquire_armed[i] &&
+            device.waitForFences(acquire_fences[i], VK_TRUE, 100'000'000ULL) != vk::Result::eSuccess) {
+            continue;
+        }
+        device.destroyFence(acquire_fences[i]);
+    }
+    acquire_fences.clear();
+    acquire_armed.clear();
 }
 
 void Swapchain::CreateOffscreenImages() {
@@ -436,6 +490,15 @@ void Swapchain::RefreshSemaphores() {
         ASSERT_MSG(semaphore_result == vk::Result::eSuccess,
                    "Failed to create present ready semaphore: {}", vk::to_string(semaphore_result));
         semaphore = sem;
+    }
+
+    acquire_fences.resize(image_count);
+    acquire_armed.assign(image_count, 0);
+    for (vk::Fence& fence : acquire_fences) {
+        auto [fence_result, created] = device.createFence({});
+        ASSERT_MSG(fence_result == vk::Result::eSuccess, "Failed to create image acquired fence: {}",
+                   vk::to_string(fence_result));
+        fence = created;
     }
 
     for (u32 i = 0; i < image_count; ++i) {

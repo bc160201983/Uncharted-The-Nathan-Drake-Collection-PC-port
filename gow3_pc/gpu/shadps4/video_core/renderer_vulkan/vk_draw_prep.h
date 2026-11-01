@@ -157,7 +157,9 @@ private:
     u64 rebases = 0; ///< scanner restarts from the GPU thread state (GOW3_FRAME_STATS)
     bool baseline_ready{}; ///< guarded by `mutex`
     std::mutex mutex;
-    std::condition_variable_any cv;
+    std::condition_variable_any cv; ///< the scanner waits here
+    std::condition_variable_any work_cv; ///< gow3 1 Nov 2026: the workers wait here
+    void WakeWorkers();
     std::deque<std::shared_ptr<Submission>> submissions; ///< ordered by seq
     std::atomic<u64> gpu_seq{0};
     std::shared_ptr<Submission> current;

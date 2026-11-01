@@ -279,12 +279,15 @@ std::optional<u32> FindMemoryType(const vk::PhysicalDeviceMemoryProperties& prop
 // chunks, two of them allocated ahead on this thread; arena memory is never freed, so a chunk is
 // used front to back. Larger ranges, or none left in reserve: one allocation, as before.
 // GOW3_RESIDENCY_CHUNKS=0: always one allocation per range.
+// gow3 1 Nov 2026 (2 GB cards): with low video memory (Instance::IsLowVideoMemory) the chunks are
+// 32 MiB and one is allocated ahead: the reserve held 128-190 MiB that a small card lacks.
 struct BufferCache::ResidencyPool {
-    static constexpr u64 ChunkSize = u64{64} << 20;
-    static constexpr size_t Spares = 2;
+    const u64 ChunkSize;
+    const size_t Spares;
 
-    ResidencyPool(vk::Device device_, u32 memory_type_, bool map_)
-        : device{device_}, memory_type{memory_type_}, map{map_} {
+    ResidencyPool(vk::Device device_, u32 memory_type_, bool map_, bool low_memory)
+        : ChunkSize{u64{low_memory ? 32u : 64u} << 20}, Spares{low_memory ? 1u : 2u},
+          device{device_}, memory_type{memory_type_}, map{map_} {
         thread = std::thread{[this] { Run(); }};
     }
     ~ResidencyPool() {
@@ -525,16 +528,81 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     }
     if (const char* env = std::getenv("GOW3_RESIDENCY_CHUNKS"); !(env && env[0] == '0')) {
         residency_pool = std::make_unique<ResidencyPool>(instance.GetDevice(),
-                                                         arena_memory_type_index, arena_host_mapped);
+                                                         arena_memory_type_index, arena_host_mapped,
+                                                         instance.IsLowVideoMemory());
     }
 
     const u64 bda_pagetable_size =
         (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress);
     fault_manager = std::make_unique<FaultManager>(instance, scheduler, *this, block_shift,
                                                    blocks_per_arena_page * num_arena_pages);
+    // gow3 1 Nov 2026 (2 GB cards): the page table has an entry for every block of the 1 TiB
+    // guest address space: 128 MiB of video memory, almost all of it zeros (the games use a few
+    // GiB). With low video memory it is a sparse buffer: a page of it gets memory, cleared, when
+    // an entry in it is first written (BindPageTablePages); shader reads of the others return 0
+    // (residencyNonResidentStrict), the same as an empty entry. GOW3_SPARSE_PAGE_TABLE=0: off,
+    // =1: on any card.
+    {
+        const char* env = std::getenv("GOW3_SPARSE_PAGE_TABLE");
+        const bool wanted = env && env[0] ? env[0] == '1' : instance.IsLowVideoMemory();
+        sparse_pagetable = wanted && instance.IsSparseResidencyStrict();
+        if (wanted && !sparse_pagetable) {
+            std::printf("GPU: page table stays in full (the driver does not read unbound sparse "
+                        "memory as zeros)\n");
+        }
+    }
     bda_pagetable_buffer = std::make_unique<Buffer>(
-        instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
-    runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+        instance, 0, bda_pagetable_size,
+        sparse_pagetable ? MemoryType::Sparse : MemoryType::DeviceLocal, "BDA Page Table Buffer");
+    if (sparse_pagetable) {
+        const auto reqs =
+            instance.GetDevice().getBufferMemoryRequirements(bda_pagetable_buffer->Handle());
+        ASSERT_MSG(std::popcount(reqs.alignment) == 1, "Sparse page size {} is not a power of 2",
+                   reqs.alignment);
+        pagetable_page_bits = std::bit_width(reqs.alignment) - 1;
+        // Its memory is zeroed before any bind (a page must read 0 from the moment it is bound:
+        // work recorded or running before its entries are written reads it). Sparse resources
+        // take no CPU-visible memory on NVIDIA, so it is cleared on the GPU through a buffer of
+        // its own, and the bind waits until that is done (ZeroPageTableChunk). 16 MiB (normal
+        // play uses ~1.3) is allocated and cleared now, and nothing later (BindPageTablePages).
+        const auto type = FindMemoryType(instance.GetMemoryProperties(),
+                                         vk::MemoryPropertyFlagBits::eDeviceLocal, reqs.memoryTypeBits);
+        vk::DeviceMemory reserve{};
+        if (type) {
+            const vk::MemoryAllocateInfo info = {
+                .allocationSize = PageTableFirstChunk,
+                .memoryTypeIndex = *type,
+            };
+            auto [result, memory] = instance.GetDevice().allocateMemory(info);
+            if (result == vk::Result::eSuccess) {
+                if (ZeroPageTableChunk(memory, PageTableFirstChunk)) {
+                    reserve = memory;
+                } else {
+                    instance.GetDevice().freeMemory(memory);
+                }
+            }
+        }
+        if (type && reserve) {
+            pagetable_chunks.push_back(reserve);
+            pagetable_chunk_capacity = PageTableFirstChunk;
+            pagetable_chunk_used = 0;
+            pagetable_memory_type = *type;
+            pagetable_bound.assign((bda_pagetable_size + reqs.alignment - 1) >> pagetable_page_bits,
+                                   false);
+            std::printf("GPU: page table sparse (%llu KiB pages bound on first use, not %llu MiB at "
+                        "once; GOW3_SPARSE_PAGE_TABLE=0: off)\n",
+                        static_cast<unsigned long long>(reqs.alignment >> 10),
+                        static_cast<unsigned long long>(bda_pagetable_size >> 20));
+        } else {
+            std::printf("GPU: page table stays in full (its first memory could not be made)\n");
+            sparse_pagetable = false;
+            bda_pagetable_buffer = std::make_unique<Buffer>(
+                instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
+        }
+    }
+    if (!sparse_pagetable) {
+        runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+    }
     // Diagnostics: name the arena and guest address of a GPU fault address.
     Vulkan::g_describe_gpu_address = [this](u64 gpu_address) {
         for (const Buffer& arena : arenas) {
@@ -2074,6 +2142,7 @@ void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ran
         }
     }
     pending_readbacks.push_back(std::move(readback));
+    watch_scan_tick = ~0ULL;
     ++g_async_readbacks;
     SweepTracking();
 }
@@ -2442,14 +2511,20 @@ void BufferCache::SweepTracking() {
 void BufferCache::CompleteReadbacks(bool wait, u64 wait_until) {
     // Pages of a readback are read-protected once its submission is out: a read fault waits
     // for submitted work only (never for the command buffer this thread is still recording).
-    for (auto& readback : pending_readbacks) {
-        if (readback.watching || readback.watched.empty() || readback.tick >= scheduler.CurrentTick()) {
-            continue;
+    // gow3 1 Nov 2026: only when the tick moved or a readback was added since the last scan
+    // (watch lists only shrink): this runs for every draw and dispatch, and walking the whole
+    // queue each time was 3-10% of the GPU command thread in Uncharted 2's train yard.
+    if (const u64 tick = scheduler.CurrentTick(); tick != watch_scan_tick) {
+        watch_scan_tick = tick;
+        for (auto& readback : pending_readbacks) {
+            if (readback.watching || readback.watched.empty() || readback.tick >= tick) {
+                continue;
+            }
+            for (const auto& [address, size] : readback.watched) {
+                page_manager->UpdatePageWatchers<true, true>(address, size);
+            }
+            readback.watching = true;
         }
-        for (const auto& [address, size] : readback.watched) {
-            page_manager->UpdatePageWatchers<true, true>(address, size);
-        }
-        readback.watching = true;
     }
     // GOW3_TEST_READBACK_HOLD=<ms>:<seconds> (tests): every <seconds>, polled readbacks do not
     // land for <ms>, as on a GPU that fell behind (the FrameBegin m_gfxEopTick crash reports
@@ -3761,6 +3836,12 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     resident_in_use_blocks += resident_blocks;
     Gow3Stats::arena_in_use_bytes = resident_in_use_blocks << block_shift;
 
+    // gow3 1 Nov 2026: page-table pages first: BindPageTablePages adds to pending_binds, which
+    // would move the arena's entry under `binds` below, and (rarely) waits for the GPU, which
+    // must not happen between the staging request and its copy.
+    for (const auto& piece : pieces) {
+        BindPageTablePages(piece.start, piece.end);
+    }
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
         staging_pool.Request(resident_blocks * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
@@ -3795,6 +3876,71 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
 
     staging.Flush();
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
+}
+
+/// gow3 1 Nov 2026: clears page-table memory before any of it is bound: a buffer of its own on
+/// it, a fill on the GPU, and a wait until it is done (the page-table binds then go after it).
+bool BufferCache::ZeroPageTableChunk(vk::DeviceMemory memory, u64 size) {
+    const auto device = instance.GetDevice();
+    const vk::BufferCreateInfo info = {
+        .size = size,
+        .usage = vk::BufferUsageFlagBits::eTransferDst,
+        .sharingMode = vk::SharingMode::eExclusive,
+    };
+    auto [result, buffer] = device.createBuffer(info);
+    if (result != vk::Result::eSuccess) {
+        return false;
+    }
+    if (device.bindBufferMemory(buffer, memory, 0) != vk::Result::eSuccess) {
+        device.destroyBuffer(buffer);
+        return false;
+    }
+    scheduler.EndRendering();
+    scheduler.Record([buffer, size](vk::CommandBuffer cmdbuf) { cmdbuf.fillBuffer(buffer, 0, size, 0); });
+    scheduler.Finish();
+    device.destroyBuffer(buffer);
+    return true;
+}
+
+void BufferCache::BindPageTablePages(u64 first_block, u64 end_block) {
+    if (!sparse_pagetable || end_block <= first_block) {
+        return;
+    }
+    const u64 page_size = u64{1} << pagetable_page_bits;
+    const u64 first = (first_block * sizeof(vk::DeviceAddress)) >> pagetable_page_bits;
+    const u64 last = (end_block * sizeof(vk::DeviceAddress) - 1) >> pagetable_page_bits;
+    for (u64 page = first; page <= last && page < pagetable_bound.size(); ++page) {
+        if (pagetable_bound[page]) {
+            continue;
+        }
+        // gow3 1 Nov 2026: only the reserve cleared at start (16 MiB: 256 table pages, each for
+        // 512 MiB of guest addresses; the games use ~20). Clearing more here would wait for the GPU,
+        // and this runs inside submissions too (deferred fault callbacks): a hang. Should a game
+        // ever use it all, further pages stay unbound (reads 0: that memory looks unused).
+        if (pagetable_chunks.empty() || pagetable_chunk_used + page_size > pagetable_chunk_capacity) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                std::printf("GPU: page table reserve used up (%llu KiB): further guest memory is not "
+                            "visible to the GPU; turn off Save video memory (GOW3_LOW_VRAM=0)\n",
+                            static_cast<unsigned long long>(pagetable_chunk_capacity >> 10));
+                std::fflush(stdout);
+            }
+            return;
+        }
+        // Bound before this submission's commands run, once the GPU has finished the work
+        // submitted before (SubmitPendingArenaBinds waits for it while page-table binds are
+        // pending); the memory is already zero.
+        pagetable_binds_pending = true;
+        BindsForArena(bda_pagetable_buffer.get())->binds.push_back(vk::SparseMemoryBind{
+            .resourceOffset = page << pagetable_page_bits,
+            .size = page_size,
+            .memory = pagetable_chunks.back(),
+            .memoryOffset = pagetable_chunk_used,
+        });
+        pagetable_chunk_used += page_size;
+        pagetable_bound[page] = true;
+    }
 }
 
 void BufferCache::TrimPendingUnbinds(const Buffer* arena, u64 first_block, u64 end_block) {
@@ -3874,6 +4020,7 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
         // The guest copy is the only one now: the next use uploads it (and a static range whose
         // fast path skipped uploads takes the stream path, see UseArenaForStatic).
         memory_tracker->MarkRegionAsCpuModified(address, size);
+        BindPageTablePages(piece.start, piece.end);
         const u64 copy_size = (piece.end - piece.start) * sizeof(vk::DeviceAddress);
         copies.emplace_back(offset, piece.start * sizeof(vk::DeviceAddress), copy_size);
         offset += copy_size;
@@ -4201,14 +4348,26 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
 
     const u64 signal_tick = memory_semaphore.NextTick();
     const auto signal_sema = memory_semaphore.Handle();
+    // gow3 1 Nov 2026 (sparse page table): a page-table page newly bound must not change its
+    // binding while earlier GPU work can still read it: wait for the work submitted before.
+    // (Called from the scheduler's submit callback, after it took this submission's tick:
+    // CurrentTick() is that tick + 1, so the work submitted before is CurrentTick() - 2.)
+    const bool wait_previous = pagetable_binds_pending && scheduler.CurrentTick() > 2;
+    pagetable_binds_pending = false;
+    const u64 wait_tick = scheduler.CurrentTick() - 2;
+    const auto wait_sema = scheduler.GetWorkSemaphore()->Handle();
 
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+        .waitSemaphoreValueCount = wait_previous ? 1u : 0u,
+        .pWaitSemaphoreValues = wait_previous ? &wait_tick : nullptr,
         .signalSemaphoreValueCount = 1u,
         .pSignalSemaphoreValues = &signal_tick,
     };
 
     const vk::BindSparseInfo sparse_info = {
         .pNext = &timeline_si,
+        .waitSemaphoreCount = wait_previous ? 1u : 0u,
+        .pWaitSemaphores = wait_previous ? &wait_sema : nullptr,
         .bufferBindCount = static_cast<u32>(buffer_binds.size()),
         .pBufferBinds = buffer_binds.data(),
         .signalSemaphoreCount = 1u,

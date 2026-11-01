@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <vector>
 #include "common/types.h"
@@ -139,6 +140,14 @@ private:
     std::vector<vk::ImageView> images_view;
     std::vector<vk::Semaphore> image_acquired;
     std::vector<vk::Semaphore> present_ready;
+    std::vector<vk::Fence> acquire_fences; ///< gow3: AcquireNextImage waits on the CPU
+    std::vector<u8> acquire_armed; ///< an acquire that took an image will signal the fence
+
+public:
+    /// gow3: acquires that waited over 2 ms for their image (the display's queue was full).
+    std::atomic<u32> long_acquire_waits{0};
+
+private:
     u32 width = 0;
     u32 height = 0;
     u32 image_count = 0;

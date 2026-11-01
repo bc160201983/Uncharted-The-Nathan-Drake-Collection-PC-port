@@ -239,6 +239,59 @@ FOCUS_NAN_PATCHES = {
 }
 
 
+# 1 Nov 2026, GitHub #205, #304 (Uncharted 1), #326 (Uncharted 3, the alley cutscene after the first
+# mission): "read access to 0000000000000020" in the same engine job in all three games (U1 1.02
+# image 0x616aa0, U2 0xd24fb0, U3 0xf88f10). Its creator (U3 0xf6da4b) allocates a small record
+# {object, object->+0x78} and queues the job with it; the job copies the descriptor that +0x78
+# points at (mov rax, [r10+8]; mov rcx, [rax+0x20]). When the object's descriptor is not set yet
+# (on the PS4 its data was in place earlier) that pointer is null and the job reads address 0x20.
+# The two loads now jump to a stub that ends the job for this frame when the pointer is null
+# (at the function's own exit path, which pops the profiler scope it pushed), and otherwise carries
+# on as before. The stub sits in the dead assert path of that exit ("profiler stack empty"), which
+# still starts with int 0x41. UNCHARTED_JOB_PARAMS_GUARD=0: not applied.
+# 1 Nov 2026 (GitHub #293, Uncharted 1 and 2 "pAction != NULL" at high frame rates): the player's
+# move actions come from a bitmap pool (U2 CreateAction 0x5df3b0: capacity [pool+0x118]) made with
+# 64 slots where the character is set up (mov edx, 6; mov ecx, 64; mov r8d, 32). Two move states that
+# swap every frame each keep an action per swap; at 120-144 FPS a burst (landing into a fight) fills
+# the pool and the assertion stops the game. The pool gets 256 slots (a little more of the
+# character's heap). One site in U1 (0x26ae75 in the 1.02 eboot) and one in U2; U3 has no such pool.
+# UNCHARTED_MOVE_POOL=0: not applied.
+MOVE_ACTION_POOL_PATCH = ("player move action pool: 256 slots (#293)", [
+    ("ba06000000 b940000000 41b820000000", 5, bytes.fromhex("b940000000"), bytes.fromhex("b900010000")),
+])
+
+
+JOB_PARAMS_GUARD = {  # executable: (pattern start, the two loads, exit landing, cave)
+    "eboot.bin": ("49c7424800000000488b05a4b6b80049894210498b4208488b482049894a18488b4818",
+                  0x616aed, 0x616b00, 0x6175ab, 0x617602),
+    "big2-ps4_Shipping.elf": ("49c7424800000000488b0514e4940049894210498b4208488b482049894a18488b4818",
+                              0xd24ffd, 0xd25010, 0xd25ab9, 0xd25b10),
+    "big3-ps4_Shipping.elf": ("49c7424800000000488b05c4c3d60049894210498b4208488b482049894a18488b4818",
+                              0xf88f5d, 0xf88f70, 0xf89a19, 0xf89a70),
+}
+JOB_PARAMS_CAVE_ORIGINAL = {  # the first 24 bytes of each dead assert path (mov rax, [rip+..]; ...)
+    "eboot.bin": "488b05efe6a9004885c07427488d3d2ce91e00488d35c4e7",
+    "big2-ps4_Shipping.elf": "488b05618484004885c07427488d3dfa731800488d35ef71",
+    "big3-ps4_Shipping.elf": "488b05418dc6004885c07427488d3d08414f00488d35fd3e",
+}
+
+
+def job_params_guard_patch(executable):
+    pattern, start, loads, landing, cave = JOB_PARAMS_GUARD[executable]
+    stub_at = cave + 2                                              # after the kept int 0x41
+    stub = bytes.fromhex("cd41 498b4208 4885c0")                    # int 0x41; mov rax,[r10+8]; test
+    stub += b"\x0f\x84" + struct.pack("<i", landing - (cave + len(stub) + 6))   # jz exit landing
+    stub += bytes.fromhex("488b4820")                               # mov rcx, [rax+0x20]
+    stub += b"\xe9" + struct.pack("<i", (loads + 8) - (cave + len(stub) + 5))  # jmp back
+    original = bytes.fromhex(JOB_PARAMS_CAVE_ORIGINAL[executable])
+    assert len(stub) == len(original) == 24
+    jump = b"\xe9" + struct.pack("<i", stub_at - (loads + 5)) + b"\x90\x90\x90"
+    return ("Engine job: skip a job whose descriptor is not set yet instead of reading null (#205 #304 #326)", [
+        (pattern, [(loads - start, bytes.fromhex("498b4208488b4820"), jump),
+                   (cave - start, original, stub)]),
+    ])
+
+
 def u3_light_ortho_guard_patch():
     """28 Oct 2026, GitHub #284 (Uncharted 3 1.02, "Stay in the Light", RTX 4070, after 38 min):
     the game asserts "zscale*n+zoffset" in CreateOrthographicProjection (render-camera.h:441,
@@ -421,6 +474,15 @@ QUALITY_POKES = {
     # Uncharted 3: the same render-settings block at 0x18c6280 (menu items at 0xe0ac90, 0xe127f1).
     "big3-ps4_Shipping.elf": {"hires_shadows": ["18c6444"], "full_res_textures": ["18c6a40"]},
 }
+# 1 Nov 2026 (GitHub #169 "disable the depth of field"): the same debug menus' "Enable Depth of
+# Field" (render-settings block + 0x1bd; U2 menu item 0xbca021, U3 0xe30f71) and "Enable Camera /
+# Object Motion Blur" (bytes 0x1b9 / 0x1ba of the block behind the pointer at U2 0x104ad90, U3
+# 0x16e3078; menu items U2 0xbca6f0 / 0xbca7d0, U3 0xe31660 / 0xe31740), kept at 0 while chosen
+# (launcher -> Advanced; UNCHARTED_NO_DOF=1, UNCHARTED_NO_MOTION_BLUR=1). Uncharted 1 not mapped.
+QUALITY_POKES["big2-ps4_Shipping.elf"].update({"no_dof": ["1247cfd=0"],
+                                              "no_motion_blur": ["*104ad90+1b9=0", "*104ad90+1ba=0"]})
+QUALITY_POKES["big3-ps4_Shipping.elf"].update({"no_dof": ["18c643d=0"],
+                                              "no_motion_blur": ["*16e3078+1b9=0", "*16e3078+1ba=0"]})
 # Drake's Fortune keeps each reward's status in its own record (bit 0 unlocked) and its debug
 # switch also writes them, so its checks are patched instead: every reward reads as unlocked,
 # usable and counted ("Unlocked 47 of 47"), and the Story Cutscenes list skips no chapter. The
@@ -697,11 +759,33 @@ EXECUTABLES = tuple(PATCHES)
 LOADEXEC_EXIT = 30
 
 
-def job_sleep_enabled():
+def job_sleep_enabled(executable=None):
     """JOB_SLEEP_PATCHES: on unless UNCHARTED_JOB_SLEEP=0 (launcher: Idle game threads -> Spin).
     Spinning job threads starve 4-6 core CPUs (GPU thread 5% of a core), heat laptops and, on a
-    16-core desktop, used about 4 more cores for 2% fewer FPS."""
-    return os.environ.get("UNCHARTED_JOB_SLEEP", "auto").strip().lower() not in ("0", "off", "no")
+    16-core desktop, used about 4 more cores for 2% fewer FPS.
+    1 Nov 2026 (GitHub #274: Uncharted 1 uneven although the frame times looked flat; a player found
+    Spin fixed it): each sleeping worker wakes a little late, which makes the game's own job timing
+    uneven. Measured on the desktop (U1, full CPU): Spin 0.1% low 64 -> 110 FPS, worst frame 18.4 ->
+    9.4 ms. auto (the default): Spin when the CPU has at least JOB_SPIN_MIN_THREADS hardware
+    threads for this game, Sleep below and in games without an entry (4-core CPUs fall to ~5 FPS
+    with Spin)."""
+    value = os.environ.get("UNCHARTED_JOB_SLEEP", "auto").strip().lower()
+    if value in ("0", "off", "no", "spin"):
+        return False
+    if value == "auto":
+        game = GAME_KEYS.get(executable or "", "")
+        minimum = JOB_SPIN_MIN_THREADS.get(game)
+        return minimum is None or host_hardware_threads() < minimum
+    return True
+
+
+# 1 Nov 2026 (#274, analysis/optimization-1028/runs/js-*): Spin helps with many CPUs (U1 0.1% low
+# 64 -> 110 FPS on 16 threads). On 8 threads (4 cores x 2) U1 still gains a lot (the jerky camera:
+# 0.1% low 59 -> 109 FPS, 13 hitches a minute -> 0) while U2 and U3 lose (U2 1% low 105 -> 83);
+# on 4 threads Spin starves the game (U2 85 -> 4.5 FPS, U3 119 -> 5.9). Auto: Spin from 8 logical
+# CPUs in Uncharted 1. Uncharted 2 and 3 keep Sleep (0.8.0): nothing measured a gain from Spin
+# there (8 threads: U2 1% low 105 -> 83; 17 Oct, 16 cores: about 2% fewer FPS).
+JOB_SPIN_MIN_THREADS = {"u1": 8}
 
 
 def host_hardware_threads():
@@ -1360,6 +1444,18 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         patches.extend(REWARD_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_FOCUS_RESET", "1") != "0":
         patches.extend(FOCUS_NAN_PATCHES.get(executable, []))
+    if executable in JOB_PARAMS_GUARD and os.environ.get("UNCHARTED_JOB_PARAMS_GUARD", "1") != "0":
+        patches.append(job_params_guard_patch(executable))
+    if executable in ("eboot.bin", "big2-ps4_Shipping.elf") and os.environ.get("UNCHARTED_MOVE_POOL", "1") != "0":
+        patches.append(MOVE_ACTION_POOL_PATCH)
+    # Test knob for that guard (never in the launcher): Uncharted 3's creator at 0xf6da01 stores a
+    # null descriptor (mov rcx, [rax+0x78] becomes xor ecx, ecx), so every such job gets the null
+    # the players' crash had.
+    if executable == "big3-ps4_Shipping.elf" and os.environ.get("UNCHARTED_TEST_JOB_PARAMS_NULL") == "1":
+        patches.append(("Uncharted 3 TEST: null job descriptor (UNCHARTED_TEST_JOB_PARAMS_NULL)", [
+            ("498b4500488b48784989042449894c2408813810", 4, bytes.fromhex("488b4878"),
+             bytes.fromhex("31c99090")),
+        ]))
     if executable == "big3-ps4_Shipping.elf":
         if os.environ.get("UNCHARTED_LIGHT_ORTHO_GUARD", "1") != "0":
             patches.append(u3_light_ortho_guard_patch())
@@ -1382,7 +1478,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         patches.append(u3_exposure_patch(bias))
     if workers := job_worker_count():
         patches.extend(job_worker_patches(executable, workers))
-    if job_sleep_enabled():
+    if job_sleep_enabled(executable):
         patches.extend(JOB_SLEEP_PATCHES)
         # Diagnostics: UNCHARTED_JOB_SLEEP_SPINS=<n> idle spins before a worker sleeps (1000).
         if spins := os.environ.get("UNCHARTED_JOB_SLEEP_SPINS", "").strip():
@@ -1431,7 +1527,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     env = os.environ.copy()
     wanted = cheat_names(executable)
     rewards = os.environ.get("UNCHARTED_UNLOCK_REWARDS", "0") == "1"
-    quality = [name for name in ("hires_shadows", "full_res_textures")
+    quality = [name for name in ("hires_shadows", "full_res_textures", "no_dof", "no_motion_blur")
                if os.environ.get("UNCHARTED_" + name.upper(), "0") == "1"
                and name in QUALITY_POKES.get(executable, {})]
     if (wanted or rewards or quality) and "GOW3_POKE" not in env:
@@ -1493,8 +1589,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # a heavy Cartagena spot on the NVIDIA GPU it is the difference between 53.7 FPS with 11 stalls
     # over 100 ms (off) and 60 FPS with 1 (on), the single GPU command thread being the limit.
     if multithreaded is not None:
-        env["GOW3_DRAW_PIPE"] = multithreaded
-        env["GOW3_VK_RECORD_THREAD"] = multithreaded
+        # 1 Nov 2026: an explicit GOW3_DRAW_PIPE / GOW3_VK_RECORD_THREAD (tests: one of the two
+        # alone) wins over the launcher's choice.
+        env["GOW3_DRAW_PIPE"] = os.environ.get("GOW3_DRAW_PIPE", multithreaded)
+        env["GOW3_VK_RECORD_THREAD"] = os.environ.get("GOW3_VK_RECORD_THREAD", multithreaded)
     # Keyboard and mouse (launcher Controls tab, per game; explicit GOW3_* values win).
     for launcher_key, runtime_key in (("KEY_MAP", "GOW3_KEY_MAP"), ("MOUSE_MAP", "GOW3_MOUSE_MAP"),
                                       ("MOUSE", "GOW3_MOUSE"), ("MOUSE_SENS", "GOW3_MOUSE_SENS"),

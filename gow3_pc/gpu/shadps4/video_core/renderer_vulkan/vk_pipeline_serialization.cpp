@@ -44,9 +44,12 @@ static constexpr u32 PipelineKeyVersion = 5u; // gow3: Info layout (ImageResourc
 
 /// gow3: the cache name of a shader's SPIR-V. Shaders that gained multi-wave LDS barriers get a
 /// new name, so binaries cached before the fix are not found and only those shaders recompile.
+/// gow3 1 Nov 2026: the effect/crowd skinning shaders with a clamped loop bound (and the test
+/// count) get their own names too (effect_loop_clamp_pass.cpp).
 static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
-    return fmt::format("{:#018x}_{}{}", pgm_hash, perm_idx,
-                       Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "");
+    return fmt::format("{:#018x}_{}{}{}", pgm_hash, perm_idx,
+                       Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "",
+                       Shader::Optimization::EffectLoopClamp(pgm_hash) ? "_lc1" : "");
 }
 } // namespace Serialization
 

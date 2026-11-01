@@ -502,8 +502,15 @@ void Scheduler::Checkpoint(const char* operation,u64 first,u64 second) {
 }
 /// Set by the buffer cache: prints which arena and guest address a GPU address belongs to.
 std::function<void(u64)> g_describe_gpu_address;
+/// gow3 1 Nov 2026 (11-U3-CH2-CRASH.md): set by the rasterizer: its recent effect-shader
+/// dispatches (loop counts), printed when the device is lost.
+void (*g_device_lost_report)() = nullptr;
 void DescribeBoundAddress(u64 address);
 void DumpDeviceFault(const Instance& instance) {
+    static std::atomic<bool> reported{false};
+    if (g_device_lost_report && !reported.exchange(true)) {
+        g_device_lost_report();
+    }
     if (!instance.HasDeviceFault()) return;
     const auto device=instance.GetDevice();
     vk::DeviceFaultCountsEXT counts{};

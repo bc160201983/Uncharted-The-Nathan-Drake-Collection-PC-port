@@ -105,6 +105,7 @@ bool TriggerPollDue(std::chrono::steady_clock::time_point& last) {
     return true;
 }
 } // namespace
+extern void (*g_device_lost_report)(); // vk_scheduler.cpp (DumpDeviceFault)
 namespace {
 bool SrtCheckEnabled();
 void NoteSrtWalk(const Shader::Info& info);
@@ -977,6 +978,295 @@ void TestGarbageTSharp(AmdGpu::Image& tsharp) {
                     static_cast<unsigned long long>(tsharp.Address()));
         std::fflush(stdout);
     }
+}
+
+/// gow3 1 Nov 2026 (GitHub #316 #314 #277 #76 #224 #249, NVIDIA "ReadInvalid" at a small address,
+/// then device lost): a T# that is rejected (or null) is bound as a null descriptor. That null was
+/// always written as a SAMPLED image, also into a shader's STORAGE image binding (the written
+/// image of the engine compute shaders 99086cd4/302d11fa/71c040c9/a0b87e41, whose resource tables
+/// read garbage while an area streams in), and as ONE descriptor where the layout has one per mip
+/// (DynamicIndex mip arrays), shifting every later binding of the stage. Both are invalid Vulkan;
+/// the driver gets a descriptor it cannot decode. Now the null has the binding's own type and
+/// count. GOW3_TSHARP_GUARD=0: the old way (tests).
+bool TypedNullImages() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_TSHARP_GUARD");
+        const bool value = !(env && env[0] == '0');
+        if (!value) {
+            std::printf("GPU: null image descriptors keep the sampled type (GOW3_TSHARP_GUARD=0)\n");
+            std::fflush(stdout);
+        }
+        return value;
+    }();
+    return on;
+}
+
+/// One line per shader + image slot whose T# is bound null for a reason other than "no texture"
+/// (and for storage slots also for that, as those were the mistyped ones). Lock-free set lookup:
+/// this runs on every null binding.
+void NoteNullImage(const Shader::Info& stage, u32 image_index, const Shader::ImageResource& desc,
+                   const AmdGpu::Image& tsharp, u32 count, const char* reason) {
+    static std::array<std::atomic<u64>, 512> seen{};
+    static std::atomic<u32> lines{0};
+    const u64 key = (stage.pgm_hash << 8) ^ (u64(image_index) << 1) ^ 1; // never 0
+    u64 slot = (key * 0x9E3779B97F4A7C15ull) >> 55;                       // 0..511
+    for (u32 probe = 0; probe < 16; ++probe, slot = (slot + 1) & 511) {
+        u64 value = seen[slot].load(std::memory_order_relaxed);
+        if (value == key) {
+            return;
+        }
+        if (value == 0) {
+            if (!seen[slot].compare_exchange_strong(value, key, std::memory_order_relaxed)) {
+                if (value == key) {
+                    return;
+                }
+                continue;
+            }
+            if (lines.fetch_add(1, std::memory_order_relaxed) >= 200) {
+                return;
+            }
+            std::printf("GPU: null image for %s %08llx slot %u (%s, %u descriptor%s, flat dword %u): "
+                        "%s; T# %#llx format %u/%u %ux%u levels %u-%u tile %u\n",
+                        stage.sw_stage == Shader::SwStage::Compute ? "cs" : "shader",
+                        static_cast<unsigned long long>(stage.pgm_hash), image_index,
+                        desc.is_written ? "storage" : "sampled", count, count == 1 ? "" : "s",
+                        u32(desc.sharp_fetch.offsets[0]), reason,
+                        static_cast<unsigned long long>(tsharp.Address()), u32(tsharp.data_format),
+                        u32(tsharp.num_format), u32(tsharp.width) + 1, u32(tsharp.height) + 1,
+                        u32(tsharp.base_level), u32(tsharp.last_level), u32(tsharp.tiling_index));
+            std::fflush(stdout);
+            return;
+        }
+    }
+}
+
+/// gow3 test (1 Nov 2026): GOW3_TEST_GARBAGE_SLOT=<spec>[,<spec>...], each spec
+/// <shader hash hex>:<slot>:<mode>[:<s>[:<n>[:<pool>]]]. From <s> seconds (default 0) after the
+/// shader's first binding, its next <n> bindings (default unlimited) get a broken descriptor in
+/// that slot, like the players' logs before the loss:
+///   slot <i> = image i (T#): unmapped = base at 0x3d000029a600 (no guest memory there: rejected),
+///     float = dwords 0-3 = the #277 garbage 00003307 387fb810 3c003939 ac8babe0 (rejected),
+///     shift = base + 64 MiB (mapped memory holding other data: may pass every check),
+///     random = all 8 dwords random (one of <pool> values, default 64),
+///     type3d / cube / msaa / int = same base, another image type or an integer format;
+///   slot s<i> = sampler i (S#): garbage = clamp modes 5/7/4, border colour type 3 index 4094,
+///     random LOD bias and anisotropy (the "ClampMode: Unimplemented clamp mode" lines);
+///     random = all 4 dwords random (one of <pool> values, default 64: new samplers).
+struct GarbageSlotTest {
+    u64 hash = 0;
+    u32 slot = 0;
+    bool sampler = false;
+    int mode = -1; // 0 unmapped, 1 float, 2 shift, 3 sampler garbage, 4 random
+    double delay_s = 0.0;
+    u64 count = ~0ull;
+    u32 pool = 64;
+    std::atomic<s64> first_ns{0};
+    std::atomic<u64> fired{0};
+    std::atomic<bool> described{false};
+};
+struct GarbageSlotTests {
+    std::array<GarbageSlotTest, 8> specs;
+    u32 num = 0;
+};
+GarbageSlotTests& GarbageSlotParams() {
+    static GarbageSlotTests* tests = [] {
+        auto* t = new GarbageSlotTests{};
+        const char* env = std::getenv("GOW3_TEST_GARBAGE_SLOT");
+        for (const char* spec = env; spec && *spec && t->num < t->specs.size();) {
+            auto& p = t->specs[t->num];
+            char* end = nullptr;
+            p.hash = std::strtoull(spec, &end, 16);
+            const char* next = std::strchr(spec, ',');
+            if (end && *end == ':') {
+                const char* s = end + 1;
+                if (*s == 's') {
+                    p.sampler = true;
+                    ++s;
+                } else if (*s == 't') {
+                    ++s;
+                }
+                p.slot = static_cast<u32>(std::strtoul(s, &end, 10));
+                if (end && *end == ':') {
+                    const char* mode = end + 1;
+                    const auto is = [&](const char* name) {
+                        return std::strncmp(mode, name, std::strlen(name)) == 0;
+                    };
+                    p.mode = is("random")     ? 4
+                             : p.sampler      ? (is("garbage") ? 3 : -1)
+                             : is("unmapped") ? 0
+                             : is("float")    ? 1
+                             : is("shift")    ? 2
+                             : is("type3d")   ? 5
+                             : is("cube")     ? 6
+                             : is("msaa")     ? 7
+                             : is("int")      ? 8
+                                              : -1;
+                    // Empty fields keep their defaults ("...:10::16" = 10 s, all bindings, pool 16).
+                    const auto digit = [](const char* c) { return *c >= '0' && *c <= '9'; };
+                    const char* colon = std::strchr(mode, ':');
+                    if (colon && (!next || colon < next)) {
+                        if (digit(colon + 1)) {
+                            p.delay_s = std::atof(colon + 1);
+                        }
+                        const char* colon2 = std::strchr(colon + 1, ':');
+                        if (colon2 && (!next || colon2 < next)) {
+                            if (digit(colon2 + 1)) {
+                                p.count = std::strtoull(colon2 + 1, nullptr, 10);
+                            }
+                            const char* colon3 = std::strchr(colon2 + 1, ':');
+                            if (colon3 && (!next || colon3 < next) && digit(colon3 + 1)) {
+                                p.pool = std::max(1u, u32(std::strtoul(colon3 + 1, nullptr, 10)));
+                            }
+                        }
+                    }
+                }
+            }
+            std::printf("GPU test: GOW3_TEST_GARBAGE_SLOT shader %08llx %s %u mode %d after %.1f s, "
+                        "%llu bindings, pool %u\n",
+                        static_cast<unsigned long long>(p.hash), p.sampler ? "sampler" : "image",
+                        p.slot, p.mode, p.delay_s, static_cast<unsigned long long>(p.count), p.pool);
+            std::fflush(stdout);
+            if (p.mode >= 0) {
+                ++t->num;
+            } else {
+                p.hash = 0;
+            }
+            spec = next ? next + 1 : nullptr;
+        }
+        return t;
+    }();
+    return *tests;
+}
+bool GarbageSlotTarget(u64 hash) {
+    const auto& t = GarbageSlotParams();
+    for (u32 i = 0; i < t.num; ++i) {
+        if (t.specs[i].hash == hash) {
+            return true;
+        }
+    }
+    return false;
+}
+/// The spec breaking this binding (the caller then edits its sharp), or null.
+GarbageSlotTest* GarbageSlotFire(const Shader::Info& stage, u32 slot, bool sampler) {
+    auto& t = GarbageSlotParams();
+    for (u32 i = 0; i < t.num; ++i) {
+        auto& p = t.specs[i];
+        if (p.hash != stage.pgm_hash || p.slot != slot || p.sampler != sampler) {
+            continue;
+        }
+        const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        s64 expected = 0;
+        p.first_ns.compare_exchange_strong(expected, now);
+        const s64 start = expected ? expected : now;
+        if (double(now - start) * 1e-9 < p.delay_s) {
+            return nullptr;
+        }
+        const u64 n = p.fired.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n > p.count) {
+            return nullptr;
+        }
+        if (n == 1 || (n & (n - 1)) == 0) {
+            std::printf("GPU test: broken %s %u of shader %08llx, binding %llu\n",
+                        sampler ? "S#" : "T#", slot, static_cast<unsigned long long>(stage.pgm_hash),
+                        static_cast<unsigned long long>(n));
+            std::fflush(stdout);
+        }
+        return &p;
+    }
+    return nullptr;
+}
+/// Random dwords for the "random" mode: value k of the pool, k chosen per binding.
+void GarbageDwords(GarbageSlotTest& p, u32* out, u32 count) {
+    const u64 k = (p.fired.load(std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull >> 20) % p.pool;
+    u64 x = (p.hash ^ (u64(p.slot) << 40) ^ (k + 1) * 0xD1B54A32D192ED03ull) | 1;
+    for (u32 i = 0; i < count; ++i) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out[i] = static_cast<u32>(x >> 16);
+    }
+}
+void TestGarbageSlot(const Shader::Info& stage, u32 image_index, const Shader::ImageResource& desc,
+                     AmdGpu::Image& tsharp) {
+    auto* p = GarbageSlotFire(stage, image_index, false);
+    if (!p) {
+        return;
+    }
+    if (!p->described.exchange(true)) {
+        std::printf("GPU test: shader %08llx image %u is %s (flat dword %u, written %d, mip mode %d), "
+                    "T# %#llx format %u/%u %ux%u\n",
+                    static_cast<unsigned long long>(stage.pgm_hash), image_index,
+                    desc.is_written ? "a storage image" : "a sampled image",
+                    u32(desc.sharp_fetch.offsets[0]), int(desc.is_written),
+                    int(desc.mip_fallback_mode), static_cast<unsigned long long>(tsharp.Address()),
+                    u32(tsharp.data_format), u32(tsharp.num_format), u32(tsharp.width) + 1,
+                    u32(tsharp.height) + 1);
+        std::fflush(stdout);
+    }
+    switch (p->mode) {
+    case 0:
+        tsharp.base_address = 0x3d000029a600ull >> 8;
+        break;
+    case 1: {
+        static constexpr std::array<u32, 4> garbage{0x00003307u, 0x387fb810u, 0x3c003939u,
+                                                    0xac8babe0u};
+        std::memcpy(&tsharp, garbage.data(), sizeof(garbage));
+        break;
+    }
+    case 2:
+        tsharp.base_address = tsharp.base_address + (64_MB >> 8);
+        break;
+    case 4: {
+        std::array<u32, 8> dwords;
+        GarbageDwords(*p, dwords.data(), 8);
+        std::memcpy(&tsharp, dwords.data(), sizeof(dwords));
+        break;
+    }
+    // Same memory, another image kind than the pipeline was specialized for (a table rewritten
+    // between the pipeline choice and the binding): a view of another type or number class.
+    case 5:
+        tsharp.type = u64(AmdGpu::ImageType::Color3D);
+        tsharp.depth = 3;
+        break;
+    case 6:
+        tsharp.type = u64(AmdGpu::ImageType::Cube);
+        tsharp.base_array = 0;
+        tsharp.last_array = 5;
+        break;
+    case 7:
+        tsharp.type = u64(AmdGpu::ImageType::Color2DMsaa);
+        tsharp.base_level = 0;
+        tsharp.last_level = 2;
+        break;
+    case 8:
+        tsharp.num_format = u64(AmdGpu::NumberFormat::Uint);
+        break;
+    default:
+        break;
+    }
+}
+void TestGarbageSamplerSlot(const Shader::Info& stage, u32 sampler_index, AmdGpu::Sampler& ssharp) {
+    auto* p = GarbageSlotFire(stage, sampler_index, true);
+    if (!p) {
+        return;
+    }
+    if (p->mode == 4) {
+        std::array<u32, 4> dwords;
+        GarbageDwords(*p, dwords.data(), 4);
+        std::memcpy(&ssharp, dwords.data(), sizeof(dwords));
+        return;
+    }
+    static std::atomic<u32> salt{0};
+    const u32 r = salt.fetch_add(0x9E3779B9u, std::memory_order_relaxed);
+    ssharp.clamp_x.Assign(AmdGpu::ClampMode::MirrorOnceHalfBorder);
+    ssharp.clamp_y.Assign(AmdGpu::ClampMode::MirrorOnceBorder);
+    ssharp.clamp_z.Assign(AmdGpu::ClampMode::ClampHalfBorder);
+    ssharp.max_aniso.Assign(static_cast<AmdGpu::AnisoRatio>(r % 5));
+    ssharp.lod_bias.Assign((r >> 18) % p->pool);
+    ssharp.border_color_ptr.Assign(4094);
+    ssharp.border_color_type.Assign(static_cast<AmdGpu::BorderColor>(3));
 }
 } // namespace
 
@@ -2931,12 +3221,103 @@ void Rasterizer::DispatchDirect() {
     }
 }
 
+// gow3 1 Nov 2026 (U3 chapter 2 device lost, analysis/handoff-book/11-U3-CH2-CRASH.md): the
+// effect/crowd skinning shaders (Shader::IsEffectShader) loop per vertex over a count from buffer
+// 0 (u32 count, u32 offset per vertex; vertex count = dword 0 at the user-data pointer s[2:3]).
+// Their last 32 dispatches are kept with buffer 0's V# and the largest of the first 16 counts in
+// guest memory, and printed when the device is lost; a count over 4096 is logged at once (the
+// shaders clamp their loop there, effect_loop_clamp_pass.cpp). GOW3_EFFECT_DISPATCH_LOG=0: off.
+namespace {
+struct EffectDispatch {
+    u64 hash, base, sequence;
+    u32 num_records, stride, vertices, max_count, groups;
+};
+std::array<EffectDispatch, 32> g_effect_dispatches{};
+std::atomic<u64> g_effect_dispatch_count{0};
+
+void ReportEffectDispatches() {
+    const u64 count = g_effect_dispatch_count.load();
+    std::fprintf(stderr, "Effect shader dispatches before the loss (newest last, %llu in all):\n",
+                 static_cast<unsigned long long>(count));
+    for (u64 i = count > g_effect_dispatches.size() ? count - g_effect_dispatches.size() : 0;
+         i < count; ++i) {
+        const auto& d = g_effect_dispatches[i % g_effect_dispatches.size()];
+        std::fprintf(stderr,
+                     "  #%llu cs %08llx: %u vertices, %u groups; buffer 0 at %#llx, %u records, "
+                     "stride %u; largest count of the first 16: %u\n",
+                     static_cast<unsigned long long>(d.sequence),
+                     static_cast<unsigned long long>(d.hash), d.vertices, d.groups,
+                     static_cast<unsigned long long>(d.base), d.num_records, d.stride, d.max_count);
+    }
+}
+} // namespace
+
+void Rasterizer::NoteEffectDispatch(const Shader::Info& cs, u32 groups) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_EFFECT_DISPATCH_LOG");
+        if (!(env && env[0] == '0')) {
+            Vulkan::g_device_lost_report = &ReportEffectDispatches;
+            return true;
+        }
+        return false;
+    }();
+    if (!enabled || cs.buffers.empty() || cs.buffers[0].IsSpecial() || cs.user_data.size() < 4) {
+        return;
+    }
+    EffectDispatch d{};
+    d.hash = cs.pgm_hash;
+    d.groups = groups;
+    const auto sharp = cs.buffers[0].GetSharp(cs);
+    d.base = sharp.base_address;
+    d.num_records = sharp.num_records;
+    d.stride = sharp.GetStride();
+    const VAddr counts_ptr = (VAddr(cs.user_data[3]) << 32 | cs.user_data[2]) & 0xFFFFFFFFFFFFULL;
+    if (counts_ptr && IsMapped(counts_ptr, 4)) {
+        memory->CopySparseMemory(counts_ptr, reinterpret_cast<u8*>(&d.vertices), 4);
+    }
+    // One copy of at most 512 bytes: the first counts (stride 8 in every dispatch seen).
+    const u32 stride = d.stride ? d.stride : 8;
+    const u32 n = stride >= 8 && stride <= 512
+                      ? std::min<u32>(std::min<u32>(d.vertices, d.num_records), 512u / stride)
+                      : 0u;
+    if (d.base && n && IsMapped(d.base, u64(n) * stride)) {
+        std::array<u8, 512> bytes{};
+        memory->CopySparseMemory(d.base, bytes.data(), u64(n - 1) * stride + 4);
+        for (u32 v = 0; v < n; ++v) {
+            u32 value = 0;
+            std::memcpy(&value, bytes.data() + u64(v) * stride, 4);
+            d.max_count = std::max(d.max_count, value);
+        }
+    }
+    const u64 sequence = g_effect_dispatch_count.load(std::memory_order_relaxed);
+    d.sequence = sequence;
+    g_effect_dispatches[sequence % g_effect_dispatches.size()] = d;
+    g_effect_dispatch_count.store(sequence + 1, std::memory_order_release);
+    if (d.max_count > 4096) {
+        static u32 reports = 0;
+        if (reports < 16) {
+            ++reports;
+            std::printf("Effect shader: cs %08llx dispatch with a loop count of %u (buffer 0 at "
+                        "%#llx, %u records, stride %u, %u vertices): clamped to 4096 on the GPU\n",
+                        static_cast<unsigned long long>(d.hash), d.max_count,
+                        static_cast<unsigned long long>(d.base), d.num_records, d.stride,
+                        d.vertices);
+            std::fflush(stdout);
+        }
+    }
+}
+
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (BarrierStatsEnabled()) {
         g_barrier_stats_shader = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
     }
     if (SkippedShader(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
         return;
+    }
+    if (Shader::IsEffectShader(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
+        const auto& regs = CsRegs();
+        NoteEffectDispatch(pipeline->GetStage(Shader::SwStage::Compute),
+                           regs.dim_x * regs.dim_y * regs.dim_z);
     }
     FrameCapture::Poll();
     gbuffer_draw = false;
@@ -5184,7 +5565,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             if (unbound || garbage) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
-                const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                const u64 size = mapped_size; // the clamp above (same range)
                 // gow3 diagnostics (GOW3_TRACE_BIND_RANGE=<lo>:<hi> hex): bindings that overlap
                 // the range, by shader and slot, 5 s statistics.
                 {
@@ -5515,7 +5896,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     }
     const u32 first_image_idx = image_infos.size();
     TextureSet* set_slot = nullptr;
-    if (!on_helper && BindTexturesFromSet(stage, prepared, first_image_idx, barrier, set_slot)) {
+    if (!on_helper && !GarbageSlotTarget(stage.pgm_hash) &&
+        BindTexturesFromSet(stage, prepared, first_image_idx, barrier, set_slot)) {
         // Descriptor writes: one per image (no mip arrays in a memoized set).
         for (u32 i = 0; i < stage.images.size(); ++i) {
             auto& set_write = set_writes[write_index++];
@@ -5556,8 +5938,36 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         const auto& image_desc = stage.images[image_index];
         auto fetched_tsharp =
             prepared ? prepared->image_sharps[image_index] : image_desc.GetSharp(stage);
+        // The pipeline layout's descriptor count for this slot (Shader::ImageResource::
+        // NumBindings of the same T#), taken before the test knobs below edit the T#.
+        const u32 layout_count =
+            image_desc.mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex
+                ? static_cast<u32>(fetched_tsharp.last_level - fetched_tsharp.base_level + 1)
+                : 1u;
         TestGarbageTSharp(fetched_tsharp);
+        TestGarbageSlot(stage, image_index, image_desc, fetched_tsharp);
         const auto tsharp = fetched_tsharp;
+        // A null descriptor for this slot. gow3 1 Nov 2026 (TypedNullImages): of the binding's
+        // own type (storage for a written image) and with the layout's descriptor count.
+        const auto bind_null = [&](const char* reason) {
+            auto& null_desc = image_desc_storage.emplace_back();
+            u32 count = 1;
+            if (TypedNullImages()) {
+                if (image_desc.is_written) {
+                    null_desc.type = VideoCore::TextureCache::BindingType::Storage;
+                }
+                count = layout_count;
+            }
+            for (u32 i = 0; i < count; ++i) {
+                image_bindings.emplace_back(VideoCore::ImageId{}, &null_desc);
+                image_binding_entries.push_back(nullptr);
+                binding_proxy_ok.push_back(false);
+            }
+            image_descriptor_array_sizes.push_back(count);
+            if (reason) {
+                NoteNullImage(stage, image_index, image_desc, tsharp, count, reason);
+            }
+        };
         if (TracedShader(stage.pgm_hash)) {
             static std::atomic<int> traced{0};
             if (traced.fetch_add(1) < 80) {
@@ -5579,10 +5989,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            // No texture: the game's own empty slot, or a T# GetSharp nulled (reserved tile
+            // mode or swizzle, inverted mips). Logged for storage slots only (the mistyped ones).
+            bind_null(image_desc.is_written ? "no image (null T#)" : nullptr);
             continue;
         }
 
@@ -5596,10 +6005,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             if (!prepared && !on_helper && (image_desc.sharp_fetch.load_mask & 1)) {
                 DescribeSharpSource(stage, image_desc.sharp_fetch.offsets[0], "texture");
             }
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            bind_null(!memory->IsValidGpuMapping(tsharp.Address(), 0) ? "rejected, base not mapped"
+                      : !IsKnownFormat(data_fmt, num_fmt)            ? "rejected, unknown format"
+                                                                     : "rejected, impossible fields");
             continue;
         }
 
@@ -5625,10 +6033,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                             stage.pgm_hash, tsharp.Address(), desc_entry.desc.info.guest_size,
                             tsharp.width + 1, tsharp.height + 1);
             }
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            bind_null("garbage, impossible image size or range");
             continue;
         }
         // GOW3_SCENE_DEBUG: proxied scene targets this binding reads at the native size, and why.
@@ -5850,6 +6255,7 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
+        TestGarbageSamplerSlot(stage, sampler_index, ssharp);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);

@@ -112,6 +112,7 @@ void DescribeBoundAddress(u64 address) {
     }
 }
 
+bool g_low_video_memory = false;
 
 namespace {
 
@@ -1045,10 +1046,36 @@ void Instance::CreateAllocator() {
         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
     };
 
+    // gow3 1 Nov 2026 (2 GB cards): a 2 GB card's budget is ~1.7 GB while U2 at 720p used
+    // 2.1 GB, and what did not fit was moved to system RAM (23-31 FPS in the simulation). With
+    // low video memory the reserves kept for speed are smaller: VMA blocks of 64 MiB (not 256,
+    // less unused room per block), the arena chunk reserve (buffer_cache.cpp), the spare image
+    // block (image.cpp) and idle staging buffers (vk_staging_buffer_pool.cpp).
+    {
+        u64 largest_local = 0;
+        for (u32 i = 0; i < memory_properties.memoryHeapCount; ++i) {
+            if (memory_properties.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+                largest_local = std::max<u64>(largest_local, memory_properties.memoryHeaps[i].size);
+            }
+        }
+        // 1 Nov 2026 (0.8.0, experimental): only when asked for. GOW3_LOW_VRAM=1: on,
+        // =auto: on discrete cards of 4.5 GiB or less; unset or anything else: off.
+        const char* env = std::getenv("GOW3_LOW_VRAM");
+        low_video_memory = (env && env[0] == '1') ||
+                           (env && std::string_view{env} == "auto" && !IsIntegrated() &&
+                            largest_local <= (u64{4608} << 20));
+        g_low_video_memory = low_video_memory;
+        if (low_video_memory) {
+            std::printf("GPU: low video memory mode on (%llu MiB card, experimental): smaller "
+                        "memory reserves (GOW3_LOW_VRAM)\n",
+                        static_cast<unsigned long long>(largest_local >> 20));
+        }
+    }
     const VmaAllocatorCreateInfo allocator_info = {
         .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
         .physicalDevice = physical_device,
         .device = *device,
+        .preferredLargeHeapBlockSize = low_video_memory ? VkDeviceSize{64} << 20 : 0,
         .pVulkanFunctions = &functions,
         .instance = *instance,
         .vulkanApiVersion = TargetVulkanApiVersion,
@@ -1183,6 +1210,40 @@ void Instance::CollectToolingInfo() const {
         const std::string_view name = tool.name;
         LOG_INFO(Render_Vulkan, "Attached debugging tool: {}", name);
     }
+}
+
+void Instance::ReportAllocatorMemory() const {
+    const char* path = std::getenv("GOW3_VRAM_REPORT");
+    if (!path || !path[0] || !allocator) {
+        return;
+    }
+    VmaTotalStatistics stats{};
+    vmaCalculateStatistics(allocator, &stats);
+    const auto props = physical_device.getMemoryProperties();
+    for (u32 type = 0; type < props.memoryTypeCount; ++type) {
+        const VmaStatistics& s = stats.memoryType[type].statistics;
+        if (s.blockBytes == 0) {
+            continue;
+        }
+        std::printf("VRAM report: VMA type %u (heap %u%s): %u blocks %llu MiB, %u allocations %llu "
+                    "MiB, largest free range %llu MiB\n",
+                    type, props.memoryTypes[type].heapIndex,
+                    props.memoryTypes[type].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal
+                        ? ", device-local" : "",
+                    s.blockCount, static_cast<unsigned long long>(s.blockBytes >> 20), s.allocationCount,
+                    static_cast<unsigned long long>(s.allocationBytes >> 20),
+                    static_cast<unsigned long long>(stats.memoryType[type].unusedRangeSizeMax >> 20));
+    }
+    char* json = nullptr;
+    vmaBuildStatsString(allocator, &json, VK_TRUE);
+    if (json) {
+        if (FILE* file = std::fopen(path, "wb")) {
+            std::fputs(json, file);
+            std::fclose(file);
+        }
+        vmaFreeStatsString(allocator, json);
+    }
+    std::fflush(stdout);
 }
 
 u64 Instance::GetDeviceMemoryUsage() const {

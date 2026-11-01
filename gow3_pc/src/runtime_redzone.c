@@ -30,6 +30,14 @@
 
 uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint64_t *segments, uint64_t count);
 void runtime_redzone_after_fault(void *context);
+/* runtime_isa.c (instructions older CPUs lack): see there. */
+int runtime_isa_active(void);
+int runtime_isa_traps(const void *instruction);
+void runtime_isa_fix_moved(unsigned char *code, unsigned length);
+unsigned runtime_isa_relocated(unsigned char *code, unsigned length);   /* may grow it: up to ISA_ROOM more */
+#define ISA_ROOM 112u
+void runtime_isa_convert_function(unsigned char *image, uint64_t begin, uint64_t end);
+void runtime_isa_finish(void);
 
 #ifdef _WIN32
 #include <windows.h>
@@ -38,7 +46,7 @@ void runtime_redzone_after_fault(void *context);
 typedef struct { uint64_t begin, end; uint8_t red, hooked, bad, indirect; } RzFunction;
 /* One decoded instruction of a function being rewritten. branch: a direct jcc (1) or jmp (2)
  * that a stub can repeat with a 32-bit displacement (cc: its condition), to image offset `to`. */
-typedef struct { uint64_t at, to; uint8_t length, fault, move, target, moved, branch, cc; } RzOp;
+typedef struct { uint64_t at, to; uint8_t length, fault, move, target, moved, branch, cc, isa; } RzOp;
 
 static unsigned char *rz_image;
 static uint64_t rz_size, rz_code_end;
@@ -194,6 +202,9 @@ static void classify(const ZydisDecodedInstruction *in, const ZydisDecodedOperan
         if (in->mnemonic == ZYDIS_MNEMONIC_NOP || prefetch(in->mnemonic)) continue;
         fault = 1;
     }
+    /* gow3 1 Nov 2026: an instruction this CPU lacks raises #UD (runtime_isa.c): moved too. */
+    if (runtime_isa_traps(in)) fault = 1;
+    op->isa = (uint8_t)runtime_isa_traps(in);
     if (rsp && (!(in->attributes & ZYDIS_ATTRIB_HAS_MODRM) || !(in->attributes & ZYDIS_ATTRIB_HAS_SIB) ||
                 (in->raw.disp.size && in->raw.disp.offset != in->raw.sib.offset + 1))) move = 0;
     if (rip && in->raw.disp.size != 32) move = 0;
@@ -232,7 +243,8 @@ static unsigned relocate(uint64_t at, uint64_t end, unsigned char *out) {
             return 0;
         }
         memcpy(out + n, src + place + old, in.length - place - old);
-        return n + (unsigned)(in.length - place - old);
+        n += (unsigned)(in.length - place - old);
+        return runtime_isa_relocated(out, n);
     }
     memcpy(out, src, in.length);
     if (rip) {
@@ -242,7 +254,7 @@ static unsigned relocate(uint64_t at, uint64_t end, unsigned char *out) {
         const int32_t d = (int32_t)disp;
         memcpy(out + in.raw.disp.offset, &d, 4);
     }
-    return in.length;
+    return runtime_isa_relocated(out, in.length);
 }
 static int jump_fits(const unsigned char *from_end, const unsigned char *to) {
     const int64_t delta = (int64_t)(uintptr_t)to - (int64_t)(uintptr_t)from_end;
@@ -257,7 +269,7 @@ static int emit_group(const RzFunction *f, RzOp *ops, size_t k, size_t j) {
     static const unsigned char up[] = {0x48, 0x8d, 0xa4, 0x24, 0x80, 0x00, 0x00, 0x00};    /* lea rsp,[rsp+128] */
     const uint64_t site = ops[k].at, resume = ops[j - 1].at + ops[j - 1].length;
     size_t worst = 5;
-    for (size_t m = k; m < j; ++m) worst += ops[m].length + 4u + sizeof(down) + sizeof(up) + 6u;
+    for (size_t m = k; m < j; ++m) worst += ops[m].length + 4u + sizeof(down) + sizeof(up) + 6u + (ops[m].isa ? ISA_ROOM : 0u);
     if (worst > RZ_CHUNK) return 0;
     if (!rz_chunks || rz_chunk_used + worst > RZ_CHUNK) {
         unsigned char *chunk = rz_no_space || rz_chunks == RZ_MAX_CHUNKS ? NULL : allocate_near(RZ_CHUNK);
@@ -395,6 +407,88 @@ static void protect_function(const RzFunction *f, int list, uint64_t *moved, uin
     *groups += here_groups;
     free(ops);
 }
+/* gow3 1 Nov 2026 (runtime_isa.c): instructions this CPU lacks that are under 5 bytes (no room
+ * for a jmp; Uncharted 1 runs its 4-byte LZCNTs ~200,000 times a second) move into a stub with the
+ * instructions after them, as the red-zone groups above (none of those a branch target; functions
+ * with a hook or an indirect jump left alone); relocate writes their native sequence there. */
+static unsigned isa_left_printed;
+static void isa_left(uint64_t at, const char *why) {
+    if (isa_left_printed++ < 48) printf("CPU emulation: short site at image offset %#" PRIx64 " stays an exception (%s)\n", at, why);
+}
+static uint64_t isa_short_function(const RzFunction *f) {
+    if (f->bad) return 0;
+    size_t cap = (size_t)(f->end - f->begin), n = 0;
+    RzOp *ops = calloc(cap ? cap : 1, sizeof(*ops));
+    if (!ops) return 0;
+    /* outside: a direct branch out of the image (a hook's stub, which may come back anywhere in
+     * the function). A branch or call into the middle of another function (f->hooked: a code
+     * cave, or the compiler's own, e.g. U2 calls into its noreturn helpers) is no danger here:
+     * a cave's way back is decoded with its function and recorded in rz_targets. */
+    int any = 0, outside = 0;
+    for (uint64_t at = f->begin; at < f->end && n < cap;) {
+        ZydisDecodedInstruction in;
+        ZydisDecodedOperand dec[ZYDIS_MAX_OPERAND_COUNT];
+        if (!decode(at, f->end, &in, dec)) { free(ops); return 0; }
+        ops[n].at = at;
+        ops[n].length = in.length;
+        ops[n].target = (uint8_t)bit_get(rz_targets, at);
+        classify(&in, dec, &ops[n]);
+        uint64_t to;
+        if ((in.meta.category == ZYDIS_CATEGORY_COND_BR || in.meta.category == ZYDIS_CATEGORY_UNCOND_BR) &&
+            branch_target(&in, dec, at, &to) && to != UINT64_MAX) {
+            if ((in.opcode_map == ZYDIS_OPCODE_MAP_DEFAULT && in.opcode >= 0x70 && in.opcode <= 0x7f) ||
+                (in.opcode_map == ZYDIS_OPCODE_MAP_0F && in.opcode >= 0x80 && in.opcode <= 0x8f)) {
+                ops[n].branch = 1;
+                ops[n].cc = (uint8_t)(in.opcode & 15);
+            } else if (in.opcode_map == ZYDIS_OPCODE_MAP_DEFAULT && (in.opcode == 0xeb || in.opcode == 0xe9)) {
+                ops[n].branch = 2;
+            }
+            ops[n].to = to;
+        }
+        if (branch_target(&in, dec, at, &to) && to == UINT64_MAX) outside = 1;
+        if (ops[n].isa && in.length < 5) any = 1;
+        ++n;
+        at += in.length;
+    }
+    uint64_t groups = 0;
+    size_t next_free = 0;
+    for (size_t i = 0; any && i < n; ++i) {
+        if (i < next_free || !ops[i].isa || ops[i].length >= 5) continue;
+        if (outside || f->indirect) { isa_left(ops[i].at, outside ? "its function jumps out of the image (a hook)" : "its function has an indirect jump"); continue; }
+        if (!ops[i].move) { isa_left(ops[i].at, "uses rsp"); continue; }
+        /* The site first, then (as the red-zone groups) up to four instructions before it when
+         * the ones after it run out: a branch target may only start a group. */
+        int done = 0;
+        for (size_t back = 0; back <= 4 && back <= i && i - back >= next_free && !done; ++back) {
+            const size_t k = i - back;
+            if (back && ((!ops[k].move && !ops[k].branch) || ops[k].branch == 2 || ops[k + 1].target)) break;
+            unsigned length = 0;
+            for (size_t m = k; m <= i; ++m) length += ops[m].length;
+            size_t j = i + 1;
+            int ok = 1;
+            while (length < 5) {
+                if (j >= n || ops[j].target || (!ops[j].move && !ops[j].branch) || ops[j - 1].branch == 2) { ok = 0; break; }
+                length += ops[j].length;
+                ++j;
+            }
+            if (ok && emit_group(f, ops, k, j)) {
+                ++groups;
+                next_free = j;
+                done = 1;
+            }
+        }
+        if (!done) isa_left(ops[i].at, "no room: branch targets or unmovable instructions around it");
+    }
+    free(ops);
+    return groups;
+}
+static void isa_short_sites(const RzFunction *functions, size_t count) {
+    if (!runtime_isa_active()) return;
+    uint64_t groups = 0;
+    for (size_t i = 0; i < count; ++i) groups += isa_short_function(&functions[i]);
+    printf("CPU emulation: %" PRIu64 " sites under 5 bytes moved to stubs with the instructions after them\n", groups);
+}
+
 /* Stub space within relative-jump range of the image (as allocate_near_image in probe.c: free
  * regions within +-1.5 GiB, below the image too). */
 static unsigned char *allocate_near(size_t bytes) {
@@ -440,7 +534,7 @@ uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint
     rz_ready = 1;
     /* Off: nothing changes; the test mode still lists the red-zone functions (for its counts). */
     rz_protecting = !(env && env[0] == '0');
-    if (!rz_protecting && !rz_scribble) { puts("Red zone: protection off (GOW3_RED_ZONE=0)"); return 0; }
+    if (!rz_protecting && !rz_scribble && !runtime_isa_active()) { puts("Red zone: protection off (GOW3_RED_ZONE=0)"); return 0; }
     const int list = env && !strcmp(env, "list");
     LARGE_INTEGER t0, t1, hz;
     QueryPerformanceCounter(&t0);
@@ -502,6 +596,14 @@ uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint
     }
     if (!rz_protecting) {
         printf("Red zone: protection off (GOW3_RED_ZONE=0); %" PRIu64 " of %zu functions keep data below rsp (test counts)\n", red, count);
+        isa_short_sites(functions, count);
+        for (size_t i = 0; i < count; ++i) runtime_isa_convert_function(image, functions[i].begin, functions[i].end);
+        runtime_isa_finish();
+        for (size_t i = 0; i < rz_chunks; ++i) {
+            DWORD old;
+            VirtualProtect(rz_chunk[i], RZ_CHUNK, PAGE_EXECUTE_READ, &old);
+            FlushInstructionCache(GetCurrentProcess(), rz_chunk[i], RZ_CHUNK);
+        }
         free(rz_targets); free(rz_starts); rz_targets = rz_starts = NULL;
         free(functions);
         return 0;
@@ -518,6 +620,11 @@ uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint
         protect_function(f, list, &moved, &skipped, &groups);
         if (groups != before) ++protected_functions;
     }
+    /* gow3 1 Nov 2026: LZCNT/TZCNT left in the functions (not moved) to their faulting form, and
+     * in test mode the other kinds to ud2 (runtime_isa.c); the stubs got theirs in relocate. */
+    isa_short_sites(functions, count);
+    for (size_t i = 0; i < count; ++i) runtime_isa_convert_function(image, functions[i].begin, functions[i].end);
+    runtime_isa_finish();
     for (size_t i = 0; i < rz_chunks; ++i) {
         DWORD old;
         VirtualProtect(rz_chunk[i], RZ_CHUNK, PAGE_EXECUTE_READ, &old);

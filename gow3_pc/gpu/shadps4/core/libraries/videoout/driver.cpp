@@ -356,9 +356,12 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 }
 
 // gow3: GOW3_FRAME_LOG=<file>: one line per event, "<kind> <ms since start> <ms since the last
-// of that kind>": kind S = the guest submitted a flip (its frame is recorded), P = the flip was
-// presented (our pacing). For frame pacing analysis (1% lows).
-static void LogFrameEvent(char kind) {
+// of that kind> <steady clock us>": kind S = the guest submitted a flip (its frame is recorded),
+// P = the flip was presented (our pacing), V = a vblank event for the guest, E = a GPU
+// end-of-pipe interrupt delivered to the guest (gnmdriver). For frame pacing
+// analysis (1% lows); the last column lines events up with other traces (same clock as
+// CLOCK_MONOTONIC there).
+void LogFrameEvent(char kind) {
     static FILE* file = [] {
         const char* path = std::getenv("GOW3_FRAME_LOG");
         return path && path[0] ? std::fopen(path, "w") : nullptr;
@@ -369,12 +372,16 @@ static void LogFrameEvent(char kind) {
     using Clock = std::chrono::steady_clock;
     static const Clock::time_point start = Clock::now();
     static std::mutex mutex;
-    static Clock::time_point last[2] = {start, start};
+    static Clock::time_point last[4] = {start, start, start, start};
     const auto now = Clock::now();
     std::scoped_lock lock{mutex};
-    auto& previous = last[kind == 'P'];
-    std::fprintf(file, "%c %.3f %.3f\n", kind, std::chrono::duration<double, std::milli>(now - start).count(),
-                 std::chrono::duration<double, std::milli>(now - previous).count());
+    auto& previous = last[kind == 'P' ? 1 : kind == 'V' ? 2 : kind == 'E' ? 3 : 0];
+    std::fprintf(file, "%c %.3f %.3f %lld\n", kind,
+                 std::chrono::duration<double, std::milli>(now - start).count(),
+                 std::chrono::duration<double, std::milli>(now - previous).count(),
+                 static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                            now.time_since_epoch())
+                                            .count()));
     previous = now;
     static u32 lines = 0;
     if (++lines % 256 == 0) {
@@ -649,12 +656,16 @@ void VideoOutDriver::Flip(const Request& req) {
                         frames ? double(Gow3Stats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(Gow3Stats::scene_draws.exchange(0)) / frames : 0.0);
             // gow3 20 Oct 2026: the presentation waits of the window (share of its wall time).
-            std::printf("Presentation waits: frames %.1f%%, submit lock %.1f%%; swap thread acquire "
-                        "%.1f%%, present %.1f%%\n",
+            static u32 window_long_waits;
+            const u32 long_waits = presenter->LongFrameWaits();
+            std::printf("Presentation waits: frames %.1f%% (%u over 1 ms), submit lock %.1f%%; swap "
+                        "thread acquire %.1f%%, present %.1f%%\n",
                         (present_now[0] - window_present[0]) / (window * 1e7),
+                        long_waits - window_long_waits,
                         (present_now[1] - window_present[1]) / (window * 1e7),
                         (present_now[2] - window_present[2]) / (window * 1e7),
                         (present_now[3] - window_present[3]) / (window * 1e7));
+            window_long_waits = long_waits;
             std::copy(std::begin(present_now), std::end(present_now), std::begin(window_present));
             // gow3 20 Oct 2026 (GitHub #95: memory rising over a long session): what holds memory,
             // every 5 s, so a long run shows which part grows.
@@ -683,6 +694,11 @@ void VideoOutDriver::Flip(const Request& req) {
                             static_cast<unsigned long long>(Gow3Stats::arena_released_bytes.load() >> 20),
                             static_cast<unsigned long long>(Gow3Stats::image_bytes.load() >> 20),
                             static_cast<unsigned long long>(Gow3Stats::images_live.load()));
+                // gow3 1 Nov 2026: GOW3_VRAM_REPORT (test aid), at the 6th and 24th report.
+                static u32 memory_reports = 0;
+                if (++memory_reports == 6 || memory_reports == 24) {
+                    instance.ReportAllocatorMemory();
+                }
             }
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();
@@ -1071,6 +1087,39 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     const auto hr_wait = [](std::chrono::steady_clock::time_point, bool) { return false; };
 #endif
 
+    // gow3 1 Nov 2026 (user: Uncharted 1's camera jerky at 75 FPS on a 75 Hz monitor, on both
+    // PCs, in some sessions only): following the display, the flips must not get ahead of it.
+    // A late flip let the next one through at once (the schedule caught up by up to one period).
+    // With VSync each such pair left one more frame queued for the display, and the queue never
+    // drained (one flip per refresh). Once it was full, every frame waited for the display on the
+    // GPU thread and the game ran in 23 + 3 ms pairs: 75 FPS on the counter, ~37 Hz of motion.
+    // A flip late by more than a quarter period now moves the schedule instead of catching up,
+    // and a queue found full (a quarter of a second's flips waited for a presentation frame;
+    // with the default one frame queued only) gets one flip slot skipped, which drains a frame
+    // (one frame shown twice, at most every 2 s).
+    // GOW3_DISPLAY_QUEUE=0: both off; =drain: the drain only (test: the old catch-up).
+    static const int display_queue_fix = [] {
+        const char* env = std::getenv("GOW3_DISPLAY_QUEUE");
+        return env && env[0] == '0' ? 0 : env && !std::strcmp(env, "drain") ? 1 : 2;
+    }();
+    const auto following_display = [&] {
+        return display_queue_fix && vblank_period != base_period;
+    };
+    u32 window_flips = 0;
+    const auto advance_flip_slot = [&](std::chrono::steady_clock::time_point now) {
+        ++window_flips;
+        next_flip = following_display() && display_queue_fix == 2
+                        ? std::max(next_flip + frame_period, now + frame_period - frame_period / 4)
+                        : std::max(next_flip + frame_period, now - frame_period);
+    };
+    // Waits for a presentation frame (GPU thread) and for a swapchain image (present thread,
+    // Swapchain::AcquireNextImage): either one means frames are queued for the display.
+    const auto queue_waits = [&] { return presenter->LongFrameWaits() + presenter->LongAcquireWaits(); };
+    u32 window_long_waits = queue_waits();
+    auto queue_window = std::chrono::steady_clock::now();
+    auto next_drain = queue_window;
+    u32 drains_shown = 0;
+
     while (!token.stop_requested()) {
         if (const u32 limit = current_limit(); limit != frame_limit) {
             frame_limit = limit;
@@ -1093,7 +1142,13 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             std::printf("VideoOut: vblank %.2f Hz (%s)\n", 1e9 / double(period.count()),
                         period == base_period ? "fast" : "follows the display with VSync");
         }
-        const bool fast_vblank = vblank_period < movie_period - std::chrono::microseconds(500);
+        // gow3 29 Oct 2026 (user, Uncharted 3 at 4K, 120 FPS limit, movies too fast): with a 60 Hz
+        // vblank and a limit above 60 the flips still come between vblanks (immediate flips), so
+        // a movie showed one frame per flip at 120 FPS: twice its speed. Movie pacing now also
+        // applies when the frame limit, not only the vblank, is faster than the movie's 60 Hz.
+        const bool fast_vblank = vblank_period < movie_period - std::chrono::microseconds(500) ||
+                                 (frame_limit != 0 && immediate_flips &&
+                                  frame_period < movie_period - std::chrono::microseconds(500));
         timer.Start();
         const auto tick_start = std::chrono::steady_clock::now();
         auto tick_deadline = tick_start + vblank_period;
@@ -1134,11 +1189,30 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
+        if (now - queue_window >= std::chrono::seconds(1)) {
+            const u32 long_waits = queue_waits();
+            // With more frames queued (or none), waiting for a frame can be the GPU working.
+            if (following_display() && !movie && window_flips >= 10 &&
+                Gow3Settings::Get().frames_queued.load() == 1 &&
+                (long_waits - window_long_waits) * 4 >= window_flips && now >= next_drain) {
+                next_flip = std::max(next_flip, now) + vblank_period;
+                next_drain = now + std::chrono::seconds(2);
+                if (drains_shown < 20) {
+                    ++drains_shown;
+                    std::printf("VideoOut: display queue full (%u of %u flips waited), one flip "
+                                "slot skipped to drain it (GOW3_DISPLAY_QUEUE=0: off)\n",
+                                long_waits - window_long_waits, window_flips);
+                }
+            }
+            window_long_waits = long_waits;
+            window_flips = 0;
+            queue_window = now;
+        }
         const bool flip_slot = movie || !frame_limit || now >= next_flip;
         if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
+                advance_flip_slot(now);
             }
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
@@ -1159,6 +1233,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             std::scoped_lock lock{main_port.vo_mutex};
 
             // Trigger flip events for the port
+            LogFrameEvent('V');
             for (auto event : main_port.vblank_events) {
                 auto equeue = Kernel::GetEqueue(event);
                 if (equeue != nullptr) {
@@ -1197,7 +1272,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 const auto now = std::chrono::steady_clock::now();
                 const auto request = receive_request();
                 if (request) {
-                    next_flip = std::max(next_flip + frame_period, now - frame_period);
+                    advance_flip_slot(now);
                     Flip(request);
                     FRAME_END;
                 }
@@ -1224,7 +1299,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             const auto now = std::chrono::steady_clock::now();
             const auto request = receive_request();
             if (request) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
+                advance_flip_slot(now);
                 Flip(request);
                 FRAME_END;
             }

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
 
 #include <condition_variable>
@@ -107,6 +108,16 @@ public:
     void PresentLoadingFrame();
     Frame* PrepareLastFrame();
 
+    /// gow3: preparing a frame waited over 1 ms for a free presentation frame (count).
+    u32 LongFrameWaits() const {
+        return long_frame_waits.load(std::memory_order_relaxed);
+    }
+
+    /// gow3: the present thread waited over 2 ms for a swapchain image (count).
+    u32 LongAcquireWaits() const {
+        return swapchain.long_acquire_waits.load(std::memory_order_relaxed);
+    }
+
 private:
     Frame* GetRenderFrame();
 
@@ -140,6 +151,7 @@ private:
     Frame* last_submit_frame;
     std::mutex free_mutex;
     std::condition_variable free_cv;
+    std::atomic<u32> long_frame_waits{0};
     std::condition_variable_any frame_cv;
     std::vector<VAddr> vo_buffers_addr;
 };

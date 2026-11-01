@@ -92,6 +92,7 @@ struct Liverpool {
     /// Top-level graphics submissions, numbered for the draw preparation workers.
     static constexpr u64 NoSeq = ~0ull;
     u64 gfx_submit_seq{};
+    std::mutex gfx_submit_order_mutex; ///< gow3: SubmitGfx order (numbering, prep, queue)
     static u64 HashRegisterPacket(u64 checksum, const u32* words, u32 count);
     /// `dirty` (draw-preparation scanner) records the register blocks written.
     static void ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header, u64& checksum,

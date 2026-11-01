@@ -2638,7 +2638,27 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     // the GPU thread needs to pick up work.
     auto* draw_prep = rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
     auto prep_submission = draw_prep ? draw_prep->Build(dcb) : nullptr;
-    {
+    // gow3 1 Nov 2026 (heavy-scene profile, Uncharted 2 train yard): numbering, enqueueing and
+    // queueing keep one order under the submitters' own lock; the queue lock, which the GPU
+    // command thread takes for every task it looks at, is held for the push only. Under the
+    // queue lock the draw preparation's Enqueue waited for its workers (a worker copies the
+    // 208 KiB register file under that lock), and the command thread waited behind it: 5% of
+    // its time in U2. GOW3_SUBMIT_ORDER_LOCK=0: everything under the queue lock, as before.
+    static const bool order_lock = [] {
+        const char* env = std::getenv("GOW3_SUBMIT_ORDER_LOCK");
+        return !(env && env[0] == '0');
+    }();
+    if (order_lock) {
+        std::scoped_lock order{gfx_submit_order_mutex};
+        u64 seq = NoSeq;
+        if (draw_prep) {
+            seq = gfx_submit_seq++;
+            draw_prep->Enqueue(seq, std::move(prep_submission));
+        }
+        auto task = ProcessGraphics(dcb, ccb, seq);
+        std::scoped_lock lock{queue.m_access};
+        queue.submits.emplace(task.handle);
+    } else {
         // Numbering, enqueueing and queueing under one lock keep the three orders identical.
         std::scoped_lock lock{queue.m_access};
         u64 seq = NoSeq;

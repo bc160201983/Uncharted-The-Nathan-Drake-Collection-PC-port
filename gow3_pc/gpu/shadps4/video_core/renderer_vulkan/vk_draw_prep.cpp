@@ -291,6 +291,7 @@ DrawPreparation::~DrawPreparation() {
         scanner.request_stop();
     }
     cv.notify_all();
+    work_cv.notify_all();
     workers.clear();
     scanner = {};
 }
@@ -417,7 +418,7 @@ void DrawPreparation::Enqueue(u64 seq, std::shared_ptr<Submission> submission) {
         std::scoped_lock lk{mutex};
         submissions.push_back(std::move(submission));
     }
-    cv.notify_all();
+    cv.notify_all(); // the scanner: workers need it scanned first
 }
 
 void DrawPreparation::BeginSubmission(u64 seq, const AmdGpu::Regs& regs, u64 reg_checksum) {
@@ -435,6 +436,7 @@ void DrawPreparation::BeginSubmission(u64 seq, const AmdGpu::Regs& regs, u64 reg
         baseline_seq = tail_seq = seq;
         baseline_ready = true;
         cv.notify_all();
+        work_cv.notify_all();
     }
     // Idle helpers can starve on a busy CPU. Rather than queueing without bound, restart
     // them from the GPU thread's own state (one register copy) once the scanner lags.
@@ -449,6 +451,7 @@ void DrawPreparation::BeginSubmission(u64 seq, const AmdGpu::Regs& regs, u64 reg
         }
         ++rebases;
         cv.notify_all();
+        work_cv.notify_all();
     }
     if (!submissions.empty() && seq >= submissions.front()->seq &&
         seq - submissions.front()->seq < submissions.size()) {
@@ -494,6 +497,23 @@ void DrawPreparation::Collect() {
             tail_checksum = front->end_checksum;
         }
         submissions.pop_front();
+    }
+}
+
+// gow3 1 Nov 2026 (heavy-scene profile, Uncharted 2 train yard): every scanned buffer woke all
+// eight workers, which then queued for the one mutex to find that a single buffer was claimable,
+// and the GPU command thread (BeginSubmission, Collect) queued behind them: 3.5% of its time.
+// A scanned buffer now wakes one worker, which passes the wake on if more are claimable.
+// GOW3_PREP_WAKE_ONE=0: all workers, as before.
+void DrawPreparation::WakeWorkers() {
+    static const bool one = [] {
+        const char* env = std::getenv("GOW3_PREP_WAKE_ONE");
+        return !(env && env[0] == '0');
+    }();
+    if (one) {
+        work_cv.notify_one();
+    } else {
+        work_cv.notify_all();
     }
 }
 
@@ -547,7 +567,7 @@ void DrawPreparation::ScannerLoop(std::stop_token stop) {
             submission->scanned.store(true, std::memory_order_release);
         }
         ++next_seq;
-        cv.notify_all();
+        WakeWorkers();
     }
 }
 
@@ -582,7 +602,7 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
         {
             std::unique_lock lk{mutex};
             // gpu_seq moves without the lock: keep the candidate the predicate found.
-            cv.wait(lk, stop, [&] {
+            work_cv.wait(lk, stop, [&] {
                 target = baseline_ready ? claimable() : nullptr;
                 return target != nullptr;
             });
@@ -590,6 +610,10 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 return;
             }
             target->claimed.store(true, std::memory_order_relaxed);
+            // One wake per scanned buffer (WakeWorkers): pass it on while more are waiting.
+            if (claimable()) {
+                WakeWorkers();
+            }
             // Buffers between this worker's state and the target: their deltas. A position
             // already collected (or past the target) restarts from the queue's tail state.
             if (position == NoPosition || position < tail_seq || position > target->seq) {

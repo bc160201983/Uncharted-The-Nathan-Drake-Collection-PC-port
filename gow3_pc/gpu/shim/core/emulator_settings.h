@@ -55,7 +55,9 @@ public:
     bool IsDumpShaders() { static const auto value = Flag("GOW3_DUMP_SHADERS", false); return value; }
     bool IsHdrAllowed() { static const auto value = Flag("GOW3_HDR", false); return value; }
     bool IsNullGPU() { static const auto value = Flag("GOW3_NULL_GPU", false); return value; }
-    bool IsPatchShaders() { return false; }
+    // gow3 1 Nov 2026 (tests only): GOW3_PATCH_SHADERS=1 loads <gpu user dir>/shader/patch/<name>.spv
+    // in place of a translated shader (device-fault signature tests, 11-U3-CH2-CRASH.md).
+    bool IsPatchShaders() { static const auto value = Flag("GOW3_PATCH_SHADERS", false); return value; }
     bool IsPipelineCacheArchived() { return false; }
     bool IsPipelineCacheEnabled() { static const auto value = Flag("GOW3_PIPELINE_CACHE", true); return value; }
     bool IsReadbackLinearImagesEnabled() { static const auto value = Flag("GOW3_READBACK_LINEAR", false); return value; }
