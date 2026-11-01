@@ -1639,6 +1639,15 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # bloom mips are lost the same way): to be turned on for them after a test there.
     if executable == "big3-ps4_Shipping.elf":
         env.setdefault("GOW3_MIP_TARGETS", "1")
+    # 2 Nov 2026 (GitHub #161/#253, Drake's Fortune water flat dark green without reflections):
+    # its water reflection pass draws with a depth buffer whose memory a compute shader uses as an
+    # RGBA8 image earlier in the frame, and clears it only through its HTILE (a fill shader). The
+    # compute image freed the depth image and its HTILE record, so that clear was lost and the
+    # reflection's depth test failed on garbage (98% black). GOW3_HTILE_KEEP_CLEARS=1 keeps HTILE
+    # clears of freed depth images (texture_cache.cpp). Drake's Fortune only for now;
+    # GOW3_HTILE_KEEP_CLEARS=0 in test-env.txt turns it off.
+    if executable == "eboot.bin":
+        env.setdefault("GOW3_HTILE_KEEP_CLEARS", "1")
     # The PS4's system language (launcher -> Advanced -> Language; runtime_services.c): each game's
     # main menu offers it next to English (Square). 1 = English (US).
     language = os.environ.get("UNCHARTED_LANGUAGE", "").strip()

@@ -4,6 +4,51 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 1 November 2026, night (0.8.1)
+
+- **Mouse in cover** (#250 #291 #275 #190 #158): the Uncharted 2 and 3 cover cameras take the mouse
+  directly (GOW3_MOUSE_LOOK_U2_COVER / _U3_COVER now on by default), the same angle per count as
+  the follow cameras (1000 counts = 63 degrees at sensitivity 1), both ways and up/down (pitch
+  +-65 degrees). As an emulated stick they turned 10-36 degrees for the same input. Uncharted 1's
+  cover camera (CameraControlCover 0xa4670) too, tried in game with a real mouse
+  (GOW3_MOUSE_LOOK_U1_COVER=0: the stick emulation).
+- **Uncharted 1 water** (#161 #306 #253 #331 #336, flat dark green, no reflections): the water's
+  reflection pass draws with a depth buffer (0x1164818000 at 1440p) whose memory a compute shader
+  uses as an RGBA8 image earlier in the frame; the game clears that depth only through its HTILE
+  (fill shader e8746089). The compute image freed the depth image and its HTILE record, so the fill
+  no longer counted as a clear and the depth image came back with the RGBA8 bytes: the depth test
+  failed on garbage and 98% of the reflection stayed black. Freed depth images now leave their HTILE
+  address behind; a fill there is a clear and the depth image that comes back starts cleared
+  (texture_cache.cpp, vk_rasterizer.cpp IsComputeMetaClear; GOW3_HTILE_KEEP_CLEARS, on for Drake's
+  Fortune). Reflection mean 0.0008 -> 0.027, depth NaN -> 0.95-1.0; water colour matches the PS4
+  shots; no FPS change (alternating runs within 4 FPS); U2/U3 unchanged.
+- **Mouse near walls**: the follow cameras decide "the player is steering" from the stick only, so a
+  mouse turn did not stop the wall push, the pull-in (|x| > 0.2), the wall timer (|x| >= 0.7), the
+  swing-back and scripted turns. Mouse turns now count as steering (GOW3_MOUSE_LOOK_STEER): Uncharted
+  1's stick step result (0xb0204) and its kept stick reads (0xb0219, 0xb08e5), Uncharted 2's and 3's
+  stored steering flag (0x430a96, 0x4ec5c3) and kept stick deflection. Uncharted 1 at a doorway
+  wall: a fast turn of 4131 counts 96 -> 260 degrees.
+- **Mouse during camera blends** (GOW3_MOUSE_LOOK_SHARE): while two or more cameras blend, each of
+  them gets the frame's turn (before, the first one used it up).
+- **Close shortcut**: holding L1 + R1 + Share + Options (pad buttons as SDL reads them) or
+  Ctrl + Shift + Q for 2 s closes the game through the window's own quit event, with a countdown
+  (setting close_shortcut, menu -> Controls; test knob GOW3_TEST_CLOSE_HOLD=<s>).
+- **#211 #285 GeForce GTX 10-series start crash**: VK_EXT_device_fault stays off on NVIDIA device
+  IDs below 0x1e00 (older than Turing); a GTX 1070 starts with it off. GOW3_DEVICE_FAULT=1 turns it
+  on anyway.
+- **#328 Intel**: compute pipelines require the device's subgroup size where the driver could pick
+  another one (Intel: 8 to 32 lanes), since the recompiler splits wave64 by that size
+  (GOW3_SUBGROUP_FIXED=0: the driver's choice). Untested on Intel hardware.
+- **#327**: Uncharted 3's HOLD Circle pictures (normal and pressed) get the Xbox button like the
+  other face buttons.
+- Gate against 0.8.0 (1080p, limit 120, the same saves, 60 s alternating; the bench now plays in its
+  own player folder): U2 114.0 -> 114.4 FPS (1% low 71.5 -> 68.6), 4 cores 83.5 -> 81.8 (31.9 ->
+  33.8); U1 at the cap, 4 cores 101.0 -> 99.5; U3 at the cap, 4 cores 119.1 -> 116.5 (1% low 55.3 ->
+  47.2; rechecks 0.8.1 115.1 / 118.5, 0.8.0 118.8 / 118.1; 0.8.1 with the mouse work off 116-117,
+  1% low 46-48: not the mouse code). 5-minute soaks of U2/U3/U1, U3 with DLSS/FSR 4/TAA, U2 from an
+  empty shader cache, the close shortcut: no problems. Clean-clone exe: U1 water clears kept,
+  steering patches in all three games, old-CPU emulation (trap mode), no problems.
+
 ## 1 November 2026 (0.8.0)
 
 - **Frame pacing with VSync at the display's rate** (user report, Uncharted 1 at 75 FPS on 75 Hz,

@@ -940,6 +940,7 @@ static void install_mouse_look(Segment *segments, uint64_t count, uint64_t size)
     }
     if (stubs) protect(stubs, page_size, 5);
     if (!installed) puts("Mouse look: no known camera code in this executable (mouse acts as the right stick)");
+    else runtime_mouselook_install_patches(); /* gow3 1 Nov 2026 */
 }
 /* Damage dealt/taken and green/blue/gold orb multipliers (src/damage_hook.h, src/orb_hook.h):
  * the stubs read the menu's floats directly, so changes apply on the next hit or pickup. */

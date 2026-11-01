@@ -5064,6 +5064,20 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
                 LOG_TRACE(Render_Vulkan, "Metadata update skipped");
                 return true;
             }
+            // gow3 2 Nov 2026 (GitHub #161, GOW3_HTILE_KEEP_CLEARS): the HTILE of a depth image
+            // freed since (Uncharted 1's water reflection depth): the clear is kept for the depth
+            // image made again there. The dispatch still runs (guest memory as before).
+            if (VideoCore::TextureCache::KeepHtileClears() &&
+                texture_cache.ClearRetiredMeta(address)) {
+                static std::atomic<int> lines{0};
+                if (lines.fetch_add(1, std::memory_order_relaxed) < 4) {
+                    std::printf("GPU: HTILE fill by cs %08llx at %#llx: the HTILE of a freed depth "
+                                "image, kept as its clear (GOW3_HTILE_KEEP_CLEARS)\n",
+                                static_cast<unsigned long long>(info.pgm_hash),
+                                static_cast<unsigned long long>(address));
+                    std::fflush(stdout);
+                }
+            }
         }
     }
     return false;

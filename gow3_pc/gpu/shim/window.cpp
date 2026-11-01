@@ -300,7 +300,9 @@ bool WindowSDL::PollEvents() {
     }
     // Mouse look: captured while the game has the focus and neither the menu nor a text dialog
     // is open.
-    Gow3Mouse::Update(window, !text_active && !Gow3Overlay::CapturesInput());
+    // gow3 1 Nov 2026: never in a GOW3_WINDOW_BACKGROUND=1 test window (its mouse is injected through
+    // the pad file; a click on the window must not hand the player's real mouse to the test).
+    Gow3Mouse::Update(window, !text_active && !Gow3Overlay::CapturesInput() && !Background());
     // gow3 29 Oct 2026 (GitHub #300: no mouse cursor in the in-game menu): the menu's own drawn
     // cursor follows ImGui's last mouse position, which can be off screen after mouse look let
     // the pointer go. Windows' cursor is shown while the menu or a dialog takes the input,

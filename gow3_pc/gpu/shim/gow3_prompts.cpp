@@ -70,6 +70,10 @@ constexpr KnownTexture known_textures[] = {
     {0xc96e34fbb203279eULL, Kind::Face, GOW3_PROMPT_TRIANGLE, "Uncharted 1/2 HOLD Triangle picture (pressed)"},
     {0x4181f3ae6bd1efffULL, Kind::Face, GOW3_PROMPT_TRIANGLE, "Uncharted 3 HOLD Triangle picture"},
     {0x07ff3d0e4090be85ULL, Kind::Face, GOW3_PROMPT_TRIANGLE, "Uncharted 3 HOLD Triangle picture (pressed)"},
+    // 1 Nov 2026 (#327, the Uncharted 3 bar fight's chokehold): the Circle to tap or hold, in the
+    // same two press positions as the HOLD Triangles.
+    {0x94d741f6b51815eeULL, Kind::Face, GOW3_PROMPT_CIRCLE, "Uncharted 3 HOLD Circle picture"},
+    {0x93b46ba81469882cULL, Kind::Face, GOW3_PROMPT_CIRCLE, "Uncharted 3 HOLD Circle picture (pressed)"},
     {0x6c3fc301ede4114aULL, Kind::Shoulder, GOW3_PROMPT_L1, "Uncharted 3 L1 picture"},
     {0x2e8ae3386e2a91ddULL, Kind::Shoulder, GOW3_PROMPT_L2, "Uncharted 3 L2 picture"},
     {0xbd74a617a879f120ULL, Kind::Shoulder, GOW3_PROMPT_R1, "Uncharted 3 R1 picture"},

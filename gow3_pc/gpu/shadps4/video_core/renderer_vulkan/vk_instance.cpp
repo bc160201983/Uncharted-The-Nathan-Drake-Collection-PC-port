@@ -465,9 +465,20 @@ bool Instance::CreateDevice() {
     // gow3 24 Oct 2026: players' device-loss logs (#130, #132, #142) said nothing about the
     // fault. The report costs nothing until the device is lost: on whenever the driver has it
     // (GOW3_DEVICE_FAULT=0: off).
-    if (const char* env=std::getenv("GOW3_DEVICE_FAULT"); diag_on || !(env && env[0]=='0')) {
+    // gow3 1 Nov 2026 (#285, #211): GeForce GTX 10-series cards (Pascal) crash at start with it
+    // since 0.6.0 (a GTX 1070 starts with GOW3_DEVICE_FAULT=0), so NVIDIA cards older than Turing
+    // (device IDs below 0x1e00) leave it off, checkpoints too; GOW3_DEVICE_FAULT=1: on anyway.
+    const char* fault_env=std::getenv("GOW3_DEVICE_FAULT");
+    const bool fault_safe=!(GetVendorID()==0x10de && GetDeviceID()<0x1e00);
+    if ((fault_env && fault_env[0]=='1') || (fault_safe && (diag_on || !(fault_env && fault_env[0]=='0')))) {
         device_fault=add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         std::printf("GPU device fault reports: %s\n",device_fault ? "on" : "not supported");
+    } else if (!fault_safe) {
+        std::printf("GPU device fault reports: off on NVIDIA cards older than Turing (GOW3_DEVICE_FAULT=1: on)\n");
+    }
+    if (const u32 size=FixedComputeSubgroupSize()) {
+        std::printf("GPU: compute shaders built with %u-lane subgroups (the driver could pick %u..%u; "
+                    "GOW3_SUBGROUP_FIXED=0: its choice)\n",size,vk13_props.minSubgroupSize,vk13_props.maxSubgroupSize);
     }
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&

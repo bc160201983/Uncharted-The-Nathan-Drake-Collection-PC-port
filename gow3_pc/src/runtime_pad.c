@@ -525,6 +525,8 @@ static int mouse_look_debug(void) {
     return debug;
 }
 int runtime_pad_aim_held(void) { return __atomic_load_n(&pad_aim_held,__ATOMIC_RELAXED); }
+/* gow3 1 Nov 2026: GOW3_MOUSE_TRACE pad lines (runtime_mouselook.c). */
+void runtime_mouselook_trace_pad(int direct,float stick_x,float stick_y);
 static int sample_mouse(PadData *d) {
     if (!mouse_enabled()) return 0;
     /* 20 Oct 2026: the aim sensitivity while aiming, the up/down speed and the left/right invert
@@ -580,16 +582,17 @@ static int sample_mouse(PadData *d) {
             debug_last=now; reads=direct_reads=0;
         }
     }
-    if (direct) { vx=vy=0; return used; }
+    if (direct) { runtime_mouselook_trace_pad(1,0.0f,0.0f); vx=vy=0; return used; }
     /* The games turn at about (deflection past a ~0.15 dead zone)^1.5 of their full speed. The
      * deflection is the inverse of that, so the turn follows the mouse's speed evenly (the linear
      * mapping before turned slow movements too little and fast ones too much). */
     float sx=vx*sensitivity*0.08f*invert_x, sy=vy*sensitivity*0.08f*invert*(vertical>0.0f ? vertical : 1.0f);
     const float magnitude=sqrtf(sx*sx+sy*sy);
-    if (magnitude<0.002f) return used;
+    if (magnitude<0.002f) { runtime_mouselook_trace_pad(0,0.0f,0.0f); return used; }
     const float shaped=powf(magnitude>1.0f ? 1.0f : magnitude,2.0f/3.0f);
     const float out=0.15f+0.85f*shaped>1.0f ? 1.0f : 0.15f+0.85f*shaped;
     sx*=out/magnitude; sy*=out/magnitude;
+    runtime_mouselook_trace_pad(0,sx,sy);
     d->right_x=(uint8_t)(sx<-1.0f ? 0 : sx>1.0f ? 255 : (int)(128.0f+sx*127.0f));
     d->right_y=(uint8_t)(sy<-1.0f ? 0 : sy>1.0f ? 255 : (int)(128.0f+sy*127.0f));
     return used;

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <span>
 #include <unordered_map>
 
@@ -286,6 +287,25 @@ public:
     /// Returns true if the subgroup size can be set to match guest subgroup size
     bool IsSubgroupSize64Supported() const {
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
+    }
+
+    /// gow3 1 Nov 2026 (#328): the subgroup size compute shaders must be given where the driver
+    /// may pick another one per shader (Intel: 8, 16 or 32), 0 where it cannot (NVIDIA: always
+    /// 32) or 64 is used (IsSubgroupSize64Supported). The recompiler splits the guest's 64-lane
+    /// waves by SubgroupSize(), so a shader the driver built narrower ran its wave work (ballots,
+    /// lane reads, LDS hand-offs) on the wrong lanes. GOW3_SUBGROUP_FIXED=0: off.
+    u32 FixedComputeSubgroupSize() const {
+        static const bool enabled = [] {
+            const char* env = std::getenv("GOW3_SUBGROUP_FIXED");
+            return !(env && env[0] == '0');
+        }();
+        const u32 size = vk11_props.subgroupSize;
+        if (!enabled || IsSubgroupSize64Supported() || !vk13_features.subgroupSizeControl ||
+            !(vk13_props.requiredSubgroupSizeStages & vk::ShaderStageFlagBits::eCompute) ||
+            vk13_props.minSubgroupSize >= size || size > vk13_props.maxSubgroupSize) {
+            return 0;
+        }
+        return size;
     }
 
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.

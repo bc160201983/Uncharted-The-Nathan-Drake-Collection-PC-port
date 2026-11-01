@@ -29,6 +29,9 @@ extern "C" volatile unsigned long long runtime_video_frame_lo, runtime_video_fra
 
 namespace VideoCore {
 
+// gow3 2 Nov 2026 (GOW3_HTILE_KEEP_CLEARS): set while UnmapMemory (guest threads) frees images.
+static thread_local bool unmapping_images = false;
+
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
 
@@ -704,10 +707,14 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
 
     ImageIds deleted_images;
     ForEachImageInRegion(cpu_addr, size, [&](ImageId id, Image&) { deleted_images.push_back(id); });
+    // gow3 2 Nov 2026 (GOW3_HTILE_KEEP_CLEARS): unmapped memory keeps no HTILE (and this runs on
+    // guest threads, which must not touch the GPU thread's retired_htiles).
+    unmapping_images = true;
     for (const ImageId id : deleted_images) {
         // TODO: Download image data back to host.
         FreeImage(id);
     }
+    unmapping_images = false;
 }
 
 ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, BindingType binding,
@@ -1369,6 +1376,37 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     return image.FindView(desc.view_info, false);
 }
 
+// gow3 2 Nov 2026 (GitHub #161, Uncharted 1 water without reflections). Uncharted 1 renders its
+// water reflection (pass of ~630 draws into a 1280x720 RGBA16F target at 1280x720 with a D32S8
+// depth buffer) into a depth buffer whose memory a compute shader uses as an RGBA8 image earlier
+// in the frame (cs 99086cd4 / 302d11fa). It clears that depth buffer through its HTILE only (a
+// fill shader, cs e8746089, on the HTILE right before the pass). Here the compute image took the
+// memory first, which freed the depth image and with it its HTILE registration, so the fill was
+// not seen as a clear; the depth image made again from the compute image's bytes was not cleared
+// (ResolveDepthOverlap), the reflection's depth test failed on that garbage and the reflection
+// stayed ~98% black: flat dark water. GOW3_HTILE_KEEP_CLEARS=1 (tools/probe_uncharted.py: U1)
+// remembers the HTILE addresses of freed depth images; a fill there counts as a clear for the
+// depth image that comes back with that HTILE.
+bool TextureCache::KeepHtileClears() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_HTILE_KEEP_CLEARS");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+bool TextureCache::ClearRetiredMeta(VAddr address) {
+    if (retired_htiles.empty()) {
+        return false;
+    }
+    const auto it = retired_htiles.find(address);
+    if (it == retired_htiles.end()) {
+        return false;
+    }
+    it.value().cleared = true;
+    return true;
+}
+
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
@@ -1377,9 +1415,35 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 
     // Register meta data for this depth buffer
     if (desc.info.meta_info.htile_addr) {
+        s32 clear_mask = image.info.meta_info.htile_clear_mask;
+        // gow3 2 Nov 2026 (GOW3_HTILE_KEEP_CLEARS): the game cleared this HTILE (a shader fill)
+        // while the depth image was gone; the depth image made again (through an overlap with the
+        // image that took its memory, which does not clear it) starts cleared, as on the PS4.
+        if (!retired_htiles.empty()) {
+            const auto it = retired_htiles.find(desc.info.meta_info.htile_addr);
+            if (it != retired_htiles.end()) {
+                const bool apply = it->second.cleared &&
+                                   it->second.depth_address == image.info.guest_address &&
+                                   !surface_metas.contains(desc.info.meta_info.htile_addr);
+                retired_htiles.erase(it);
+                if (apply) {
+                    clear_mask = -1;
+                    static std::atomic<int> lines{0};
+                    if (lines.fetch_add(1, std::memory_order_relaxed) < 8) {
+                        std::printf("GPU: HTILE clear kept for depth %s %ux%u at %#llx (HTILE %#llx; "
+                                    "the depth image was freed when its memory was reused; "
+                                    "GOW3_HTILE_KEEP_CLEARS)\n",
+                                    vk::to_string(image.info.pixel_format).c_str(),
+                                    image.info.size.width, image.info.size.height,
+                                    (unsigned long long)image.info.guest_address,
+                                    (unsigned long long)desc.info.meta_info.htile_addr);
+                        std::fflush(stdout);
+                    }
+                }
+            }
+        }
         surface_metas.emplace(desc.info.meta_info.htile_addr,
-                              MetaDataInfo{.type = MetaType::HTile,
-                                           .clear_mask = image.info.meta_info.htile_clear_mask});
+                              MetaDataInfo{.type = MetaType::HTile, .clear_mask = clear_mask});
         image.info.meta_info.htile_addr = desc.info.meta_info.htile_addr;
     }
 
@@ -1979,6 +2043,14 @@ void TextureCache::DeleteImage(ImageId image_id) {
     }
     if (meta_info.htile_addr) {
         surface_metas.erase(meta_info.htile_addr);
+        // gow3 2 Nov 2026 (GOW3_HTILE_KEEP_CLEARS): the HTILE address of a freed depth image is
+        // kept (see ClearRetiredMeta). Bounded: games free a few depth images per frame at most.
+        if (KeepHtileClears() && image.info.props.is_depth && !unmapping_images) {
+            if (retired_htiles.size() >= 256) {
+                retired_htiles.clear();
+            }
+            retired_htiles[meta_info.htile_addr] = {image.info.guest_address, false};
+        }
     }
 
     {

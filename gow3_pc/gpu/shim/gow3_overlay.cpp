@@ -75,6 +75,15 @@ std::atomic<bool> menu_open{false};
 // shortcut is held: LT + right stick click, View + Menu, or the player's own one or two buttons.
 constexpr u32 LeftTriggerBit = 1u << 30, RightTriggerBit = 1u << 31;
 u32 pad_held = 0;
+// gow3 1 Nov 2026 (user: "a key combination to close the game"): held for CloseHoldSeconds, L1 + R1 +
+// View + Menu (PlayStation: L1 + R1 + Share/Create + Options) or Ctrl + Shift + Q close the game
+// (Gow3Settings::close_shortcut); a countdown shows while they are held, letting go cancels.
+constexpr u32 ClosePadMask = (1u << SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) | (1u << SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) |
+                             (1u << SDL_GAMEPAD_BUTTON_BACK) | (1u << SDL_GAMEPAD_BUTTON_START);
+constexpr float CloseHoldSeconds = 2.0f;
+std::atomic<bool> close_key_held{false}, close_pad_held{false};
+bool close_q_down = false;
+std::atomic<s64> close_hold_since{0}; // steady-clock ms when both hands got there, 0: not held
 
 u32 PadTokenBit(std::string_view token) {
     if (token == "lefttrigger") return LeftTriggerBit;
@@ -1133,6 +1142,11 @@ void ControlsTab() {
             BindingButton(MenuBindingAction, CaptureMenuKey, key_text);
             ImGui::PopID();
         }
+        CheckRow("Close the game with a held shortcut", s.close_shortcut,
+                 control_playstation ? "Hold L1 + R1 + Share + Options, or Ctrl + Shift + Q, for 2 seconds. Progress since the "
+                                       "last checkpoint is lost, as when the window is closed."
+                                     : "Hold LB + RB + View + Menu, or Ctrl + Shift + Q, for 2 seconds. Progress since the "
+                                       "last checkpoint is lost, as when the window is closed.");
         ImGui::EndTable();
     }
     if (changed) {
@@ -1468,6 +1482,31 @@ void LoadingScreen() {
         ImGui::ProgressBar(float(done) / float(total), ImVec2(-1.0f, 0.0f), count);
     }
     ImGui::TextDisabled("The first start after an update takes longer.");
+    ImGui::End();
+}
+
+// While the close shortcut is held: how long until the game closes.
+void CloseCountdown() {
+    const s64 since = close_hold_since;
+    if (!since) {
+        return;
+    }
+    const s64 now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch()).count();
+    const float left = std::max(0.0f, CloseHoldSeconds - float(now_ms - since) / 1000.0f);
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.75f);
+    ImGui::Begin("##close_countdown", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::SetWindowFontScale(1.6f);
+    ImGui::Text("Closing the game in %.1f s", left);
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::ProgressBar(1.0f - left / CloseHoldSeconds, ImVec2(ImGui::GetFontSize() * 16.0f, 0.0f), "");
+    ImGui::TextDisabled("Let go to cancel.");
     ImGui::End();
 }
 
@@ -1833,6 +1872,11 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
+        // The close shortcut's keys (Ctrl + Shift + Q held), whatever else the keys do.
+        if (event.key.key == SDLK_Q) {
+            close_q_down = down;
+        }
+        close_key_held = close_q_down && (event.key.mod & SDL_KMOD_CTRL) && (event.key.mod & SDL_KMOD_SHIFT);
         static const bool capture_key = [] {
             const char* env = std::getenv("GOW3_FRAME_CAPTURE_KEY");
             return env && *env == '1';
@@ -1866,6 +1910,7 @@ bool HandleEvent(const SDL_Event& event) {
         // goes down while the others are held.
         const u32 bit = button < 30 ? 1u << button : 0;
         pad_held = down ? pad_held | bit : pad_held & ~bit;
+        close_pad_held = (pad_held & ClosePadMask) == ClosePadMask;
         if (const u32 mask = MenuPadMask(); down && (mask & bit) && (pad_held & mask) == mask) {
             SetOpen(!is_open);
             return true;
@@ -1930,6 +1975,11 @@ bool HandleEvent(const SDL_Event& event) {
         }
         io.AddMouseWheelEvent(event.wheel.x, event.wheel.y);
         return true;
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        // Keys released elsewhere send no key up here: the close shortcut is not held any more.
+        close_q_down = false;
+        close_key_held = false;
+        return false;
     default:
         return false;
     }
@@ -1962,6 +2012,7 @@ void SetLoading(bool active, u32 done, u32 total) {
 bool Visible() {
     const auto& s = Gow3Settings::Get();
     return initialized && (loading || match_loading || background_total || menu_open || text_entry_active || choice_active ||
+                           close_hold_since != 0 ||
                            choice_retiring || s.show_fps || trophy_showing);
 }
 
@@ -2068,6 +2119,50 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         SetOpen(true);
         menu_at_start = -1;
     }
+    // gow3 1 Nov 2026 (#277, a device loss right after a player opened the menu): GOW3_TEST_MENU_TOGGLE=
+    // <seconds>,<tab> (tests): opens the menu on that tab and closes it again, every that many
+    // seconds once the game shows frames after loading (test runs have no keyboard or controller).
+    static const int menu_toggle_frames = [] {
+        const char* env = std::getenv("GOW3_TEST_MENU_TOGGLE");
+        return env && *env ? std::max(60, int(std::atof(env) * 60.0)) : -1;
+    }();
+    static u32 menu_toggle_count = 0;
+    if (menu_toggle_frames > 0 && initialized && !loading && ++menu_toggle_count % u32(menu_toggle_frames) == 0) {
+        std::scoped_lock lock{imgui_mutex};
+        if (!menu_open) {
+            const char* comma = std::strchr(std::getenv("GOW3_TEST_MENU_TOGGLE"), ',');
+            Gow3Settings::Get().menu_tab = comma ? std::clamp(std::atoi(comma + 1), 0, 4) : 0;
+        }
+        SetOpen(!menu_open);
+    }
+    // The close shortcut (ClosePadMask, Ctrl + Shift + Q) held for CloseHoldSeconds: the window's
+    // own close event, as if its close button was pressed.
+    {
+        // GOW3_TEST_CLOSE_HOLD=<seconds> (tests have no keyboard or controller): held from then on.
+        static const int test_close_frames = [] {
+            const char* env = std::getenv("GOW3_TEST_CLOSE_HOLD");
+            return env && *env ? std::max(1, int(std::atof(env) * 60.0)) : -1;
+        }();
+        static int test_close_count = 0;
+        const bool test_held = test_close_frames > 0 && initialized && !loading && ++test_close_count > test_close_frames;
+        const bool held =
+            Gow3Settings::Get().close_shortcut && (close_key_held || close_pad_held || test_held);
+        const s64 now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch()).count();
+        static bool close_sent = false;
+        if (!held) {
+            close_hold_since = 0;
+        } else if (!close_hold_since) {
+            close_hold_since = now_ms;
+        } else if (!close_sent && now_ms - close_hold_since >= s64(CloseHoldSeconds * 1000.0f)) {
+            close_sent = true;
+            std::printf("Close shortcut held for %.0f s: closing the game\n", CloseHoldSeconds);
+            std::fflush(stdout);
+            SDL_Event quit{};
+            quit.type = SDL_EVENT_QUIT;
+            SDL_PushEvent(&quit);
+        }
+    }
     // GOW3_TEST_TROPHY=<seconds>,<id> (tests and screenshots): that trophy's popup once the game
     // has shown frames that long after loading (marked earned for this session only, not saved).
     static int test_trophy_frames = [] {
@@ -2107,6 +2202,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (menu_open) {
         Menu();
+    }
+    if (close_hold_since != 0) {
+        CloseCountdown();
     }
     fps_top_right_height = 0.0f;
     if (Gow3Settings::Get().show_fps && !menu_open) {
