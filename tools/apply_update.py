@@ -96,6 +96,16 @@ def carry_over(old, new, relative, dropped, kept):
             kept.append(rel)
 
 
+def preserve(old, root):
+    """Moves update\\old out of update\\ (which the launcher removes); returns where it is."""
+    target = root / f"update-kept-{time.strftime('%Y%m%d-%H%M%S')}-old"
+    try:
+        retry(lambda: old.rename(target))
+        return target
+    except OSError:
+        return old
+
+
 def apply(root, staged, status):
     old = root / "update" / "old"
     retry(lambda: shutil.rmtree(old) if old.exists() else None)
@@ -123,18 +133,35 @@ def apply(root, staged, status):
                 shutil.copy2(staged / relative, target)
     except Exception:
         status("The update failed: restoring the installed version...")
+        # Every step is tried even when an earlier one fails (a file held by a virus scanner):
+        # stopping halfway would leave folders in update\old and an install that can't start.
+        stuck = []
         for name in moved + added:
             if (root / name).exists() and (old / name).exists() or name in added:
-                retry(lambda: remove_item(root / name))
+                try:
+                    retry(lambda: remove_item(root / name))
+                except Exception as error:
+                    stuck.append(f"{name} (remove: {error})")
         for name in moved:
-            retry(lambda: (old / name).rename(root / name))
+            try:
+                retry(lambda: (old / name).rename(root / name))
+            except Exception as error:
+                stuck.append(f"{name} (restore: {error})")
         for relative in DEFAULTS:
             if (old / Path(relative).name).is_file():
-                shutil.copy2(old / Path(relative).name, root / relative)
+                try:
+                    shutil.copy2(old / Path(relative).name, root / relative)
+                except OSError as error:
+                    stuck.append(f"{relative} ({error})")
+        if stuck:
+            # update\old is deleted when the launcher starts: keep what is left out of it.
+            kept_at = preserve(old, root)
+            raise RuntimeError("The previous version could not be fully restored; move these back "
+                               f"from {kept_at} by hand: " + ", ".join(stuck))
         raise
     # Installed. The player's files go back into the new folders; one that can't be moved stays
     # in a folder of its own beside them (update\ is removed when the launcher starts).
-    kept = []
+    kept, left_in_old = [], []
     status("Keeping your own files...")
     for name in moved:
         if (old / name).is_dir() and (root / name).is_dir():
@@ -143,8 +170,14 @@ def apply(root, staged, status):
             except OSError as error:
                 rescue = root / f"update-kept-{time.strftime('%Y%m%d-%H%M%S')}"
                 status(f"Some of your files in {name} could not be moved back ({error}); they are in {rescue.name}.")
-                rescue.mkdir(exist_ok=True)
-                retry(lambda: (old / name).rename(rescue / name))
+                try:
+                    rescue.mkdir(exist_ok=True)
+                    retry(lambda: (old / name).rename(rescue / name))
+                except Exception as rescue_error:
+                    # The new version is installed: report it, don't turn it into a failed update.
+                    left_in_old.append(f"{name} ({rescue_error})")
+    if left_in_old:
+        status(f"Some of your old files stay in {preserve(old, root)}: " + ", ".join(left_in_old))
     for rel in kept:
         print(f"Kept: {rel}", flush=True)
     try:
