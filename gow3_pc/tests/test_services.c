@@ -11,10 +11,11 @@ int64_t runtime_file_open(const char *path, int flags, int mode) { (void)path; (
 int64_t runtime_file_read(int fd, void *buffer, uint64_t size) { (void)fd; (void)buffer; (void)size; return -1; }
 int64_t runtime_file_close(int fd) { (void)fd; return 0; }
 static int choice_next=-1;
-int gow3gpu_choice_begin(const char *title, const char *const *items, const char *const *images, int count, int focus) { (void)title; (void)items; (void)images; (void)focus; return count>0; }
+int gow3gpu_choice_begin(const char *title, const char *const *items, const char *const *images, int count, int focus, int deletable_from) { (void)title; (void)items; (void)images; (void)focus; (void)deletable_from; return count>0; }
 int gow3gpu_choice_poll(void) { return choice_next; }
 int runtime_savedata_param(int32_t user, const char *dir, void *param) { (void)user; (void)dir; (void)param; return -1; }
 int runtime_savedata_icon(int32_t user, const char *dir, char *out, size_t size) { (void)user; (void)dir; (void)out; (void)size; return -1; }
+int runtime_savedata_trash(int32_t user, const char *dir) { (void)user; (void)dir; return 0; }
 static int trophy_lists_shown, trophies_shown, trophy_last_shown=-1;
 void gow3gpu_trophy_list(const char *pack, int list, const uint32_t earned[4]) { (void)pack; (void)list; (void)earned; ++trophy_lists_shown; }
 void gow3gpu_trophy_earned(int id) { ++trophies_shown; trophy_last_shown=id; }
@@ -72,7 +73,21 @@ int main(void) {
     choice_next=-2;
     assert(save_status()==DIALOG_FINISHED && save_result(out)==0);
     memcpy(&value,out+4,4); assert(value==SAVE_RESULT_CANCELED);
+    /* Deleting SAVE0001 from the list (entry 1): the list shows again without it. */
+    assert(save_open(list)==0);
+    choice_next=-3-1;
+    assert(save_status()==DIALOG_RUNNING && save_dialog.dir_count==1 && !strcmp(save_dialog.dirs[0],"SAVE0002"));
+    choice_next=1;
+    assert(save_status()==DIALOG_FINISHED && save_result(out)==0 && !strcmp(chosen,"SAVE0002"));
     assert(save_term()==0);
+    /* Save list text: cut at a whole UTF-8 character; Arabic presentation forms get '_' as spaces. */
+    char text[16];
+    save_text(text,sizeof(text),"\xef\xba\x8d\xef\xba\x8d\xef\xba\x8d\xef\xba\x8d\xef\xba\x8d\xef\xba\x8d",127);
+    assert(strlen(text)==15);
+    save_text(text,sizeof(text),"\xef\xba\x8d_\xef\xba\x8d\n",127);
+    assert(!strcmp(text,"\xef\xba\x8d \xef\xba\x8d"));
+    save_text(text,sizeof(text),"a_b",127);
+    assert(!strcmp(text,"a_b"));
 
     /* PlayGo: installed, full speed, progress never divides by zero. */
     int32_t handle=0; uint64_t progress[2]; int32_t speed; uint16_t chunk=0;

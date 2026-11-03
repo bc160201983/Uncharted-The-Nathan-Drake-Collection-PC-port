@@ -48,9 +48,10 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
 
 /// The game's save list: shown until the player chooses (arrows/D-pad, Enter/Cross) or
 /// cancels (Esc/Circle). `pictures`: one per item (empty = none), drawn beside its text.
-/// PollChoice: -1 while open, -2 cancelled, else the chosen index.
+/// PollChoice: -1 while open, -2 cancelled, <= -3 the player deleted entry -3 - result (Delete /
+/// Triangle twice; only entries from `deletable_from` on, -1: none), else the chosen index.
 void BeginChoice(const std::string& title, const std::vector<std::string>& items,
-                 std::vector<Gow3Png::Image> pictures, int focus);
+                 std::vector<Gow3Png::Image> pictures, int focus, int deletable_from = -1);
 int PollChoice();
 
 /// A trophy popup (gow3_trophies.cpp): at the top right for a few seconds, one after another.

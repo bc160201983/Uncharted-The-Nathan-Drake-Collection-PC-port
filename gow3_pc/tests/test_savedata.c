@@ -13,6 +13,7 @@ static char user_dir[512];
 const char *runtime_file_user_dir(void) { return user_dir; }
 int runtime_file_mount(const char *guest, const char *host) { (void)guest; (void)host; return 0; }
 void runtime_file_unmount(const char *guest) { (void)guest; }
+int gow3gpu_thumbnail_save(const char *path) { (void)path; return 0; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *nid) {
     for (size_t i=0;i<count;++i) if (!strcmp(nid,table[i].name)) return (uintptr_t)table[i].function;
     return 0;

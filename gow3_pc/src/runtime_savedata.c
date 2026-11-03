@@ -6,6 +6,7 @@
  * Metadata lives beside the directory so the guest's own files are untouched. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/gow3gpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -226,13 +227,47 @@ int runtime_savedata_param(int32_t user, const char *dir, void *param) {
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,dir);
     return read_param(meta,(Param *)param);
 }
-/* Host path of a save's icon0.png (the location picture in the save dialog); 0 when named. */
+/* Host path of a save's picture in the save dialog: thumb.png (the game in play when it was
+ * written) when there is one, else the game's icon0.png; 0 when named. */
 int runtime_savedata_icon(int32_t user, const char *dir, char *out, size_t size) {
     if (!valid_name(dir,32)) return -1;
     char base[600];
     root(user,NULL,base,sizeof(base));
+    struct stat st;
+    snprintf(out,size,"%s/%s.sce_sys/thumb.png",base,dir);
+    if (!stat(out,&st) && st.st_size>0) return 0;
     snprintf(out,size,"%s/%s.sce_sys/icon0.png",base,dir);
     return 0;
+}
+/* Deleting a save from the save list (Delete / Triangle): its folders move to
+ * savedata-deleted/<user>/<title>/<dir>-<time> beside savedata, so a mistake can be undone by
+ * moving them back. 0 when moved; a mounted save is refused. */
+int runtime_savedata_trash(int32_t user, const char *dir) {
+    if (!valid_name(dir,32)) return -1;
+    char base[600], host[640], meta[680], backup[700], trash[700], to[760];
+    root(user,NULL,base,sizeof(base));
+    snprintf(host,sizeof(host),"%s/%s",base,dir);
+    snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,dir);
+    snprintf(backup,sizeof(backup),"%s/.backup/%s",base,dir);
+    pthread_mutex_lock(&lock);
+    for (int i=0;i<SLOTS;++i)
+        if (slots[i].used && !strcmp(slots[i].host,host)) { pthread_mutex_unlock(&lock); return -1; }
+    char stamp[32]; time_t now=time(NULL); struct tm tm;
+#ifdef _WIN32
+    localtime_s(&tm,&now);
+#else
+    localtime_r(&now,&tm);
+#endif
+    strftime(stamp,sizeof(stamp),"%Y%m%d-%H%M%S",&tm);
+    snprintf(trash,sizeof(trash),"%s/savedata-deleted/%d/%s/%s-%s",runtime_file_user_dir(),user,title_id,dir,stamp);
+    struct stat st;
+    int r=stat(host,&st) || make_dirs(trash) ? -1 : 0;
+    if (!r) { snprintf(to,sizeof(to),"%s/%s",trash,dir); r=rename(host,to) ? -1 : 0; }
+    if (!r && !stat(meta,&st)) { snprintf(to,sizeof(to),"%s/%s.sce_sys",trash,dir); rename(meta,to); }
+    if (!r && !stat(backup,&st)) { snprintf(to,sizeof(to),"%s/backup",trash); rename(backup,to); }
+    pthread_mutex_unlock(&lock);
+    printf("Runtime: save data '%s' %s %s\n",dir,r ? "could not be moved to" : "moved to",trash);
+    return r;
 }
 static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; return 0; }
 static ABI int32_t save_terminate(void) {
@@ -299,12 +334,17 @@ static ABI int32_t save_umount(const MountPoint *point) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
+    char picture[720]=""; /* gow3 3 Nov 2026: a written save gets the last picture of the game in play */
     if (slot>=0) {
         runtime_file_unmount(point->data);
         if (slots[slot].writable && backup_enabled()) commit(slots[slot].host,slots[slot].backup);
+        if (slots[slot].writable) snprintf(picture,sizeof(picture),"%s/thumb.png",slots[slot].meta);
         slots[slot].used=0;
     }
     pthread_mutex_unlock(&lock);
+    const int written=picture[0] ? gow3gpu_thumbnail_save(picture) : 0;
+    if (written==2) remove(picture); /* an older picture of this save would show another place meanwhile */
+    if (written) printf("Runtime: save picture %s (%s)\n",written==1 ? "written" : "waits for play to go on",picture);
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
 static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const void *buffer, uint64_t size) {

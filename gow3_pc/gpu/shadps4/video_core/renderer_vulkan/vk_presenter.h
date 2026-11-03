@@ -154,6 +154,20 @@ private:
     std::atomic<u32> long_frame_waits{0};
     std::condition_variable_any frame_cv;
     std::vector<VAddr> vo_buffers_addr;
+
+    /// gow3: the save list's picture of the game (gow3_thumbnail.h): a game frame scaled down into
+    /// `image`, copied to the mapped `buffer` and read once that frame's present has finished.
+    struct Thumbnail {
+        vk::Image image{};
+        VmaAllocation image_allocation{};
+        vk::Buffer buffer{};
+        VmaAllocation buffer_allocation{};
+        void* mapped = nullptr;
+        vk::Fence pending{}; ///< present_done of the frame that copied it; null: nothing to read
+        bool failed = false; ///< not supported or not created: no pictures
+    } thumbnail;
+    void CaptureThumbnail(vk::CommandBuffer cmdbuf, const Frame* frame);
+    void ReadThumbnail();
 };
 
 } // namespace Vulkan
