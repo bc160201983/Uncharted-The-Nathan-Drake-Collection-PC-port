@@ -21,6 +21,10 @@
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/videoout/video_out.h"
+
+namespace Libraries::VideoOut {
+void LogFrameEvent(char kind); // driver.cpp (GOW3_FRAME_LOG)
+}
 #include "core/memory.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -190,6 +194,10 @@ s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata) {
             if (!IsValidEventType(irq))
                 return;
 
+            // gow3: GOW3_FRAME_LOG pacing analysis (E events).
+            if (irq == Platform::InterruptId::GfxEop) {
+                Libraries::VideoOut::LogFrameEvent('E');
+            }
             // Event data is expected to be an event type as per sceGnmGetEqEventType.
             equeue->TriggerEvent(static_cast<GnmEventType>(id),
                                  OrbisKernelEvent::Filter::GraphicsCore,

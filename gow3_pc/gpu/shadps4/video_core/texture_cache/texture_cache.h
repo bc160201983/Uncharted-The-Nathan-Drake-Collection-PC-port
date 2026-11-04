@@ -358,6 +358,16 @@ public:
         return false;
     }
 
+    /// gow3 2 Nov 2026 (GitHub #161, Uncharted 1 water without reflections): HTILE clears of
+    /// depth images that were freed when another image took their memory (GOW3_HTILE_KEEP_CLEARS,
+    /// texture_cache.cpp). Whether it is on.
+    static bool KeepHtileClears();
+
+    /// gow3 (GOW3_HTILE_KEEP_CLEARS): a shader fill of the HTILE surface of a depth image freed
+    /// since (no live metadata there). The clear is kept for the depth image that comes back with
+    /// the same HTILE address. True when the address was such an HTILE surface.
+    bool ClearRetiredMeta(VAddr address);
+
     /// Updates the state of a slice of the specified metadata surface.
     bool TouchMeta(VAddr address, u32 slice, bool is_clear) {
         auto it = surface_metas.find(address);
@@ -618,6 +628,12 @@ private:
         s32 clear_mask = -1;
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    /// gow3 (GOW3_HTILE_KEEP_CLEARS): HTILE surfaces of freed depth images, by HTILE address.
+    struct RetiredHtile {
+        VAddr depth_address;
+        bool cleared;
+    };
+    tsl::robin_map<VAddr, RetiredHtile> retired_htiles;
 };
 
 } // namespace VideoCore

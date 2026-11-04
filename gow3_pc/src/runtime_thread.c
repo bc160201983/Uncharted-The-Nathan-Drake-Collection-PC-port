@@ -87,6 +87,46 @@ uint32_t runtime_thread_tcb_offset(void) {
     }
     return 0x1480+8*(uint32_t)tls_slot;
 }
+/* gow3 1 Nov 2026 (the 2 GB video memory simulation died at start with STATUS_STACK_OVERFLOW in
+ * ucrtbase's __chkstk): guest code runs PS4 fibers whose stacks lie in guest memory
+ * (0x10'0000'0000 and up). __chkstk probes from the TEB's StackLimit down to the new stack pointer
+ * when that is below the limit. While the thread's own stack sits below guest memory (Windows'
+ * usual place) a fiber stack is above it and nothing happens; when the address space is crowded
+ * (large video memory reservations, as on small cards spilling into system memory) Windows places
+ * thread stacks higher, the fiber stack is below StackLimit, and __chkstk walked gigabytes down
+ * through the thread's guard page: "stack overflow". Such a thread's stack is now committed in
+ * full (no guard page growth needed any more) and its StackLimit set to the start of guest
+ * memory, so fiber stacks count as inside the stack. Threads whose stack is below guest memory
+ * are left as they are. GOW3_STACK_WIDEN=0: off. */
+void runtime_thread_widen_stack_limit(void) {
+    static int enabled=-1;
+    if (enabled<0) { const char *e=getenv("GOW3_STACK_WIDEN"); enabled=!(e && e[0]=='0'); }
+    if (!enabled) return;
+    const uintptr_t guest_low=UINT64_C(0x1000000000);
+    NT_TIB *tib=(NT_TIB *)NtCurrentTeb();
+    const uintptr_t limit=(uintptr_t)tib->StackLimit, base=(uintptr_t)tib->StackBase;
+    if (limit<=guest_low) return;
+    MEMORY_BASIC_INFORMATION region;
+    if (!VirtualQuery((LPCVOID)(base-1),&region,sizeof(region))) return;
+    const uintptr_t reservation=(uintptr_t)region.AllocationBase;
+    if (reservation<limit) {
+        DWORD old;
+        if (!VirtualAlloc((void *)reservation,limit-reservation,MEM_COMMIT,PAGE_READWRITE) ||
+            !VirtualProtect((void *)reservation,limit-reservation,PAGE_READWRITE,&old)) {
+            fprintf(stderr,"Runtime: thread stack at 0x%llx could not be committed (%lu); fiber stacks may stop it\n",
+                    (unsigned long long)base,GetLastError());
+            return;
+        }
+    }
+    tib->StackLimit=(PVOID)guest_low;
+    static int told;
+    if (!told) {
+        told=1;
+        printf("Runtime: thread stacks above guest memory (0x%llx): committed in full, fiber stacks inside "
+               "their bounds (GOW3_STACK_WIDEN=0: off)\n",(unsigned long long)base);
+        fflush(stdout);
+    }
+}
 static void set_gs(void *base) {
     runtime_thread_tcb_offset();
     if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
@@ -341,6 +381,7 @@ static void *host_start(void *p) {
     attach(t);
     set_host_name(t->name);
 #ifdef _WIN32
+    runtime_thread_widen_stack_limit();
     apply_guest_scheduling(t,GetCurrentThread(),"started");
     { /* gow3 diagnostics: GOW3_PROFILE_GUEST=<prefixes> (see profile_guest_wanted) */
         extern void gow3_profile_current(const char *name);

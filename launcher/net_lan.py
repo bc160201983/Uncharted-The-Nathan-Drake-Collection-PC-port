@@ -14,7 +14,7 @@ import struct
 import time
 
 DEFAULT_PORT = 27000
-VERSION = 4  # runtime_net.c NET_VERSION (4: characters in the hello)
+VERSION = 6  # runtime_net.c NET_VERSION (4: characters in the hello; 5: snapshot anim phases; 6: NPC events)
 _ANSWER = struct.Struct("<4sIIIIi32s48s")
 
 

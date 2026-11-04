@@ -144,6 +144,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.debug_view = std::clamp(i, 0, DebugViewCount - 1);
     } else if (key == "show_fps") {
         v.show_fps = i != 0;
+    } else if (key == "close_shortcut") {
+        v.close_shortcut = i != 0;
     } else if (key == "display_mode") {
         v.display_mode = Gow3Graphics::ParseDisplayMode(value);
     } else if (key == "vsync") {
@@ -438,6 +440,7 @@ KeyValues Current() {
                                                   : v.live_resolution ? "1" : "0");
     static const char* const shortcuts[] = {"lt_r3", "view_menu", "keyboard", "custom"};
     Append(text, "menu_shortcut=%s\n", shortcuts[std::clamp(v.menu_shortcut.load(), 0, 3)]);
+    Append(text, "close_shortcut=%d\n", int(v.close_shortcut.load()));
     Append(text, "fade_distance=%d\nsun_shadow_distance=%d\nlight_shadow_distance=%d\n", v.fade_distance.load(),
            v.sun_shadow_distance.load(), v.light_shadow_distance.load());
     Append(text, "mouse=%d\nmouse_sens=%.2f\nmouse_invert=%d\nprompts=%s\nstick_speed=%.2f\n",

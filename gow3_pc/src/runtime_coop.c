@@ -578,8 +578,13 @@ static int u2_patch_dc_twins(void) {
     memcpy(jump + 1, &r, 4);
     return wr((uint64_t)(uintptr_t)(image + site), jump, 5);
 }
-/* Snapshot parses ended early by netinit's assert patch (0x66b430), reported by coop_frame. */
+/* Snapshot parses ended early by netinit's assert patch (0x66b430), reported by coop_frame;
+ * per assert block too (25 Oct, run a07: which check ends the host's parses of the joiner). */
 static volatile uint32_t *coop_parse_aborts;
+#define COOP_PARSE_SITES 32
+static uint32_t coop_parse_site_at[COOP_PARSE_SITES];
+static __attribute__((aligned(64))) volatile uint32_t coop_parse_site_count[COOP_PARSE_SITES];
+static int coop_parse_sites;
 /* NaN keyframe targets skipped by netinit's patch at 0x527f49, reported by coop_frame. */
 static volatile uint32_t *coop_nan_skips;
 static int u2_netinit(const char *p) {
@@ -716,37 +721,42 @@ static int u2_netinit(const char *p) {
     {
         static __attribute__((aligned(64))) volatile uint32_t parse_aborts;
         coop_parse_aborts = &parse_aborts;
-        unsigned char *stub = NULL;
+        /* one 32-byte stub per assert block: counts the total and its own block, then the epilogue */
+        unsigned char *page = page_near_image();
         int patched = 0;
-        for (uint64_t at = 0x66b430; at + 7 <= 0x66c380; ++at) {
+        for (uint64_t at = 0x66b430; page && at + 7 <= 0x66c380 && patched < COOP_PARSE_SITES; ++at) {
             const unsigned char *p = image + at;
             if (p[0] != 0x48 || p[1] != 0x8b || p[2] != 0x05) continue;
             int32_t disp;
             memcpy(&disp, p + 3, 4);
             if (at + 7 + (int64_t)disp != 0x156df78) continue;
-            if (!stub) {
-                stub = page_near_image();
-                if (!stub) break;
-                unsigned n = 0;
-                stub[n++] = 0x48; stub[n++] = 0xb8;                       /* mov rax, &parse_aborts */
-                const uint64_t a = (uint64_t)(uintptr_t)&parse_aborts;
-                memcpy(stub + n, &a, 8); n += 8;
-                stub[n++] = 0xf0; stub[n++] = 0xff; stub[n++] = 0x00;     /* lock inc dword [rax] */
-                const int64_t back = (int64_t)(uintptr_t)(image + 0x66c380) - (int64_t)(uintptr_t)(stub + n + 5);
-                if (back < INT32_MIN || back > INT32_MAX) { stub = NULL; break; }
-                const int32_t b = (int32_t)back;
-                stub[n++] = 0xe9; memcpy(stub + n, &b, 4); n += 4;        /* jmp 0x66c380 (epilogue) */
-                DWORD old;
-                VirtualProtect(stub, 4096, PAGE_EXECUTE_READ, &old);
-            }
+            unsigned char *stub = page + patched * 32;
+            unsigned n = 0;
+            stub[n++] = 0x48; stub[n++] = 0xb8;                           /* mov rax, &parse_aborts */
+            uint64_t a = (uint64_t)(uintptr_t)&parse_aborts;
+            memcpy(stub + n, &a, 8); n += 8;
+            stub[n++] = 0xf0; stub[n++] = 0xff; stub[n++] = 0x00;         /* lock inc dword [rax] */
+            stub[n++] = 0x48; stub[n++] = 0xb8;                           /* mov rax, &its own count */
+            a = (uint64_t)(uintptr_t)&coop_parse_site_count[patched];
+            memcpy(stub + n, &a, 8); n += 8;
+            stub[n++] = 0xf0; stub[n++] = 0xff; stub[n++] = 0x00;         /* lock inc dword [rax] */
+            const int64_t back = (int64_t)(uintptr_t)(image + 0x66c380) - (int64_t)(uintptr_t)(stub + n + 5);
             const int64_t rel = (int64_t)(uintptr_t)stub - (int64_t)(uintptr_t)(image + at + 5);
-            if (rel < INT32_MIN || rel > INT32_MAX) break;
+            if (back < INT32_MIN || back > INT32_MAX || rel < INT32_MIN || rel > INT32_MAX) break;
+            const int32_t b = (int32_t)back;
+            stub[n++] = 0xe9; memcpy(stub + n, &b, 4); n += 4;            /* jmp 0x66c380 (epilogue) */
             unsigned char jump[7] = {0xe9, 0, 0, 0, 0, 0x90, 0x90};
             const int32_t r = (int32_t)rel;
             memcpy(jump + 1, &r, 4);
-            if (wr((uint64_t)(uintptr_t)(image + at), jump, 7)) ++patched;
+            if (!wr((uint64_t)(uintptr_t)(image + at), jump, 7)) break;
+            coop_parse_site_at[patched++] = (uint32_t)at;
             at += 6;
         }
+        if (page) {
+            DWORD old;
+            VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &old);
+        }
+        coop_parse_sites = patched;
         printf("Coop: netinit: snapshot parse: %d asserts end the parse instead (0x66b430..0x66c380)\n", patched);
     }
     /* HavokApplyHardKeyFrameAndSync (0x527b20): a NaN target position asserts (0x527f49, run q5:
@@ -784,15 +794,10 @@ static int u2_netinit(const char *p) {
      * root locator still comes from the snapshots (0x5f3f70), so the remote player moves.
      * GOW3_COOP_NETANIM=1 keeps the snapshot animation (for that investigation). 25 Oct (runs f1,
      * f1b, all 342 bit writers fixed): still breaks, now as ORBISANIM_JOB_ASSERT offsets past the
-     * NetCharacter's numJoints, then the havok fault at 0x512f44; so it stays off. */
-    {
-        static const unsigned char jb[6] = {0x0f, 0x82, 0x5f, 0x01, 0x00, 0x00}, jmp[6] = {0xe9, 0x60, 0x01, 0x00, 0x00, 0x90};
-        const char *anim = getenv("GOW3_COOP_NETANIM");
-        if ((!anim || anim[0] != '1') && !memcmp(image + 0x5f3ccf, jb, 6)) {
-            wr((uint64_t)(uintptr_t)(image + 0x5f3ccf), jmp, 6);
-            puts("Coop: netinit: remote players play the default idle animation (0x5f3ccf)");
-        }
-    }
+     * NetCharacter's numJoints, then the havok fault at 0x512f44.
+     * 25 Oct 14:00: cause found (this build's parse never plays its anim leaves and the writer sends
+     * no phases); the fix and the 0x5f3ccf choice live in runtime_coop_mp.c (install_netanim, called
+     * from runtime_coop_mp_netinit below). GOW3_COOP_NETANIM=0 keeps the default pose. */
     if (!rq(I + U2_SESSION + 0x10)) {
         const uint64_t standin = (uint64_t)(uintptr_t)net_session_standin;
         wr(I + U2_SESSION + 0x10, &standin, 8);
@@ -1155,17 +1160,48 @@ static void ABI coop_frame(void) {
     u2_net_clock_tick();
     runtime_net_frame(image);
     u2_net_peer_frame();
+    { extern void runtime_coop_menu_tick(unsigned char *); runtime_coop_menu_tick(image); } /* mpmenu commands waiting for the menu hook */
+    {   /* GOW3_SPAWN_RECORD=<file> (25 Oct, the user picks spawn points for the maps that ship none:
+         * Ice Cave, Train Wreck, Temple): F8 appends "<net game> x y z qx qy qz qw" of the local
+         * player (process +0x110 position, +0x120 rotation) and beeps. */
+        static const char *record = (const char *)1;
+        if (record == (const char *)1) record = getenv("GOW3_SPAWN_RECORD");
+        if (record && *record && (GetAsyncKeyState(VK_F8) & 1)) {
+            const uint64_t h = (uint64_t)(uintptr_t)image + U2_PLAYER;
+            const uint64_t ptr = rq(h), proc = ptr ? rq(ptr) : 0;
+            const uint32_t id = (uint32_t)rq(h + 8);
+            float v[8] = {0};
+            int16_t game = -1;
+            rd((uint64_t)(uintptr_t)image + U2_NGM + 0x1ca0, &game, 2);
+            if (proc && id && (uint32_t)rq(proc + 0x44) == id && rd(proc + 0x110, v, sizeof(v))) {
+                FILE *f = fopen(record, "a");
+                if (f) {
+                    fprintf(f, "%d %.3f %.3f %.3f %.4f %.4f %.4f %.4f\n", game, v[0], v[1], v[2], v[4], v[5], v[6], v[7]);
+                    fclose(f);
+                }
+                printf("Coop: spawn point recorded (net game %d): %.2f %.2f %.2f\n", game, v[0], v[1], v[2]);
+                MessageBeep(MB_OK);
+            } else {
+                puts("Coop: spawn point: no player right now");
+            }
+            fflush(stdout);
+        }
+    }
     if (coop_parse_aborts) {
         static ULONGLONG last_abort_line;
         static uint32_t reported;
         const ULONGLONG t = GetTickCount64();
         if (t - last_abort_line >= 5000 && *coop_parse_aborts != reported) {
             last_abort_line = t;
-            printf("Coop: snapshot parses ended early: %u (+%u)\n", *coop_parse_aborts, *coop_parse_aborts - reported);
+            printf("Coop: snapshot parses ended early: %u (+%u); by assert block:", *coop_parse_aborts, *coop_parse_aborts - reported);
+            for (int i = 0; i < coop_parse_sites; ++i)
+                if (coop_parse_site_count[i]) printf(" %x=%u", coop_parse_site_at[i], coop_parse_site_count[i]);
+            printf("\n");
             reported = *coop_parse_aborts;
             fflush(stdout);
         }
     }
+    { extern void runtime_coop_mp_frame(void); runtime_coop_mp_frame(); } /* runtime_coop_mp.c: remote animation lines */
     if (coop_nan_skips) {
         static ULONGLONG last_nan_line;
         static uint32_t reported_nan;

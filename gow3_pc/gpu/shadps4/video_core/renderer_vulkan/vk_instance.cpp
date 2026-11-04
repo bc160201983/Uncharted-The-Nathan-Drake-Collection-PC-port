@@ -112,6 +112,7 @@ void DescribeBoundAddress(u64 address) {
     }
 }
 
+bool g_low_video_memory = false;
 
 namespace {
 
@@ -401,7 +402,25 @@ bool Instance::CreateDevice() {
     }
 
     boost::container::static_vector<const char*, 64> enabled_extensions;
+    // gow3 26 Oct 2026 (diagnostics, GitHub #236): GOW3_HIDE_EXTENSIONS=<name>[,<name>...] treats
+    // these device extensions as unavailable (a part of the name is enough, e.g.
+    // vertex_input_dynamic_state), to run a newer driver with an older driver's feature set.
+    static const std::string hidden_extensions = [] {
+        const char* env = std::getenv("GOW3_HIDE_EXTENSIONS");
+        return std::string(env ? env : "");
+    }();
     const auto add_extension = [&](std::string_view extension) -> bool {
+        for (size_t start = 0; start < hidden_extensions.size();) {
+            const size_t end = std::min(hidden_extensions.find(',', start), hidden_extensions.size());
+            const std::string_view part =
+                std::string_view(hidden_extensions).substr(start, end - start);
+            if (!part.empty() && extension.find(part) != std::string_view::npos) {
+                std::printf("GPU: extension %s hidden (GOW3_HIDE_EXTENSIONS)\n", extension.data());
+                LOG_WARNING(Render_Vulkan, "Extension {} unavailable.", extension);
+                return false;
+            }
+            start = end + 1;
+        }
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
                          [&](const std::string& name) { return name == extension; });
@@ -446,9 +465,20 @@ bool Instance::CreateDevice() {
     // gow3 24 Oct 2026: players' device-loss logs (#130, #132, #142) said nothing about the
     // fault. The report costs nothing until the device is lost: on whenever the driver has it
     // (GOW3_DEVICE_FAULT=0: off).
-    if (const char* env=std::getenv("GOW3_DEVICE_FAULT"); diag_on || !(env && env[0]=='0')) {
+    // gow3 1 Nov 2026 (#285, #211): GeForce GTX 10-series cards (Pascal) crash at start with it
+    // since 0.6.0 (a GTX 1070 starts with GOW3_DEVICE_FAULT=0), so NVIDIA cards older than Turing
+    // (device IDs below 0x1e00) leave it off, checkpoints too; GOW3_DEVICE_FAULT=1: on anyway.
+    const char* fault_env=std::getenv("GOW3_DEVICE_FAULT");
+    const bool fault_safe=!(GetVendorID()==0x10de && GetDeviceID()<0x1e00);
+    if ((fault_env && fault_env[0]=='1') || (fault_safe && (diag_on || !(fault_env && fault_env[0]=='0')))) {
         device_fault=add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         std::printf("GPU device fault reports: %s\n",device_fault ? "on" : "not supported");
+    } else if (!fault_safe) {
+        std::printf("GPU device fault reports: off on NVIDIA cards older than Turing (GOW3_DEVICE_FAULT=1: on)\n");
+    }
+    if (const u32 size=FixedComputeSubgroupSize()) {
+        std::printf("GPU: compute shaders built with %u-lane subgroups (the driver could pick %u..%u; "
+                    "GOW3_SUBGROUP_FIXED=0: its choice)\n",size,vk13_props.minSubgroupSize,vk13_props.maxSubgroupSize);
     }
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&
@@ -628,8 +658,14 @@ bool Instance::CreateDevice() {
         return true;
     }();
     static constexpr std::array queue_priorities = {1.0f, 1.0f, 1.0f};
+    // gow3 26 Oct 2026 (diagnostics, GitHub #236): GOW3_MAX_QUEUES=1 uses one queue of the
+    // graphics family, as on AMD's drivers that offer only one (no copy or present queue).
+    static const u32 max_queues = [] {
+        const char* env = std::getenv("GOW3_MAX_QUEUES");
+        return env && env[0] >= '1' && env[0] <= '3' ? u32(env[0] - '0') : 3u;
+    }();
     const u32 queue_count =
-        std::min<u32>(present_queue_wanted ? 3u : 2u,
+        std::min<u32>(std::min<u32>(present_queue_wanted ? 3u : 2u, max_queues),
                       family_properties[queue_family_index].queueCount);
     std::vector<vk::DeviceQueueCreateInfo> queue_infos = {vk::DeviceQueueCreateInfo{
         .queueFamilyIndex = queue_family_index,
@@ -1021,10 +1057,36 @@ void Instance::CreateAllocator() {
         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
     };
 
+    // gow3 1 Nov 2026 (2 GB cards): a 2 GB card's budget is ~1.7 GB while U2 at 720p used
+    // 2.1 GB, and what did not fit was moved to system RAM (23-31 FPS in the simulation). With
+    // low video memory the reserves kept for speed are smaller: VMA blocks of 64 MiB (not 256,
+    // less unused room per block), the arena chunk reserve (buffer_cache.cpp), the spare image
+    // block (image.cpp) and idle staging buffers (vk_staging_buffer_pool.cpp).
+    {
+        u64 largest_local = 0;
+        for (u32 i = 0; i < memory_properties.memoryHeapCount; ++i) {
+            if (memory_properties.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+                largest_local = std::max<u64>(largest_local, memory_properties.memoryHeaps[i].size);
+            }
+        }
+        // 1 Nov 2026 (0.8.0, experimental): only when asked for. GOW3_LOW_VRAM=1: on,
+        // =auto: on discrete cards of 4.5 GiB or less; unset or anything else: off.
+        const char* env = std::getenv("GOW3_LOW_VRAM");
+        low_video_memory = (env && env[0] == '1') ||
+                           (env && std::string_view{env} == "auto" && !IsIntegrated() &&
+                            largest_local <= (u64{4608} << 20));
+        g_low_video_memory = low_video_memory;
+        if (low_video_memory) {
+            std::printf("GPU: low video memory mode on (%llu MiB card, experimental): smaller "
+                        "memory reserves (GOW3_LOW_VRAM)\n",
+                        static_cast<unsigned long long>(largest_local >> 20));
+        }
+    }
     const VmaAllocatorCreateInfo allocator_info = {
         .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
         .physicalDevice = physical_device,
         .device = *device,
+        .preferredLargeHeapBlockSize = low_video_memory ? VkDeviceSize{64} << 20 : 0,
         .pVulkanFunctions = &functions,
         .instance = *instance,
         .vulkanApiVersion = TargetVulkanApiVersion,
@@ -1159,6 +1221,40 @@ void Instance::CollectToolingInfo() const {
         const std::string_view name = tool.name;
         LOG_INFO(Render_Vulkan, "Attached debugging tool: {}", name);
     }
+}
+
+void Instance::ReportAllocatorMemory() const {
+    const char* path = std::getenv("GOW3_VRAM_REPORT");
+    if (!path || !path[0] || !allocator) {
+        return;
+    }
+    VmaTotalStatistics stats{};
+    vmaCalculateStatistics(allocator, &stats);
+    const auto props = physical_device.getMemoryProperties();
+    for (u32 type = 0; type < props.memoryTypeCount; ++type) {
+        const VmaStatistics& s = stats.memoryType[type].statistics;
+        if (s.blockBytes == 0) {
+            continue;
+        }
+        std::printf("VRAM report: VMA type %u (heap %u%s): %u blocks %llu MiB, %u allocations %llu "
+                    "MiB, largest free range %llu MiB\n",
+                    type, props.memoryTypes[type].heapIndex,
+                    props.memoryTypes[type].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal
+                        ? ", device-local" : "",
+                    s.blockCount, static_cast<unsigned long long>(s.blockBytes >> 20), s.allocationCount,
+                    static_cast<unsigned long long>(s.allocationBytes >> 20),
+                    static_cast<unsigned long long>(stats.memoryType[type].unusedRangeSizeMax >> 20));
+    }
+    char* json = nullptr;
+    vmaBuildStatsString(allocator, &json, VK_TRUE);
+    if (json) {
+        if (FILE* file = std::fopen(path, "wb")) {
+            std::fputs(json, file);
+            std::fclose(file);
+        }
+        vmaFreeStatsString(allocator, json);
+    }
+    std::fflush(stdout);
 }
 
 u64 Instance::GetDeviceMemoryUsage() const {

@@ -22,6 +22,9 @@
 #include <memory>
 #include <thread>
 #include <x86intrin.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "common/assert.h"
 #include "common/thread.h"
@@ -111,9 +114,28 @@ public:
         const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
         ++drains_by_reason[slot];
         const u64 start = __rdtsc();
+        // gow3 28 Oct 2026 (threads work, analysis/optimization-1028/THREADS.md, TEST SWITCH,
+        // default off): GOW3_PIPE_DRAIN_SLEEP=1 - after the short spin, stage A sleeps on
+        // `consumed` (WaitOnAddress; stage B wakes it) instead of yielding in a loop. On 4 cores
+        // the yield loop kept a core busy while stage B or the game's threads needed it.
+        static const bool drain_sleep = [] {
+            const char* env = std::getenv("GOW3_PIPE_DRAIN_SLEEP");
+            return env && env[0] == '1';
+        }();
         for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
             if (spins < 4096) {
                 __builtin_ia32_pause();
+            } else if (drain_sleep) {
+#ifdef _WIN32
+                drain_waiting.store(true, std::memory_order_seq_cst);
+                u64 seen = consumed.load(std::memory_order_seq_cst);
+                if (seen != head) {
+                    WaitOnAddress(&consumed, &seen, sizeof(seen), 1);
+                }
+                drain_waiting.store(false, std::memory_order_relaxed);
+#else
+                std::this_thread::yield();
+#endif
             } else {
                 std::this_thread::yield();
             }
@@ -221,7 +243,12 @@ private:
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
-            consumed.store(at, std::memory_order_release);
+            consumed.store(at, std::memory_order_seq_cst);
+#ifdef _WIN32
+            if (drain_waiting.load(std::memory_order_seq_cst)) {
+                WakeByAddressSingle(&consumed);
+            }
+#endif
         }
     }
 
@@ -235,6 +262,7 @@ private:
     alignas(64) std::atomic<u64> consumed{0};
     alignas(64) std::atomic<u32> wake{0};
     std::atomic<bool> sleeping{false};
+    alignas(64) std::atomic<bool> drain_waiting{false}; ///< stage A sleeps in Drain (GOW3_PIPE_DRAIN_SLEEP)
     std::atomic<u32> stage_b_tid{0};
     std::jthread thread;
 };

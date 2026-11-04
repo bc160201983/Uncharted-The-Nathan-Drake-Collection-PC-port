@@ -49,6 +49,8 @@
 
 namespace VideoCore {
 
+void NoteWriteFaultRegion(VAddr address); // buffer_cache.cpp (GOW3_BUFFER_STATS=2)
+
 constexpr size_t PM_PAGE_SIZE = 4_KB;
 constexpr size_t PM_PAGE_BITS = 12;
 
@@ -176,6 +178,7 @@ struct PageManager::Impl {
         }
         if (Common::IsWriteError(context)) {
             Gow3Stats::Timer timer{Gow3Stats::t_write_faults};
+            NoteWriteFaultRegion(addr);
             const u64 downloads = gow3_downloads;
             const auto start = std::chrono::steady_clock::now();
             const bool handled = rasterizer->OnWriteFault(addr, is_gpu_thread);

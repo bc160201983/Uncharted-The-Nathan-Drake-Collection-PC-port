@@ -334,6 +334,11 @@ private:
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
+    /// gow3 1 Nov 2026: with a sparse page table, binds (and clears) the pages of it holding the
+    /// entries of blocks [first_block, end_block) that have no memory yet.
+    void BindPageTablePages(u64 first_block, u64 end_block);
+    bool ZeroPageTableChunk(vk::DeviceMemory memory, u64 size);
+
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
     /// gow3: a CPU write fault next to, not on, GPU-written bytes: unprotects the page without
@@ -530,6 +535,16 @@ private:
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
+    /// gow3 1 Nov 2026 (2 GB cards): the page table as a sparse buffer (BindPageTablePages).
+    bool sparse_pagetable = false;
+    u64 pagetable_page_bits = 16;
+    u32 pagetable_memory_type = 0;
+    std::vector<bool> pagetable_bound;
+    std::vector<vk::DeviceMemory> pagetable_chunks;
+    u64 pagetable_chunk_used = 0;
+    bool pagetable_binds_pending = false;
+    u64 pagetable_chunk_capacity = 0;
+    static constexpr u64 PageTableFirstChunk = u64{16} << 20;
 
     std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
     u64 arena_page_bits{MAX_ARENA_PAGE_BITS};
@@ -753,6 +768,9 @@ private:
     /// waits for them instead of seeing unrelated old bytes.
     std::unordered_map<VAddr, std::pair<u64, std::chrono::steady_clock::time_point>> landed_pieces;
     u32 readback_polls = 0;
+    /// gow3 1 Nov 2026: CompleteReadbacks sets up read watches for readbacks whose submission
+    /// went out; it scans the queue again only when the tick moved or a readback was added.
+    u64 watch_scan_tick = ~0ULL;
 
     u32 arena_memory_type_index{};
     u32 block_size{};

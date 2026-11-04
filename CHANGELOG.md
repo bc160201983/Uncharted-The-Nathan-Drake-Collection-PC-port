@@ -4,6 +4,182 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 1 November 2026, night (0.8.1)
+
+- **Mouse in cover** (#250 #291 #275 #190 #158): the Uncharted 2 and 3 cover cameras take the mouse
+  directly (GOW3_MOUSE_LOOK_U2_COVER / _U3_COVER now on by default), the same angle per count as
+  the follow cameras (1000 counts = 63 degrees at sensitivity 1), both ways and up/down (pitch
+  +-65 degrees). As an emulated stick they turned 10-36 degrees for the same input. Uncharted 1's
+  cover camera (CameraControlCover 0xa4670) too, tried in game with a real mouse
+  (GOW3_MOUSE_LOOK_U1_COVER=0: the stick emulation).
+- **Uncharted 1 water** (#161 #306 #253 #331 #336, flat dark green, no reflections): the water's
+  reflection pass draws with a depth buffer (0x1164818000 at 1440p) whose memory a compute shader
+  uses as an RGBA8 image earlier in the frame; the game clears that depth only through its HTILE
+  (fill shader e8746089). The compute image freed the depth image and its HTILE record, so the fill
+  no longer counted as a clear and the depth image came back with the RGBA8 bytes: the depth test
+  failed on garbage and 98% of the reflection stayed black. Freed depth images now leave their HTILE
+  address behind; a fill there is a clear and the depth image that comes back starts cleared
+  (texture_cache.cpp, vk_rasterizer.cpp IsComputeMetaClear; GOW3_HTILE_KEEP_CLEARS, on for Drake's
+  Fortune). Reflection mean 0.0008 -> 0.027, depth NaN -> 0.95-1.0; water colour matches the PS4
+  shots; no FPS change (alternating runs within 4 FPS); U2/U3 unchanged.
+- **Mouse near walls**: the follow cameras decide "the player is steering" from the stick only, so a
+  mouse turn did not stop the wall push, the pull-in (|x| > 0.2), the wall timer (|x| >= 0.7), the
+  swing-back and scripted turns. Mouse turns now count as steering (GOW3_MOUSE_LOOK_STEER): Uncharted
+  1's stick step result (0xb0204) and its kept stick reads (0xb0219, 0xb08e5), Uncharted 2's and 3's
+  stored steering flag (0x430a96, 0x4ec5c3) and kept stick deflection. Uncharted 1 at a doorway
+  wall: a fast turn of 4131 counts 96 -> 260 degrees.
+- **Mouse during camera blends** (GOW3_MOUSE_LOOK_SHARE): while two or more cameras blend, each of
+  them gets the frame's turn (before, the first one used it up).
+- **Close shortcut**: holding L1 + R1 + Share + Options (pad buttons as SDL reads them) or
+  Ctrl + Shift + Q for 2 s closes the game through the window's own quit event, with a countdown
+  (setting close_shortcut, menu -> Controls; test knob GOW3_TEST_CLOSE_HOLD=<s>).
+- **#211 #285 GeForce GTX 10-series start crash**: VK_EXT_device_fault stays off on NVIDIA device
+  IDs below 0x1e00 (older than Turing); a GTX 1070 starts with it off. GOW3_DEVICE_FAULT=1 turns it
+  on anyway.
+- **#328 Intel**: compute pipelines require the device's subgroup size where the driver could pick
+  another one (Intel: 8 to 32 lanes), since the recompiler splits wave64 by that size
+  (GOW3_SUBGROUP_FIXED=0: the driver's choice). Untested on Intel hardware.
+- **#327**: Uncharted 3's HOLD Circle pictures (normal and pressed) get the Xbox button like the
+  other face buttons.
+- Gate against 0.8.0 (1080p, limit 120, the same saves, 60 s alternating; the bench now plays in its
+  own player folder): U2 114.0 -> 114.4 FPS (1% low 71.5 -> 68.6), 4 cores 83.5 -> 81.8 (31.9 ->
+  33.8); U1 at the cap, 4 cores 101.0 -> 99.5; U3 at the cap, 4 cores 119.1 -> 116.5 (1% low 55.3 ->
+  47.2; rechecks 0.8.1 115.1 / 118.5, 0.8.0 118.8 / 118.1; 0.8.1 with the mouse work off 116-117,
+  1% low 46-48: not the mouse code). 5-minute soaks of U2/U3/U1, U3 with DLSS/FSR 4/TAA, U2 from an
+  empty shader cache, the close shortcut: no problems. Clean-clone exe: U1 water clears kept,
+  steering patches in all three games, old-CPU emulation (trap mode), no problems.
+
+## 1 November 2026 (0.8.0)
+
+- **Frame pacing with VSync at the display's rate** (user report, Uncharted 1 at 75 FPS on 75 Hz,
+  both PCs): with the vblank following the display, the present slots caught up after a late flip
+  (next_flip = max(+T, now - T)); with FIFO each catch-up pair left one more frame queued for the
+  display, which never drained at one flip per refresh. Once full, the presenter's copy waited for
+  the swapchain image on the graphics queue, the game's next GPU work queued behind it and its
+  end-of-pipe interrupts arrived two at once: the game ran two frames back to back and skipped a
+  vblank (23 + 3 ms). Now: no catch-up while following the display (GOW3_DISPLAY_QUEUE), a full
+  queue skips one flip slot to drain it, and the present thread waits for the acquired image on
+  the CPU (acquire fence, GOW3_ACQUIRE_FENCE) so game GPU work never waits for the display. U1 at
+  the user's settings: 18 of 19 sessions smooth with the first part, 17 of 17 with the image wait,
+  against 4 of 17 before. Swapchain recreation also resets the frame index (it could index past
+  the semaphores when the image count shrank).
+- **#274**: UNCHARTED_JOB_SLEEP auto spins from 8 hardware threads in Uncharted 1; Uncharted 2
+  and 3 keep Sleep (no measured gain from Spin there).
+- **Options**: "No depth of field" for U2/U3 (#169, the debug menus' depth-of-field switches,
+  UNCHARTED_NO_DOF) and "Stretch movies to the screen" (#145, GOW3_MOVIE_STRETCH).
+- **Garbage T#/S# bindings** (seen before the NVIDIA ReadInvalid losses #316 #314 #277 #76 #224
+  #249, not shown to cause them): a null descriptor now has the binding's own type and count,
+  and a sampler's maxLod is never below its minLod (GOW3_TSHARP_GUARD=0: as before).
+- **Heavy scenes** (GPU command thread): SubmitGfx keeps its order under its own lock and holds
+  the queue lock only for the push (GOW3_SUBMIT_ORDER_LOCK); a scanned buffer wakes one
+  draw-preparation worker instead of all of them (GOW3_PREP_WAKE_ONE); readback watch scans only
+  when the tick moved. Gate against 0.7.2 (1080p, limit 120, the same saves,
+  60 s alternating): U2 112.2 -> 117.1 FPS (1% low 81.0 -> 89.5); U3 4 cores 1% low 56.3 -> 59.9
+  (frames over 2x the median 117 -> 76 a minute); U1 unchanged at the cap; U2 4 cores 79.5 -> 77.6
+  (within the run-to-run spread). Uncapped A/B at the U2 spot: about 121 -> 132 FPS. 5-minute soaks
+  of U1/U2/U3 and U3 with DLSS, FSR 4 and TAA: no problems.
+- **Older CPUs** (#154, #299): MOVBE, ANDN, BEXTR, BLSI/BLSMSK/BLSR, LZCNT/TZCNT and F16C are
+  rewritten at load time into native sequences or small stubs (runtime_isa.c, GOW3_ISA_COMPAT);
+  any CPU with AVX runs the games. Unit test: 42 forms against the CPU.
+- **Experimental, off by default: low video memory mode** (launcher "Save video memory",
+  GOW3_LOW_VRAM=1|auto): 64 MiB VMA blocks, a smaller residency pool, no spare image block, idle
+  staging freed, and the 128 MiB BDA page table as a sparse buffer (16 MiB cleared up front).
+  Uncharted 2 at 720p 2083 -> 1499 MiB, U1 1802 -> 1284, U3 1813 -> 1215; same frame rate and
+  picture. Not yet tried on a real 2 GB card.
+- **AMD menu flicker at 1080p/1440p** (#236, #278, #325): the presenter transitioned the display
+  image for fragment shaders only, but RCAS (fsr_pass, which runs when the picture is the
+  window's size) reads it in a compute shader; the barrier now covers compute too. RCAS loads are
+  clamped to the picture (#297: a bright line at the right/bottom edges).
+- **Crashes**: game jobs run without parameters ("read at 0x20", #205 #304 #326; job params
+  guard); Uncharted 3 chapter 2 effect shaders 8f067540/7d7e7206 looping on garbage counts (#328);
+  start-up stack overflow with a nearly full video memory (thread stack bounds); invalid graphics
+  commands for empty textures; Uncharted 3 movies at double speed with a 60 Hz vblank and a limit
+  above 60.
+- **#293**: the player's move-action pool in Uncharted 1 and 2 has 256 slots instead of 64
+  (UNCHARTED_MOVE_POOL=0: off).
+- **Saves** (#311): a save the game could write is flushed to disk at unmount and copied to
+  <title>/.backup/<dir>/; a mount puts back files that are empty or all zeros from that copy
+  (GOW3_SAVE_BACKUP=0: off). Unit test tests/test_savedata.c.
+
+## 29 October 2026 (0.7.2)
+
+- **Performance**: the GPU command thread waited on Windows and on its own memory housekeeping.
+  1 ms timer resolution and the process's power-throttling opt-out (GOW3_TIMER_RES,
+  GOW3_POWER_THROTTLE), guest condition variables on WaitOnAddress (GOW3_FUTEX_COND), pooled
+  draw-preparation submissions and CPU trims (GOW3_PREP_POOL, GOW3_CPU_TRIMS) are now on by
+  default; each `=0` turns it off. Measured against 0.7.1 at the same spots (user's saves, 60 s,
+  alternating): U2 93.3 -> 116.4 FPS (1% low 67 -> 84), U2 4 cores 67.4 -> 83.5, U1 94.0 -> 119.9
+  (cap, 1% low 56 -> 104), U3 115.7 -> 120.0 (cap); 15-minute soaks clean (U2 MT on/off, U3 MT on).
+- **Aim blur with multithreaded rendering** (#276): above 1080p the aim-focus box constants of ps
+  9f801363 reached the GPU through the constant ring, which FixAimFocusCentre never saw; the ring
+  copy is now corrected too (vk_rasterizer.cpp FixAimFocusCentreRing). U2 and U3 focus distance
+  verified with MT on and off, DLAA and DLSS Quality.
+- **Uncharted 3 "Stay in the Light" assert** (#284): a degenerate light direction made the light
+  ortho camera NaN (CreateOrthographicProjection assert); the call at image 0xf3cad8 now skips that
+  light's update for the frame when its matrices or far value are NaN/inf
+  (UNCHARTED_LIGHT_ORTHO_GUARD=0: off).
+- Gamepad after a focus loss / in exclusive fullscreen (#281 by vladector); Windows' cursor in the
+  in-game menu (#300); texture filtering override (GOW3_ANISOTROPY / launcher), the engines'
+  hi-res local shadow buffer and full-resolution textures switches for U2/U3 (launcher, off by
+  default); launcher menu shortcut choice and Check game files (tools/check_game_files.py, a list
+  of the base game's files and sizes, no game data).
+
+## 28 October 2026 (0.7.1)
+
+- **AMD Radeon: crash with upscaling or TAA** (#273, #272): the character motion-vector vertex
+  shader built its buffer addresses as 64-bit sums (constant base + index * stride); AMD's shader
+  compiler kept only the low 32 bits, so the parameter buffer at 0x3'3ec00000 was read at
+  0x3ec00000 and the device was lost on the first upscaled frame. The sums are now done in 32-bit
+  halves with a carry (emit_spirv_special.cpp). Verified on an AMD RDNA2 iGPU and an RTX 5080
+  (Uncharted 1, FSR 3, 220 s each, every stored motion draw matched).
+- **Treasures with upscaling** (#260, #225, #209, #136): the treasure model (pickup popup and the
+  Treasures screen) is drawn with a depth buffer of its own at the render size; the upscaler sent
+  its colour to the output-size picture but not that depth buffer, so the pass fell back to the
+  game's own buffer, which is never shown. Such a depth buffer now gets an output-size copy too
+  (vk_temporal_upscaler.cpp; GOW3_UI_DEPTH_ADOPT=0 turns it off).
+- **Save mounts**: the mount table holds 32 entries (was 16, with 5 fixed), and a save mount now
+  fails when its guest path can't be mapped instead of reporting success.
+- Launcher: Steam play time for the per-game entries (the starter waits for the launcher, #267);
+  dark title bar (#215); PlayStation touchpad on the Controls page (#214); control labels (#256).
+
+## 26 October 2026 (0.7.0)
+
+- **Uncharted 3 washed out / too bright on GeForce RTX 30 and 40 cards** (#199, #195, #204, #212):
+  the game's automatic exposure adds up each row's brightness in a compute shader whose last six
+  steps have no barriers: they rely on the PS4 GPU running 64 threads in lockstep. These cards run
+  32 at a time, so the sums came out too small (1056 instead of 2616 on the title screen) and the
+  exposure about 2.2 times too high. The shader (aec539f0) now gets the barriers on every GPU,
+  like Uncharted 3's cloth shaders; only that shader is compiled again. The title
+  screen's mean brightness on an affected laptop went from 205 to 166, the same as on other cards.
+- **Uncharted 3: no subtitles over movies with upscaling** (#237, #243, #222): every movie frame is
+  one compute pass that writes the screen from the decoded picture and the subtitle layer. With no
+  normal frame in between, the upscaler's interface phase of the last game or menu frame stayed on
+  during the whole movie, so the subtitles went to an image the movie never read. A compute pass
+  that writes the screen now ends that phase, and the movie is shown as the game drew it.
+- **AMD: crash at start in the shader warm-up** (#230, #201, #206, #185; the driver crashed at the
+  same place for everyone): a saved pipeline named its shaders by program and variant number, and
+  the motion-vector variants could be paired with a different shader on the next start. Saved
+  pipelines now record exactly which shaders they were built from and are skipped when those don't
+  match. A crash while the saved shaders load is also noted, and the next start clears and rebuilds
+  the cache by itself.
+- **Chapter 8 crash on game version 1.00** (`m_lookAt.X() == m_lookAt.X()`, #148, likely #210): the
+  camera focus fix made for 1.02 in 0.2 now has 1.00 variants for Uncharted 2 and 3.
+  UNCHARTED_FOCUS_RESET=0 turns it off.
+- **1.00 executables with a 1.02 version file** (#148, #176): some copies have update 1.02's
+  param.sfo but the 1.00 game executables, so the launcher said 1.02 and the 1.02 fixes were
+  skipped. Such a copy is now reported as 1.00, and the "install update 1.02" warning shows.
+- **Launcher: Advanced -> Uncharted 3 exposure**: an optional, lower exposure for Uncharted 3
+  (-0.3, -0.6 or -1.0 EV; "Game's" = unchanged), based on pavlikdcx's patch in #199.
+- **Launcher: IGPU preset** for Intel and AMD integrated graphics (540-720p, FSR 1 to 1080p),
+  chosen as the recommended preset when the game ran on integrated graphics; adapted from PR #223
+  by memeguyoffical.
+- **Launcher: Add to Steam** (Advanced -> STEAM): adds the port (or each game) to Steam's library
+  as a non-Steam game, with library pictures from the player's own game files. Steam's
+  shortcuts.vdf is read and written losslessly, with a backup; Steam must be closed.
+- **Merged pull requests:** #240 (Windows test builds and test expectations) and #227 (the package
+  zip is written with Python's zipfile, forward-slash paths) by moistman7; #231 by Sparks and #244
+  by fidalgojoao (research and code that is off in this release).
+
 ## 25 October 2026 (0.6.2)
 
 - **The launcher did not open after updating to 0.6.1** (#208): the launcher's new network search

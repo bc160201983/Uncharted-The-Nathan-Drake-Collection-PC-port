@@ -76,11 +76,14 @@
 #define NET_KIND_TIME    3
 #define NET_KIND_ROSTER  4
 #define NET_KIND_WELCOME 5
+#define NET_KIND_START   6           /* host -> joiners: the lobby's Start Game (runtime_coop_menu.c) */
 #define NET_CLOCK        0x113a040   /* -> the net clock struct, +0xc = ticks (1/300 s) */
 #define NET_GAME_INDEX   (0x113b760 + 0x1ca0)  /* the net game manager's net game (int16) */
 #define NET_GAME_END     (0x113b760 + 0x1e84)  /* its end state (SetGameEnd 0x64a7c0): 0 while playing */
 #define NET_HEAP_SLOT    (0x11c6630 + 0x14 * 8) /* allocator of memory context 0x14 (Network) */
-#define NET_VERSION      4           /* 4 (25 Oct): the skin in the hello and the player list */
+#define NET_VERSION      6           /* 4 (25 Oct): the skin in the hello and the player list;
+                                        5: snapshot anim leaves carry a phase (runtime_coop_mp.c);
+                                        6 (np- agent): NPC events NpcSpawn/NpcDespawn/0x2c carry data */
 #define NET_MAX_BYTES    (64 << 10)
 #define NET_MAX_PEERS    9           /* 10 player slots: the host and 9 joiners */
 #define NET_MAX_PLAYERS  10
@@ -129,6 +132,7 @@ static int roster_count;
 static uint32_t host_ticks;                    /* joiner: the host's last net time */
 static ULONGLONG host_ticks_at;                /* and when it arrived (GetTickCount64), 0: none */
 static int welcomed;                           /* joiner: the host's welcome arrived */
+static int start_got;                          /* joiner: the host's Start Game arrived (lobby) */
 static int net_game = -1;                      /* the net game: host's own, or from the welcome */
 static char title[48];                         /* the game's title (GOW3_NET_TITLE / the welcome) */
 static volatile LONG public_players = 1;       /* for the LAN search: us + joiners with a hello */
@@ -401,6 +405,26 @@ static void start(void) {
         const char *game = getenv("GOW3_NET_GAME"), *text = getenv("GOW3_NET_TITLE");
         if (game && *game) net_game = atoi(game);
         snprintf(title, sizeof(title), "%s", text ? text : "");
+        /* The lobby's restart into the match (runtime_coop_menu.c) leaves the net game picked in
+         * the lobby next to the launcher's handoff file: it wins over GOW3_NET_GAME, once. */
+        const char *handoff = getenv("GOW3_LOADEXEC_FILE");
+        if (handoff && *handoff) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s", handoff);
+            char *slash = strrchr(path, '\\'), *slash2 = strrchr(path, '/');
+            if (slash2 > slash) slash = slash2;
+            if (slash && (size_t)(slash + 1 - path) + 20 < sizeof(path)) {
+                strcpy(slash + 1, "net-game-next.txt");
+                FILE *f = fopen(path, "r");
+                int next = -1;
+                if (f) { if (fscanf(f, "%d", &next) != 1) next = -1; fclose(f); remove(path); }
+                if (next >= 0) {
+                    printf("Net: the lobby picked net game %d (was %d)\n", next, net_game);
+                    if (next != net_game) snprintf(title, sizeof(title), "Net game %d", next);
+                    net_game = next;
+                }
+            }
+        }
     }
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa)) { puts("Net: WSAStartup failed"); return; }
@@ -595,6 +619,10 @@ void runtime_net_frame(unsigned char *base) {
                     printf("Net: player list from the host: %u players\n", n);
                     fflush(stdout);
                 }
+            } else if (f->kind == NET_KIND_START && !hosting) {
+                start_got = 1;
+                printf("Net: the host started the game (net game %d)\n", f->bits >= 32 ? (int)f->words[0] : -1);
+                fflush(stdout);
             } else if (f->kind == NET_KIND_PACKET && p->bound && !ready) {
                 /* this frame and the ones after it back to the front of the inbox, in order */
                 NetFrame *last = f;
@@ -734,6 +762,22 @@ int runtime_net_skin(int id, char *out, size_t size) {
 /* 1 once our player id and the net game are known: at once on the host, after the host's welcome
  * on a joiner (the session side waits for it before it fills our slot or picks the net game). */
 int runtime_net_ready(void) { return started && (hosting || welcomed); }
+/* The lobby (runtime_coop_menu.c, 25 Oct 2026): the host's Start Game goes to every joiner
+ * (game thread); a joiner takes the start once. */
+int runtime_net_send_start(void) {
+    if (!started || !hosting) return 0;
+    const uint32_t game = (uint32_t)net_game;
+    int sent = 0;
+    for (int i = 0; i < NET_MAX_PEERS; ++i)
+        if (peers[i].used && peers[i].up && peers[i].id) { queue_frame(&peers[i], NET_KIND_START, 32, &game); ++sent; }
+    return sent;
+}
+int runtime_net_take_start(void) {
+    if (!start_got) return 0;
+    start_got = 0;
+    return 1;
+}
+int runtime_net_hosting(void) { return started && hosting; }
 /* The net game (*net-games* index): the host's own (GOW3_NET_GAME, else the net game manager's),
  * or the one in the host's welcome; -1 when not known yet. */
 int runtime_net_game(void) { return started ? net_game : -1; }
@@ -752,6 +796,9 @@ int runtime_net_local_id(void) { return 0; }
 const char *runtime_net_local_name(void) { return NULL; }
 int runtime_net_skin(int id, char *out, size_t size) { (void)id; (void)out; (void)size; return 0; }
 int runtime_net_ready(void) { return 0; }
+int runtime_net_send_start(void) { return 0; }
+int runtime_net_take_start(void) { return 0; }
+int runtime_net_hosting(void) { return 0; }
 int runtime_net_game(void) { return -1; }
 int runtime_net_host_clock(uint32_t *ticks) { (void)ticks; return 0; }
 #endif

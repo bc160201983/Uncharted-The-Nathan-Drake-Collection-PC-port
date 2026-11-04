@@ -7,7 +7,23 @@
 /analysis/*
 !/analysis/STATUS.md
 !/analysis/PLAN.md
+!/analysis/MULTIPLAYER-NOTES.md
+!/analysis/MULTIPLAYER-PS3-ENTRY.md
+!/analysis/MULTIPLAYER-LOCAL-SESSION.md
+!/analysis/MULTIPLAYER-LOCAL-BACKEND.md
+!/analysis/MULTIPLAYER-PLAYER-LIFECYCLE.md
+!/analysis/MULTIPLAYER-PC-BRIDGE.md
+!/analysis/MULTIPLAYER-MAP-LOADING.md
+!/analysis/MULTIPLAYER-FRONTEND-TRANSITION.md
+!/analysis/MULTIPLAYER-HERO-DEPENDENCIES.md
+!/analysis/MULTIPLAYER-REMOTE-AVATAR.md
+# Multiplayer mod output built from the game's files (tools/uc2mp_menu.py) and test copies.
+/work/
 /gow3_pc/out/
 /Uncharted.lnk
 __pycache__/
 *.pyc
+# Personal test launchers (multiplayer lobby and map tests) kept next to the port.
+/Lancer-UC2-*.cmd
+/Salon-UC2-*.cmd
+/Tester-Carte-UC2.cmd

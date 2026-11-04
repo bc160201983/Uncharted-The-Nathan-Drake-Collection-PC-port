@@ -10,6 +10,10 @@
 #include "video_core/host_shaders/camera_motion_comp.h"
 #include <vk_mem_alloc.h>
 
+// Match the renderer's Vulkan-Hpp dispatcher layout before enabling test assertions.
+#undef NDEBUG
+#include <cassert>
+
 int main() {
     Vulkan::Instance instance(0, false);
     static vk::detail::DynamicLoader loader;

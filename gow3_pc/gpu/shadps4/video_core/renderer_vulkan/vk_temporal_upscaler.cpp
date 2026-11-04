@@ -394,6 +394,7 @@ bool TemporalUpscaler::OnFrameStart() {
     tone_shadow.drawn = scene_shadow.drawn = false;
     hdr_output = false;
     composite_done = false;
+    ui_display_depth = false;
     tonemap_pending = false;
     ui_phase = false;
     ui_read_barrier = false;
@@ -2615,8 +2616,47 @@ bool TemporalUpscaler::OnComposite(u64 ps_hash, VideoCore::ImageId color) {
     return true;
 }
 
-bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target) {
-    if (!ui_phase || depth != ui_depth) {
+bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target,
+                                     bool color_redirected) {
+    // gow3 28 Oct 2026 (#260 #225 #209): the treasure model (pickup popup, Treasures screen)
+    // is drawn into the display buffer with a render-size depth target of its own. The color
+    // went to the output-size host display, the depth did not, so the pass fell back to the
+    // guest display buffer, which is not shown: the model was invisible with upscaling. Such a
+    // depth target now gets the output-size UI depth too, filled from it (clear + blit) at its
+    // first use in a frame. GOW3_UI_DEPTH_ADOPT=0: off.
+    static const bool adopt_on = [] {
+        const char* env = std::getenv("GOW3_UI_DEPTH_ADOPT");
+        return !(env && env[0] == '0');
+    }();
+    // In the UI phase a new depth target is adopted; after the composite (the HUD of the frame
+    // just shown, ui_phase off) the first depth target of the frame is filled again.
+    const bool adopt = ui_phase ? depth != ui_depth : (depth != ui_depth || !ui_display_depth);
+    if (adopt_on && color_redirected && depth && (ui_phase || display_redirect) && ui_image &&
+        ui_width && adopt) {
+        const auto& image = texture_cache.GetImage(depth);
+        const bool depth_format = image.info.pixel_format == vk::Format::eD32SfloatS8Uint ||
+                                  image.info.pixel_format == vk::Format::eD32Sfloat ||
+                                  image.info.pixel_format == vk::Format::eD16Unorm;
+        if (depth_format && image.info.resources.levels == 1 &&
+            image.info.size.width <= ui_width && image.info.size.height <= ui_height &&
+            image.info.size.width * 2 >= render_width && image.info.size.height * 2 >= render_height) {
+            static u32 logged = 0;
+            if (logged < 4) {
+                ++logged;
+                std::printf("Upscaler: UI depth %#llx %ux%u follows the output size (%ux%u)\n",
+                            (unsigned long long)image.info.guest_address, image.info.size.width,
+                            image.info.size.height, ui_width, ui_height);
+            }
+            EnsureUiResources(ui_width, ui_height, ui_format, image.info.pixel_format);
+            PrepareUiDepth(depth);
+            ui_depth = depth;
+            if (!ui_phase) {
+                ui_display_depth = true;
+            }
+        }
+    }
+    if (!(ui_phase || (ui_display_depth && display_redirect && color_redirected)) ||
+        depth != ui_depth) {
         return false;
     }
     target = {*ui_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height, true};
@@ -2653,6 +2693,39 @@ bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
                : Mirror(vk::Image(ui_image), ui_views, info.format, info.mapping);
     layout = vk::ImageLayout::eGeneral;
     return true;
+}
+
+void TemporalUpscaler::OnDisplayStorageWrite(VAddr address) {
+    // Uncharted 3's movies (#237, #243, #222): every movie frame is one dispatch writing the
+    // display buffer (the decoded picture plus the subtitle layer, a render-size RGBA8 target the
+    // game draws the subtitles into). There is no composite pass, so the rasterizer never started
+    // a new upscaler frame: the UI phase of the last upscaled frame (menu or gameplay) stayed on
+    // for the whole movie. The subtitle draws into that target (the menu frame's ui_color) went to
+    // the output-size ui_image, and the movie shader read ui_image in its place: no subtitles
+    // over movies whenever the game drew below the output size (DLSS / FSR / TAA upscaling).
+    if (!composite_frames) {
+        return;
+    }
+    if (ui_phase || composite_done || display_redirect) {
+        static int reported = 0;
+        if (reported < 3) {
+            ++reported;
+            std::printf("Upscaler: display %#llx written by a compute shader (movie): shown as "
+                        "drawn, its UI layer stays in guest memory\n",
+                        static_cast<unsigned long long>(address));
+            std::fflush(stdout);
+        }
+    }
+    ui_phase = false;
+    composite_done = false;
+    display_redirect = false;
+    tonemap_pending = false;
+    ui_read_barrier = false;
+    ldr_target = {};
+    std::scoped_lock lock{display_mutex};
+    if (const auto it = displays.find(address); it != displays.end()) {
+        it->second.valid = false; // the presenter shows the guest buffer
+    }
 }
 
 bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {

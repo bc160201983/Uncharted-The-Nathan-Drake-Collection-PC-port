@@ -75,6 +75,7 @@ public:
     /// draw's render state (Rasterizer::BeginRendering).
     [[nodiscard]] u64 RedirectState() const noexcept {
         return u64(ui_phase) | u64(display_redirect) << 1 | u64(done_this_frame) << 2 |
+               u64(ui_display_depth) << 3 |
                u64(ui_color.index) << 8 | u64(ui_depth.index) << 36;
     }
 
@@ -148,7 +149,7 @@ public:
     [[nodiscard]] vk::ImageView ToneShadowView() const noexcept {
         return *tone_shadow.view;
     }
-    bool RedirectDepth(VideoCore::ImageId depth, Target& target);
+    bool RedirectDepth(VideoCore::ImageId depth, Target& target, bool color_redirected = false);
     /// A sampled image replaced by the upscaled frame (the display pass).
     bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& info,
                          vk::ImageView& view, vk::ImageLayout& layout);
@@ -173,6 +174,11 @@ public:
     /// draws after it go there at the output resolution. True: skip the guest's draw, and the
     /// next frame starts here (the rasterizer calls OnFrameStart).
     bool OnComposite(u64 ps_hash, VideoCore::ImageId color);
+    /// gow3 26 Oct 2026 (#237/#243/#222): a compute shader writes the display buffer at
+    /// `address` (Uncharted 3's movie player: cs 3e242626 puts the movie frame and the subtitle
+    /// layer together straight into it). Such a frame has no composite pass: it is shown from the
+    /// guest buffer, and the UI phase of the last upscaled frame ends here.
+    void OnDisplayStorageWrite(VAddr address);
     [[nodiscard]] bool CompositeFrames() const noexcept {
         return composite_frames;
     }
@@ -271,6 +277,7 @@ private:
     VideoCore::ImageId ui_color{}, ui_depth{};
     bool ui_phase = false;         ///< from the upscale to the next display pass
     bool display_redirect = false; ///< the display pass of an upscaled frame
+    bool ui_display_depth = false; ///< ui_depth refilled for draws after the composite
     bool ui_read_barrier = false;
     VideoCore::UniqueImage ui_image;
     VideoCore::UniqueImage ui_depth_image;

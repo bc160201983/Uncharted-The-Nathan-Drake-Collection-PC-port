@@ -5,7 +5,7 @@
  * apply_button_map; the launcher's Controls tab writes them):
  *   WASD left stick, mouse (or the arrow keys) right stick, right mouse L2 (aim), left mouse
  *   R2 (fire), Space Cross (jump), Left Ctrl Circle (cover, roll), F Square (melee),
- *   R Triangle (reload, pick up), Q / mouse X1 L1, E / mouse X2 R1, Left Shift L3,
+ *   R Triangle (interact, pick up), Q / mouse X1 L1 (grenade), E / mouse X2 R1 (reload), Left Shift L3,
  *   V / middle mouse R3, Escape or Enter Options, Tab left touchpad, Backspace right touchpad,
  *   1 2 3 4 d-pad left right up down, mouse wheel d-pad right (up) and left (down).
  * GOW3_KEYBOARD=0 turns the keyboard off. The controls (maps, mouse on, its sensitivity and
@@ -130,8 +130,30 @@ static int pad_index(void) {
     return index;
 }
 /* Opens the first gamepad SDL knows about (or the GOW3_PAD_INDEX-th); called under lock. */
+/* gow3 1 Nov 2026 (GitHub #309: the Treasure Vault lever in Uncharted 1 asks to mash Triangle,
+ * and fast DualSense taps did nothing; a keyboard key, held longer, worked): the pad is sampled
+ * when the game reads it, so a press and release between two reads was never seen. Every button
+ * that went down since the last read now counts as pressed in that read (SDL event watch on the
+ * window thread; read and cleared in sample_host). GOW3_PAD_LATCH=0: off. */
+static unsigned long long pad_taps; /* bit = SDL_GamepadButton, set on BUTTON_DOWN */
+static bool SDLCALL pad_tap_watch(void *userdata, SDL_Event *event) {
+    (void)userdata;
+    if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN && event->gbutton.button<64 &&
+        (!gamepad || event->gbutton.which==SDL_GetGamepadID(gamepad)))
+        __atomic_or_fetch(&pad_taps,1ull<<event->gbutton.button,__ATOMIC_RELAXED);
+    return true;
+}
+static int pad_latch_enabled(void) {
+    static int value=-1;
+    if (value<0) { const char *e=getenv("GOW3_PAD_LATCH"); value=!(e && e[0]=='0'); }
+    return value;
+}
+
 static SDL_Gamepad *current_gamepad(void) {
-    if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+    if (!sdl_ready) {
+        sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+        if (sdl_ready>0 && pad_latch_enabled()) SDL_AddEventWatch(pad_tap_watch,NULL);
+    }
     if (sdl_ready<0) return NULL;
     if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
     if (!gamepad) {
@@ -503,6 +525,8 @@ static int mouse_look_debug(void) {
     return debug;
 }
 int runtime_pad_aim_held(void) { return __atomic_load_n(&pad_aim_held,__ATOMIC_RELAXED); }
+/* gow3 1 Nov 2026: GOW3_MOUSE_TRACE pad lines (runtime_mouselook.c). */
+void runtime_mouselook_trace_pad(int direct,float stick_x,float stick_y);
 static int sample_mouse(PadData *d) {
     if (!mouse_enabled()) return 0;
     /* 20 Oct 2026: the aim sensitivity while aiming, the up/down speed and the left/right invert
@@ -558,16 +582,17 @@ static int sample_mouse(PadData *d) {
             debug_last=now; reads=direct_reads=0;
         }
     }
-    if (direct) { vx=vy=0; return used; }
+    if (direct) { runtime_mouselook_trace_pad(1,0.0f,0.0f); vx=vy=0; return used; }
     /* The games turn at about (deflection past a ~0.15 dead zone)^1.5 of their full speed. The
      * deflection is the inverse of that, so the turn follows the mouse's speed evenly (the linear
      * mapping before turned slow movements too little and fast ones too much). */
     float sx=vx*sensitivity*0.08f*invert_x, sy=vy*sensitivity*0.08f*invert*(vertical>0.0f ? vertical : 1.0f);
     const float magnitude=sqrtf(sx*sx+sy*sy);
-    if (magnitude<0.002f) return used;
+    if (magnitude<0.002f) { runtime_mouselook_trace_pad(0,0.0f,0.0f); return used; }
     const float shaped=powf(magnitude>1.0f ? 1.0f : magnitude,2.0f/3.0f);
     const float out=0.15f+0.85f*shaped>1.0f ? 1.0f : 0.15f+0.85f*shaped;
     sx*=out/magnitude; sy*=out/magnitude;
+    runtime_mouselook_trace_pad(0,sx,sy);
     d->right_x=(uint8_t)(sx<-1.0f ? 0 : sx>1.0f ? 255 : (int)(128.0f+sx*127.0f));
     d->right_y=(uint8_t)(sy<-1.0f ? 0 : sy>1.0f ? 255 : (int)(128.0f+sy*127.0f));
     return used;
@@ -586,9 +611,16 @@ static void sample_host(PadData *d) {
     runtime_gamesettings_tick();
     publish_pad_prompts(g);
     int keyboard_used=0, gamepad_used=0;
-    if (g) {
-        for (size_t i=0;i<pad_map.count;++i)
-            if (SDL_GetGamepadButton(g,(SDL_GamepadButton)pad_map.entries[i].source)) d->buttons|=pad_map.entries[i].ps;
+    /* SDL delivers gamepad events in the background too (window.cpp): the game takes them
+     * only while its window is in front, or always with its own controller (GOW3_PAD_INDEX,
+     * local co-op: two windows, one controller each). */
+    const unsigned long long taps=__atomic_exchange_n(&pad_taps,0ull,__ATOMIC_RELAXED);
+    if (g && (pad_index() || gow3gpu_window_foreground())) {
+        for (size_t i=0;i<pad_map.count;++i) {
+            const int source=pad_map.entries[i].source;
+            if (SDL_GetGamepadButton(g,(SDL_GamepadButton)source) ||
+                (source>=0 && source<64 && (taps>>source & 1ull))) d->buttons|=pad_map.entries[i].ps;
+        }
         const uint32_t mapped=d->buttons;
         d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
         d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));

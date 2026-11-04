@@ -7,6 +7,9 @@
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 typedef struct { int type; } GuestAttr;
 typedef struct { pthread_mutex_t native; } GuestMutex;
 static size_t created, locks, unlocks;
@@ -60,6 +63,7 @@ static ABI int32_t mutex_init(GuestMutex **out, GuestAttr **attr, const char *na
     if (e) { free(mutex); return orbis_error(e); }
     *out = mutex; ++created; return 0;
 }
+
 static pthread_mutex_t static_init = PTHREAD_MUTEX_INITIALIZER;
 /* Statically initialized handles (0/1) are created once, even under contention. */
 static int32_t ensure_mutex(GuestMutex **mutex) {
@@ -124,13 +128,70 @@ static ABI int32_t mutex_timedlock(GuestMutex **mutex, uint32_t usec) {
 }
 /* Condition variables: opaque handles over host pthread_cond (CLOCK_REALTIME,
  * like FreeBSD's default), sharing the host mutex behind GuestMutex. */
-typedef struct { pthread_cond_t native; } GuestCond;
+/* gow3 28 Oct 2026 (threads work, analysis/optimization-1028/THREADS.md): a signal or broadcast
+ * that finds no waiter is remembered, and the next wait on that variable returns at once (a
+ * spurious wakeup, which every POSIX caller must tolerate). The engine's job workers look for
+ * work without the job manager's mutex, then lock it and wait up to 10 ms: a job submitted
+ * between the two was broadcast to nobody and sat until the timeout (on 4 cores the window is
+ * wide: workers are preempted there). GOW3_COND_PENDING_WAKE=1 turns it on (DEFAULT OFF: no gain
+ * measured on U2 4 cores, 28 Oct). */
+typedef struct { pthread_cond_t native; volatile long waiters, pending; volatile int seq; } GuestCond;
 static size_t conds, waits, wakeups;
+static int pending_wake_enabled(void) {
+    static int value = -1;
+    if (value < 0) { const char *e = getenv("GOW3_COND_PENDING_WAKE"); value = e && e[0] == '1'; }
+    return value;
+}
+/* gow3 29 Oct 2026 diagnostics (GOW3_COND_STATS=1): guest condition variables every 5 s - waits,
+ * timed waits that timed out, signals/broadcasts, broadcasts that found waiters and the waiters
+ * they woke (thundering herds). */
+static int cond_stats_enabled(void) {
+    static int value = -1;
+    if (value < 0) { const char *e = getenv("GOW3_COND_STATS"); value = e && e[0] == '1'; }
+    return value;
+}
+static int cond_tracking(void) { return pending_wake_enabled() || cond_stats_enabled(); }
+static volatile long long cs_waits, cs_timeouts, cs_signals, cs_broadcasts, cs_herds, cs_woken, cs_window;
+static void cond_stats_tick(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    long long now = (long long)t.tv_sec * 1000000000LL + t.tv_nsec, start = cs_window;
+    if (!start) { __atomic_compare_exchange_n(&cs_window, &start, now, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return; }
+    if (now - start < 5000000000LL) return;
+    if (!__atomic_compare_exchange_n(&cs_window, &start, now, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return;
+    printf("Guest condvars (5 s): %lld waits (%lld timed out), %lld signals, %lld broadcasts "
+           "(%lld found waiters, %lld waiters woken)\n",
+           __atomic_exchange_n(&cs_waits, 0, __ATOMIC_SEQ_CST), __atomic_exchange_n(&cs_timeouts, 0, __ATOMIC_SEQ_CST),
+           __atomic_exchange_n(&cs_signals, 0, __ATOMIC_SEQ_CST), __atomic_exchange_n(&cs_broadcasts, 0, __ATOMIC_SEQ_CST),
+           __atomic_exchange_n(&cs_herds, 0, __ATOMIC_SEQ_CST), __atomic_exchange_n(&cs_woken, 0, __ATOMIC_SEQ_CST));
+}
+/* Before a wait: 1 = a wake arrived while nobody waited, return without waiting. */
+static int cond_take_pending(GuestCond *c) {
+    if (!cond_tracking()) return 0;
+    if (cond_stats_enabled()) __atomic_add_fetch(&cs_waits, 1, __ATOMIC_RELAXED);
+    if (pending_wake_enabled() && __atomic_load_n(&c->pending, __ATOMIC_ACQUIRE) &&
+        __atomic_exchange_n(&c->pending, 0, __ATOMIC_ACQ_REL)) return 1;
+    __atomic_add_fetch(&c->waiters, 1, __ATOMIC_SEQ_CST);
+    return 0;
+}
+static void cond_waited(GuestCond *c) {
+    if (cond_tracking()) __atomic_sub_fetch(&c->waiters, 1, __ATOMIC_SEQ_CST);
+}
+static void cond_note_wake(GuestCond *c, int broadcast) {
+    if (!cond_tracking()) return;
+    long n = __atomic_load_n(&c->waiters, __ATOMIC_SEQ_CST);
+    if (cond_stats_enabled()) {
+        __atomic_add_fetch(broadcast ? &cs_broadcasts : &cs_signals, 1, __ATOMIC_RELAXED);
+        if (broadcast && n) { __atomic_add_fetch(&cs_herds, 1, __ATOMIC_RELAXED); __atomic_add_fetch(&cs_woken, n, __ATOMIC_RELAXED); }
+        cond_stats_tick();
+    }
+    if (pending_wake_enabled() && !n) __atomic_store_n(&c->pending, 1, __ATOMIC_RELEASE);
+}
 static ABI int32_t cond_init(GuestCond **out, void **attr, const char *name) {
     (void)attr; (void)name;
     if (!out) return orbis_error(EINVAL);
     GuestCond *c = malloc(sizeof(*c));
     if (!c) return orbis_error(ENOMEM);
+    c->waiters = c->pending = 0; c->seq = 0;
     int e = pthread_cond_init(&c->native, NULL);
     if (e) { free(c); return orbis_error(e); }
     *out = c; ++conds; return 0;
@@ -155,19 +216,72 @@ static ABI int32_t cond_destroy(GuestCond **cond) {
     if (!e) { free(*cond); *cond = NULL; }
     return orbis_error(e);
 }
+
+/* gow3 29 Oct 2026 (threads work): GOW3_FUTEX_COND (default on, =0 off) - guest condition
+ * variables as a sequence word waited on with WaitOnAddress (wake = increment + WakeByAddress),
+ * DEFAULT ON since 29 Oct (A/B 3 games x 3 CPU configs: 1% low up to +31%; soaks clean;
+ * GOW3_FUTEX_COND=0 = winpthreads),
+ * instead of winpthreads' semaphore-based pthread_cond. Uncharted 2 broadcasts ~65,000 times a
+ * second on 4 cores (each job submission), ~22,000 of them to waiters (GOW3_COND_STATS). */
+#ifdef _WIN32
+static int futex_cond_enabled(void) {
+    static int value = -1;
+    if (value < 0) { const char *e = getenv("GOW3_FUTEX_COND"); value = !(e && e[0] == '0'); }
+    return value;
+}
+/* 0 or ETIMEDOUT; the mutex is held again on return. end = CLOCK_REALTIME deadline or NULL. */
+static int futex_cond_wait(GuestCond *c, GuestMutex *m, const struct timespec *end) {
+    int seen = __atomic_load_n(&c->seq, __ATOMIC_ACQUIRE);
+    DWORD ms = INFINITE;
+    if (end) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        int64_t left = ((int64_t)end->tv_sec - (int64_t)now.tv_sec) * 1000000000LL + (end->tv_nsec - now.tv_nsec);
+        if (left <= 0) return ETIMEDOUT;
+        ms = (DWORD)((left + 999999) / 1000000);
+    }
+    pthread_mutex_unlock(&m->native);
+    BOOL woke = WaitOnAddress((volatile VOID *)&c->seq, &seen, sizeof(seen), ms);
+    DWORD error = woke ? 0 : GetLastError();
+    pthread_mutex_lock(&m->native);
+    if (!woke && error == ERROR_TIMEOUT && end) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec > end->tv_sec || (now.tv_sec == end->tv_sec && now.tv_nsec >= end->tv_nsec)) return ETIMEDOUT;
+    }
+    return 0; /* woken, or early: a spurious wakeup */
+}
+static void futex_cond_wake(GuestCond *c, int all) {
+    __atomic_add_fetch(&c->seq, 1, __ATOMIC_SEQ_CST);
+    if (all) WakeByAddressAll((PVOID)&c->seq); else WakeByAddressSingle((PVOID)&c->seq);
+}
+#else
+static int futex_cond_enabled(void) { return 0; }
+static int futex_cond_wait(GuestCond *c, GuestMutex *m, const struct timespec *end) { (void)c; (void)m; (void)end; return EINVAL; }
+static void futex_cond_wake(GuestCond *c, int all) { (void)c; (void)all; }
+#endif
 static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3) return orbis_error(EINVAL);
     ++waits;
-    return orbis_error(pthread_cond_wait(&(*cond)->native, &(*mutex)->native));
+    if (cond_take_pending(*cond)) return 0;
+    e = orbis_error(futex_cond_enabled() ? futex_cond_wait(*cond, *mutex, NULL)
+                                         : pthread_cond_wait(&(*cond)->native, &(*mutex)->native));
+    cond_waited(*cond);
+    return e;
 }
 static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, const struct timespec *end) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3 || !end) return orbis_error(EINVAL);
     ++waits;
-    return timed_error(pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end));
+    if (cond_take_pending(*cond)) return 0;
+    e = timed_error(futex_cond_enabled() ? futex_cond_wait(*cond, *mutex, end)
+                                         : pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end));
+    cond_waited(*cond);
+    if (e == (int32_t)UINT32_C(0x8002003c) && cond_stats_enabled()) __atomic_add_fetch(&cs_timeouts, 1, __ATOMIC_RELAXED);
+    return e;
 }
 static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t usec) {
     struct timespec end;
@@ -177,12 +291,16 @@ static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t
 static ABI int32_t cond_signal(GuestCond **cond) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
-    ++wakeups; return orbis_error(pthread_cond_signal(&(*cond)->native));
+    ++wakeups; cond_note_wake(*cond, 0);
+    if (futex_cond_enabled()) { futex_cond_wake(*cond, 0); return 0; }
+    return orbis_error(pthread_cond_signal(&(*cond)->native));
 }
 static ABI int32_t cond_broadcast(GuestCond **cond) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
-    ++wakeups; return orbis_error(pthread_cond_broadcast(&(*cond)->native));
+    ++wakeups; cond_note_wake(*cond, 1);
+    if (futex_cond_enabled()) { futex_cond_wake(*cond, 1); return 0; }
+    return orbis_error(pthread_cond_broadcast(&(*cond)->native));
 }
 /* PS4 struct timespec is {int64 sec, int64 nsec}, identical to Linux x86-64. */
 typedef struct { int64_t sec, nsec; } GuestTimespec;

@@ -15,7 +15,9 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <ftw.h>
 #endif
 
@@ -65,7 +67,7 @@ _Static_assert(sizeof(SearchCond)==64 && sizeof(SearchResult)==56,"dir name sear
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized;
 static char title_id[16]="UNKNOWN";
-static struct { int used; char host[700], meta[700]; } slots[SLOTS];
+static struct { int used, writable; char host[700], meta[700], backup[700], name[32]; } slots[SLOTS];
 static char memory_path[720];
 static uint64_t memory_size;
 static size_t mounts_done, memory_writes;
@@ -113,6 +115,109 @@ static int remove_entry(const char *path, const struct stat *st, int flag, struc
 static void remove_tree(const char *path) { nftw(path,remove_entry,16,FTW_DEPTH|FTW_PHYS); }
 #endif
 
+/* 1 Nov 2026 (GitHub #311, a power cut while playing Uncharted 2, the save was gone): on the
+ * PS4 a save is committed when the game unmounts it. Here the game writes the files in place,
+ * and whatever Windows still held in its cache is lost with the power: the file is left empty
+ * or full of zeros. When the game unmounts a save it could write, its files are flushed to the
+ * disk and copied to <title>/.backup/<dir>/ (the last good copy; names starting with a dot are
+ * not listed as saves). Mounting an existing save puts that copy back first for a file that is
+ * empty or all zeros. GOW3_SAVE_BACKUP=0: neither. */
+static int backup_enabled(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("GOW3_SAVE_BACKUP"); on=!(e && e[0]=='0'); }
+    return on;
+}
+/* A file's bytes (*size of them); NULL when it cannot be read. */
+static unsigned char *read_all(const char *path, size_t *size) {
+    FILE *f=fopen(path,"rb");
+    if (!f) return NULL;
+    unsigned char *data=NULL;
+    size_t n=0, capacity=0;
+    for (;;) {
+        if (n==capacity) {
+            capacity=capacity ? capacity*2 : 1<<16;
+            unsigned char *grown=realloc(data,capacity);
+            if (!grown) { free(data); fclose(f); return NULL; }
+            data=grown;
+        }
+        size_t got=fread(data+n,1,capacity-n,f);
+        if (!got) break;
+        n+=got;
+    }
+    int failed=ferror(f);
+    fclose(f);
+    if (failed) { free(data); return NULL; }
+    *size=n;
+    return data;
+}
+/* What a power cut leaves of a file that had not reached the disk: nothing, or zeros. */
+static int usable(const unsigned char *data, size_t size) {
+    for (size_t i=0;i<size;++i) if (data[i]) return 1;
+    return 0;
+}
+/* Writes through a temporary file, so the old copy stays whole until the new one is. */
+static int write_all(const char *path, const unsigned char *data, size_t size) {
+    char tmp[720];
+    snprintf(tmp,sizeof(tmp),"%s.tmp",path);
+    FILE *f=fopen(tmp,"wb");
+    if (!f) return -1;
+    int ok=fwrite(data,1,size,f)==size && !fflush(f) && !fsync(fileno(f));
+    fclose(f);
+#ifdef _WIN32
+    ok=ok && MoveFileExA(tmp,path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+#else
+    ok=ok && !rename(tmp,path);
+#endif
+    if (!ok) remove(tmp);
+    return ok ? 0 : -1;
+}
+/* Unmount of a save the game could write: its files to the disk, then to the last good copy. */
+static void commit(const char *host, const char *backup) {
+    DIR *d=opendir(host);
+    if (!d) return;
+    make_dirs(backup);
+    for (struct dirent *e; (e=readdir(d));) {
+        if (e->d_name[0]=='.') continue;
+        char src[720], dst[720];
+        snprintf(src,sizeof(src),"%s/%s",host,e->d_name);
+        struct stat st;
+        if (stat(src,&st) || !S_ISREG(st.st_mode)) continue;
+        FILE *f=fopen(src,"r+b");
+        if (f) { fsync(fileno(f)); fclose(f); }
+        size_t size=0;
+        unsigned char *data=read_all(src,&size);
+        if (data && usable(data,size)) {
+            snprintf(dst,sizeof(dst),"%s/%s",backup,e->d_name);
+            if (write_all(dst,data,size)) printf("Runtime: save data backup of %s failed\n",src);
+        }
+        free(data);
+    }
+    closedir(d);
+}
+/* Mount of an existing save: a file left empty or all zeros comes back from the last good copy. */
+static void repair(const char *host, const char *backup, const char *name) {
+    DIR *d=opendir(backup);
+    if (!d) return;
+    for (struct dirent *e; (e=readdir(d));) {
+        size_t n=strlen(e->d_name);
+        if (e->d_name[0]=='.' || (n>4 && !strcmp(e->d_name+n-4,".tmp"))) continue;
+        char src[720], dst[720];
+        snprintf(src,sizeof(src),"%s/%s",backup,e->d_name);
+        snprintf(dst,sizeof(dst),"%s/%s",host,e->d_name);
+        size_t size=0;
+        unsigned char *data=read_all(dst,&size);
+        const int damaged=data && !usable(data,size);
+        free(data);
+        if (!damaged) continue;   /* whole, or not there (the game decides about missing files) */
+        unsigned char *copy=read_all(src,&size);
+        if (copy && usable(copy,size) && !write_all(dst,copy,size))
+            printf("Runtime: save data '%s': %s was empty or zeros (an interrupted write), "
+                   "restored from the last good copy\n",name,e->d_name);
+        free(copy);
+    }
+    closedir(d);
+}
+
 /* A save's param (title, subtitle, date) for the save dialog; 0 when it exists. */
 int runtime_savedata_param(int32_t user, const char *dir, void *param) {
     if (!valid_name(dir,32)) return -1;
@@ -155,15 +260,22 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     if (slot<0) { pthread_mutex_unlock(&lock); return ERR_MOUNT_FULL; }
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
     if (!exists) { Param empty={0}; write_param(meta,&empty); }
-    slots[slot].used=1;
-    snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
-    snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
-    memset(result,0,sizeof(*result));
+    char backup[700];
+    snprintf(backup,sizeof(backup),"%s/.backup/%s",base,dir->data);
+    if (exists && backup_enabled()) repair(host,backup,dir->data);
     char point[32];
     snprintf(point,sizeof(point),"/savedata%d",slot&15);
+    /* Report success only once the guest path really maps to the folder. */
+    if (runtime_file_mount(point,host)) { pthread_mutex_unlock(&lock); return ERR_MOUNT_FULL; }
+    slots[slot].used=1;
+    slots[slot].writable=!(mode & MODE_RDONLY);
+    snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
+    snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
+    snprintf(slots[slot].backup,sizeof(slots[slot].backup),"%s",backup);
+    snprintf(slots[slot].name,sizeof(slots[slot].name),"%s",dir->data);
+    memset(result,0,sizeof(*result));
     memcpy(result->point.data,point,strlen(point)+1);
     result->status=exists ? 0 : 1; /* CREATED */
-    runtime_file_mount(result->point.data,host);
     ++mounts_done;
     pthread_mutex_unlock(&lock);
     printf("Runtime: save data '%s' mounted at %s (%s%s)\n",dir->data,result->point.data,
@@ -187,7 +299,11 @@ static ABI int32_t save_umount(const MountPoint *point) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
-    if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; }
+    if (slot>=0) {
+        runtime_file_unmount(point->data);
+        if (slots[slot].writable && backup_enabled()) commit(slots[slot].host,slots[slot].backup);
+        slots[slot].used=0;
+    }
     pthread_mutex_unlock(&lock);
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
@@ -239,6 +355,9 @@ static ABI int32_t save_delete(const Delete *d) {
     if (stat(host,&st)) return ERR_NOT_FOUND;
     remove_tree(host);
     remove_tree(meta);
+    char backup[700];
+    snprintf(backup,sizeof(backup),"%s/.backup/%s",base,d->dir->data);
+    remove_tree(backup);
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
     return 0;
 }

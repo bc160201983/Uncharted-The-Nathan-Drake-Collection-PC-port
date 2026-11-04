@@ -701,8 +701,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         }
         image_view = *image.FindView(view_info).image_view;
         image_size = vk::Extent2D{image.info.size.width, image.info.size.height};
+        // gow3 1 Nov 2026 (GitHub #236 #278 #325, AMD at 1080p/1440p): the sharpening pass
+        // (RCAS, fsr_pass) reads this image in a compute shader when it is as large as the
+        // window. The barrier made the game's last draws visible to fragment shaders only, so
+        // on AMD the compute read raced them: menu elements flickered and tiles came out black.
+        // Larger or smaller pictures (1620p, 900p) and RCAS off take the fragment-only path.
         runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
-                        vk::PipelineStageFlagBits2::eFragmentShader,
+                        vk::PipelineStageFlagBits2::eFragmentShader |
+                            vk::PipelineStageFlagBits2::eComputeShader,
                         vk::AccessFlagBits2::eShaderRead);
         runtime.FlushBarriers();
     }
@@ -1229,6 +1235,7 @@ Frame* Presenter::GetRenderFrame() {
     Frame* frame;
     // gow3 20 Oct 2026: the time this waits for presentation (counted; Stall lines).
     Gow3Stats::WaitTimer wait_timer{Gow3Stats::frame_wait_ns};
+    const auto wait_start = std::chrono::steady_clock::now();
     {
         std::unique_lock lock{free_mutex};
         free_cv.wait(lock, [this] { return !free_queue.empty(); });
@@ -1255,6 +1262,11 @@ Frame* Presenter::GetRenderFrame() {
         if (result == vk::Result::eTimeout) {
             continue;
         }
+    }
+    // gow3 1 Nov 2026: a frame that is still being shown or queued for the display (VSync) is
+    // what this waits for; see VideoOutDriver::PresentThread (display queue drain).
+    if (std::chrono::steady_clock::now() - wait_start > std::chrono::milliseconds(1)) {
+        long_frame_waits.fetch_add(1, std::memory_order_relaxed);
     }
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||

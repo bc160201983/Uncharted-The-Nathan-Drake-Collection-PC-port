@@ -1,0 +1,220 @@
+[
+  {
+    "mode": "online",
+    "toc": "0x1138794",
+    "vtable": "0x10e7fb8",
+    "methods": [
+      {
+        "slot": "0x0",
+        "descriptor": "0x117e0d0",
+        "code": "0x371a98",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x4",
+        "descriptor": "0x117e128",
+        "code": "0x372e7c",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x8",
+        "descriptor": "0x117e0c8",
+        "code": "0x371a64",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0xc",
+        "descriptor": "0x117e0d8",
+        "code": "0x371ebc",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x10",
+        "descriptor": "0x117e0e0",
+        "code": "0x371f84",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x14",
+        "descriptor": "0x117e138",
+        "code": "0x373c58",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x18",
+        "descriptor": "0x117e120",
+        "code": "0x372b74",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x1c",
+        "descriptor": "0x117e118",
+        "code": "0x372a70",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x20",
+        "descriptor": "0x117e110",
+        "code": "0x372940",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x24",
+        "descriptor": "0x117e108",
+        "code": "0x372874",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x28",
+        "descriptor": "0x117e100",
+        "code": "0x3727b0",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x2c",
+        "descriptor": "0x117e0f8",
+        "code": "0x3726ac",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x30",
+        "descriptor": "0x117e0f0",
+        "code": "0x37254c",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x34",
+        "descriptor": "0x117e140",
+        "code": "0x373e04",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x38",
+        "descriptor": "0x117e0e8",
+        "code": "0x3723ec",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x3c",
+        "descriptor": "0x117e130",
+        "code": "0x373b78",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x40",
+        "descriptor": "0x117e0c0",
+        "code": "0x3719d4",
+        "toc": "0x11c2070"
+      }
+    ]
+  },
+  {
+    "mode": "lan",
+    "toc": "0x1138780",
+    "vtable": "0x10e7f68",
+    "methods": [
+      {
+        "slot": "0x0",
+        "descriptor": "0x117e080",
+        "code": "0x370f98",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x4",
+        "descriptor": "0x117e078",
+        "code": "0x370260",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x8",
+        "descriptor": "0x117e070",
+        "code": "0x370194",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0xc",
+        "descriptor": "0x117e088",
+        "code": "0x370fe4",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x10",
+        "descriptor": "0x117e0b0",
+        "code": "0x371660",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x14",
+        "descriptor": "0x117e068",
+        "code": "0x3700b0",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x18",
+        "descriptor": "0x117e0a8",
+        "code": "0x3713b4",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x1c",
+        "descriptor": "0x117e0a0",
+        "code": "0x3712dc",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x20",
+        "descriptor": "0x117e030",
+        "code": "0x370078",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x24",
+        "descriptor": "0x117e098",
+        "code": "0x371214",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x28",
+        "descriptor": "0x117e038",
+        "code": "0x370080",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x2c",
+        "descriptor": "0x117e040",
+        "code": "0x370088",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x30",
+        "descriptor": "0x117e090",
+        "code": "0x3710b0",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x34",
+        "descriptor": "0x117e048",
+        "code": "0x370090",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x38",
+        "descriptor": "0x117e050",
+        "code": "0x370098",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x3c",
+        "descriptor": "0x117e058",
+        "code": "0x3700a0",
+        "toc": "0x11c2070"
+      },
+      {
+        "slot": "0x40",
+        "descriptor": "0x117e060",
+        "code": "0x3700a8",
+        "toc": "0x11c2070"
+      }
+    ]
+  }
+]

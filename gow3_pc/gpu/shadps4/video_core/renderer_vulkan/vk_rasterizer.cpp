@@ -41,6 +41,10 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+namespace VideoCore {
+extern bool g_dma_sync_obtain; // buffer_cache.cpp (GOW3_BUFFER_STATS=2: DMA-sync uploads by MiB)
+}
+
 namespace Vulkan {
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
@@ -83,8 +87,11 @@ bool DepthFeedbackGeneral() {
 // per-draw path that change no result (each one names this switch).
 bool CpuTrims() {
     static const bool enabled = [] {
+        // gow3 29 Oct 2026: DEFAULT ON (threads work, analysis/optimization-1028/THREADS.md: U2/U1/U3
+        // full CPU +5..+14% FPS, 1% low +3..+30%, Deck sim 1% low +7..+23%, 4 cores neutral; 15-minute
+        // soaks clean). GOW3_CPU_TRIMS=0 turns it off.
         const char* env = std::getenv("GOW3_CPU_TRIMS");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     return enabled;
 }
@@ -99,6 +106,7 @@ bool TriggerPollDue(std::chrono::steady_clock::time_point& last) {
     return true;
 }
 } // namespace
+extern void (*g_device_lost_report)(); // vk_scheduler.cpp (DumpDeviceFault)
 namespace {
 bool SrtCheckEnabled();
 void NoteSrtWalk(const Shader::Info& info);
@@ -972,6 +980,295 @@ void TestGarbageTSharp(AmdGpu::Image& tsharp) {
         std::fflush(stdout);
     }
 }
+
+/// gow3 1 Nov 2026 (GitHub #316 #314 #277 #76 #224 #249, NVIDIA "ReadInvalid" at a small address,
+/// then device lost): a T# that is rejected (or null) is bound as a null descriptor. That null was
+/// always written as a SAMPLED image, also into a shader's STORAGE image binding (the written
+/// image of the engine compute shaders 99086cd4/302d11fa/71c040c9/a0b87e41, whose resource tables
+/// read garbage while an area streams in), and as ONE descriptor where the layout has one per mip
+/// (DynamicIndex mip arrays), shifting every later binding of the stage. Both are invalid Vulkan;
+/// the driver gets a descriptor it cannot decode. Now the null has the binding's own type and
+/// count. GOW3_TSHARP_GUARD=0: the old way (tests).
+bool TypedNullImages() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_TSHARP_GUARD");
+        const bool value = !(env && env[0] == '0');
+        if (!value) {
+            std::printf("GPU: null image descriptors keep the sampled type (GOW3_TSHARP_GUARD=0)\n");
+            std::fflush(stdout);
+        }
+        return value;
+    }();
+    return on;
+}
+
+/// One line per shader + image slot whose T# is bound null for a reason other than "no texture"
+/// (and for storage slots also for that, as those were the mistyped ones). Lock-free set lookup:
+/// this runs on every null binding.
+void NoteNullImage(const Shader::Info& stage, u32 image_index, const Shader::ImageResource& desc,
+                   const AmdGpu::Image& tsharp, u32 count, const char* reason) {
+    static std::array<std::atomic<u64>, 512> seen{};
+    static std::atomic<u32> lines{0};
+    const u64 key = (stage.pgm_hash << 8) ^ (u64(image_index) << 1) ^ 1; // never 0
+    u64 slot = (key * 0x9E3779B97F4A7C15ull) >> 55;                       // 0..511
+    for (u32 probe = 0; probe < 16; ++probe, slot = (slot + 1) & 511) {
+        u64 value = seen[slot].load(std::memory_order_relaxed);
+        if (value == key) {
+            return;
+        }
+        if (value == 0) {
+            if (!seen[slot].compare_exchange_strong(value, key, std::memory_order_relaxed)) {
+                if (value == key) {
+                    return;
+                }
+                continue;
+            }
+            if (lines.fetch_add(1, std::memory_order_relaxed) >= 200) {
+                return;
+            }
+            std::printf("GPU: null image for %s %08llx slot %u (%s, %u descriptor%s, flat dword %u): "
+                        "%s; T# %#llx format %u/%u %ux%u levels %u-%u tile %u\n",
+                        stage.sw_stage == Shader::SwStage::Compute ? "cs" : "shader",
+                        static_cast<unsigned long long>(stage.pgm_hash), image_index,
+                        desc.is_written ? "storage" : "sampled", count, count == 1 ? "" : "s",
+                        u32(desc.sharp_fetch.offsets[0]), reason,
+                        static_cast<unsigned long long>(tsharp.Address()), u32(tsharp.data_format),
+                        u32(tsharp.num_format), u32(tsharp.width) + 1, u32(tsharp.height) + 1,
+                        u32(tsharp.base_level), u32(tsharp.last_level), u32(tsharp.tiling_index));
+            std::fflush(stdout);
+            return;
+        }
+    }
+}
+
+/// gow3 test (1 Nov 2026): GOW3_TEST_GARBAGE_SLOT=<spec>[,<spec>...], each spec
+/// <shader hash hex>:<slot>:<mode>[:<s>[:<n>[:<pool>]]]. From <s> seconds (default 0) after the
+/// shader's first binding, its next <n> bindings (default unlimited) get a broken descriptor in
+/// that slot, like the players' logs before the loss:
+///   slot <i> = image i (T#): unmapped = base at 0x3d000029a600 (no guest memory there: rejected),
+///     float = dwords 0-3 = the #277 garbage 00003307 387fb810 3c003939 ac8babe0 (rejected),
+///     shift = base + 64 MiB (mapped memory holding other data: may pass every check),
+///     random = all 8 dwords random (one of <pool> values, default 64),
+///     type3d / cube / msaa / int = same base, another image type or an integer format;
+///   slot s<i> = sampler i (S#): garbage = clamp modes 5/7/4, border colour type 3 index 4094,
+///     random LOD bias and anisotropy (the "ClampMode: Unimplemented clamp mode" lines);
+///     random = all 4 dwords random (one of <pool> values, default 64: new samplers).
+struct GarbageSlotTest {
+    u64 hash = 0;
+    u32 slot = 0;
+    bool sampler = false;
+    int mode = -1; // 0 unmapped, 1 float, 2 shift, 3 sampler garbage, 4 random
+    double delay_s = 0.0;
+    u64 count = ~0ull;
+    u32 pool = 64;
+    std::atomic<s64> first_ns{0};
+    std::atomic<u64> fired{0};
+    std::atomic<bool> described{false};
+};
+struct GarbageSlotTests {
+    std::array<GarbageSlotTest, 8> specs;
+    u32 num = 0;
+};
+GarbageSlotTests& GarbageSlotParams() {
+    static GarbageSlotTests* tests = [] {
+        auto* t = new GarbageSlotTests{};
+        const char* env = std::getenv("GOW3_TEST_GARBAGE_SLOT");
+        for (const char* spec = env; spec && *spec && t->num < t->specs.size();) {
+            auto& p = t->specs[t->num];
+            char* end = nullptr;
+            p.hash = std::strtoull(spec, &end, 16);
+            const char* next = std::strchr(spec, ',');
+            if (end && *end == ':') {
+                const char* s = end + 1;
+                if (*s == 's') {
+                    p.sampler = true;
+                    ++s;
+                } else if (*s == 't') {
+                    ++s;
+                }
+                p.slot = static_cast<u32>(std::strtoul(s, &end, 10));
+                if (end && *end == ':') {
+                    const char* mode = end + 1;
+                    const auto is = [&](const char* name) {
+                        return std::strncmp(mode, name, std::strlen(name)) == 0;
+                    };
+                    p.mode = is("random")     ? 4
+                             : p.sampler      ? (is("garbage") ? 3 : -1)
+                             : is("unmapped") ? 0
+                             : is("float")    ? 1
+                             : is("shift")    ? 2
+                             : is("type3d")   ? 5
+                             : is("cube")     ? 6
+                             : is("msaa")     ? 7
+                             : is("int")      ? 8
+                                              : -1;
+                    // Empty fields keep their defaults ("...:10::16" = 10 s, all bindings, pool 16).
+                    const auto digit = [](const char* c) { return *c >= '0' && *c <= '9'; };
+                    const char* colon = std::strchr(mode, ':');
+                    if (colon && (!next || colon < next)) {
+                        if (digit(colon + 1)) {
+                            p.delay_s = std::atof(colon + 1);
+                        }
+                        const char* colon2 = std::strchr(colon + 1, ':');
+                        if (colon2 && (!next || colon2 < next)) {
+                            if (digit(colon2 + 1)) {
+                                p.count = std::strtoull(colon2 + 1, nullptr, 10);
+                            }
+                            const char* colon3 = std::strchr(colon2 + 1, ':');
+                            if (colon3 && (!next || colon3 < next) && digit(colon3 + 1)) {
+                                p.pool = std::max(1u, u32(std::strtoul(colon3 + 1, nullptr, 10)));
+                            }
+                        }
+                    }
+                }
+            }
+            std::printf("GPU test: GOW3_TEST_GARBAGE_SLOT shader %08llx %s %u mode %d after %.1f s, "
+                        "%llu bindings, pool %u\n",
+                        static_cast<unsigned long long>(p.hash), p.sampler ? "sampler" : "image",
+                        p.slot, p.mode, p.delay_s, static_cast<unsigned long long>(p.count), p.pool);
+            std::fflush(stdout);
+            if (p.mode >= 0) {
+                ++t->num;
+            } else {
+                p.hash = 0;
+            }
+            spec = next ? next + 1 : nullptr;
+        }
+        return t;
+    }();
+    return *tests;
+}
+bool GarbageSlotTarget(u64 hash) {
+    const auto& t = GarbageSlotParams();
+    for (u32 i = 0; i < t.num; ++i) {
+        if (t.specs[i].hash == hash) {
+            return true;
+        }
+    }
+    return false;
+}
+/// The spec breaking this binding (the caller then edits its sharp), or null.
+GarbageSlotTest* GarbageSlotFire(const Shader::Info& stage, u32 slot, bool sampler) {
+    auto& t = GarbageSlotParams();
+    for (u32 i = 0; i < t.num; ++i) {
+        auto& p = t.specs[i];
+        if (p.hash != stage.pgm_hash || p.slot != slot || p.sampler != sampler) {
+            continue;
+        }
+        const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        s64 expected = 0;
+        p.first_ns.compare_exchange_strong(expected, now);
+        const s64 start = expected ? expected : now;
+        if (double(now - start) * 1e-9 < p.delay_s) {
+            return nullptr;
+        }
+        const u64 n = p.fired.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n > p.count) {
+            return nullptr;
+        }
+        if (n == 1 || (n & (n - 1)) == 0) {
+            std::printf("GPU test: broken %s %u of shader %08llx, binding %llu\n",
+                        sampler ? "S#" : "T#", slot, static_cast<unsigned long long>(stage.pgm_hash),
+                        static_cast<unsigned long long>(n));
+            std::fflush(stdout);
+        }
+        return &p;
+    }
+    return nullptr;
+}
+/// Random dwords for the "random" mode: value k of the pool, k chosen per binding.
+void GarbageDwords(GarbageSlotTest& p, u32* out, u32 count) {
+    const u64 k = (p.fired.load(std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull >> 20) % p.pool;
+    u64 x = (p.hash ^ (u64(p.slot) << 40) ^ (k + 1) * 0xD1B54A32D192ED03ull) | 1;
+    for (u32 i = 0; i < count; ++i) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out[i] = static_cast<u32>(x >> 16);
+    }
+}
+void TestGarbageSlot(const Shader::Info& stage, u32 image_index, const Shader::ImageResource& desc,
+                     AmdGpu::Image& tsharp) {
+    auto* p = GarbageSlotFire(stage, image_index, false);
+    if (!p) {
+        return;
+    }
+    if (!p->described.exchange(true)) {
+        std::printf("GPU test: shader %08llx image %u is %s (flat dword %u, written %d, mip mode %d), "
+                    "T# %#llx format %u/%u %ux%u\n",
+                    static_cast<unsigned long long>(stage.pgm_hash), image_index,
+                    desc.is_written ? "a storage image" : "a sampled image",
+                    u32(desc.sharp_fetch.offsets[0]), int(desc.is_written),
+                    int(desc.mip_fallback_mode), static_cast<unsigned long long>(tsharp.Address()),
+                    u32(tsharp.data_format), u32(tsharp.num_format), u32(tsharp.width) + 1,
+                    u32(tsharp.height) + 1);
+        std::fflush(stdout);
+    }
+    switch (p->mode) {
+    case 0:
+        tsharp.base_address = 0x3d000029a600ull >> 8;
+        break;
+    case 1: {
+        static constexpr std::array<u32, 4> garbage{0x00003307u, 0x387fb810u, 0x3c003939u,
+                                                    0xac8babe0u};
+        std::memcpy(&tsharp, garbage.data(), sizeof(garbage));
+        break;
+    }
+    case 2:
+        tsharp.base_address = tsharp.base_address + (64_MB >> 8);
+        break;
+    case 4: {
+        std::array<u32, 8> dwords;
+        GarbageDwords(*p, dwords.data(), 8);
+        std::memcpy(&tsharp, dwords.data(), sizeof(dwords));
+        break;
+    }
+    // Same memory, another image kind than the pipeline was specialized for (a table rewritten
+    // between the pipeline choice and the binding): a view of another type or number class.
+    case 5:
+        tsharp.type = u64(AmdGpu::ImageType::Color3D);
+        tsharp.depth = 3;
+        break;
+    case 6:
+        tsharp.type = u64(AmdGpu::ImageType::Cube);
+        tsharp.base_array = 0;
+        tsharp.last_array = 5;
+        break;
+    case 7:
+        tsharp.type = u64(AmdGpu::ImageType::Color2DMsaa);
+        tsharp.base_level = 0;
+        tsharp.last_level = 2;
+        break;
+    case 8:
+        tsharp.num_format = u64(AmdGpu::NumberFormat::Uint);
+        break;
+    default:
+        break;
+    }
+}
+void TestGarbageSamplerSlot(const Shader::Info& stage, u32 sampler_index, AmdGpu::Sampler& ssharp) {
+    auto* p = GarbageSlotFire(stage, sampler_index, true);
+    if (!p) {
+        return;
+    }
+    if (p->mode == 4) {
+        std::array<u32, 4> dwords;
+        GarbageDwords(*p, dwords.data(), 4);
+        std::memcpy(&ssharp, dwords.data(), sizeof(dwords));
+        return;
+    }
+    static std::atomic<u32> salt{0};
+    const u32 r = salt.fetch_add(0x9E3779B9u, std::memory_order_relaxed);
+    ssharp.clamp_x.Assign(AmdGpu::ClampMode::MirrorOnceHalfBorder);
+    ssharp.clamp_y.Assign(AmdGpu::ClampMode::MirrorOnceBorder);
+    ssharp.clamp_z.Assign(AmdGpu::ClampMode::ClampHalfBorder);
+    ssharp.max_aniso.Assign(static_cast<AmdGpu::AnisoRatio>(r % 5));
+    ssharp.lod_bias.Assign((r >> 18) % p->pool);
+    ssharp.border_color_ptr.Assign(4094);
+    ssharp.border_color_type.Assign(static_cast<AmdGpu::BorderColor>(3));
+}
 } // namespace
 
 namespace {
@@ -1517,6 +1814,8 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     return false;
 }
 
+static void FixAimFocusCentreRing(u8* dst, VAddr address, u64 size); // aim focus (#276), below
+
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                            boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
     const PreparedStage* prepared_stage = nullptr;
@@ -1577,6 +1876,10 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             std::memcpy(dst, source, size);
         } else {
             memory->CopySparseMemory(address, dst, size);
+            // gow3 28 Oct 2026 (#276): the aim focus box centre, as BindBuffers corrects it.
+            if (stage.pgm_hash == 0x9f801363) {
+                FixAimFocusCentreRing(dst, address, size);
+            }
         }
         constant_ring->Flush(*offset, size);
         if (LateConstantsEnabled()) {
@@ -2837,6 +3140,29 @@ static void RecordFullBarrier(vk::CommandBuffer cmdbuf) {
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 
+void Rasterizer::NoteDisplayStorageWrite(const Shader::Info& cs) {
+    if (!upscaler->CompositeFrames()) {
+        return;
+    }
+    for (const auto& image_desc : cs.images) {
+        if (!image_desc.is_written) {
+            continue;
+        }
+        const VAddr address = image_desc.GetSharp(cs).Address();
+        if (address && FrameCapture::IsDisplayBuffer(address)) {
+            upscaler->OnDisplayStorageWrite(address);
+            return;
+        }
+    }
+}
+
+// GOW3_DISPATCH_STATS=1: time in DispatchRecord's phases (resource binding, barriers,
+// descriptor push, recording + reset), for the dispatch just timed.
+static bool g_dispatch_phases = false;
+static u64 g_dispatch_phase_ns[4] = {};
+// Compute BindResources split: poll readbacks, push-ud/prepare (time between), buffers, textures, DMA sync, all.
+static u64 g_bind_phase_ns[6] = {};
+
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
@@ -2853,7 +3179,159 @@ void Rasterizer::DispatchDirect() {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
         return;
     }
+    // gow3 28 Oct 2026 (GOW3_DISPATCH_STATS=1, multithreaded rendering off): GPU-thread time per
+    // compute shader, every 5 s, top 12 by time: dispatches, thread groups, us per dispatch.
+    static const bool dispatch_stats = [] {
+        const char* env = std::getenv("GOW3_DISPATCH_STATS");
+        return env && env[0] == '1';
+    }();
+    if (!dispatch_stats) {
+        DispatchRecord(pipeline);
+        return;
+    }
+    const auto& regs = CsRegs();
+    const u64 groups = u64(regs.dim_x) * regs.dim_y * regs.dim_z;
+    const u64 hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
+    // gow3 29 Oct 2026 (threads work, basis for GOW3_DISPATCH_FAST): back-to-back dispatches of
+    // the same shader, and of those how many also have the same user data (SGPR) words.
+    static u64 prev_hash = 0, same_shader = 0, same_user_data = 0;
+    static AmdGpu::UserData prev_user_data{};
+    if (hash == prev_hash) {
+        ++same_shader;
+        same_user_data += regs.user_data == prev_user_data;
+    }
+    prev_hash = hash;
+    prev_user_data = regs.user_data;
+    g_dispatch_phases = true;
+    const auto start = std::chrono::steady_clock::now();
     DispatchRecord(pipeline);
+    const auto end = std::chrono::steady_clock::now();
+    struct Entry {
+        u64 count = 0, groups = 0, ns = 0, one_group = 0;
+    };
+    static std::unordered_map<u64, Entry> entries;
+    static auto last = end;
+    auto& e = entries[hash];
+    ++e.count;
+    e.groups += groups;
+    e.one_group += groups == 1;
+    e.ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+    if (end - last >= std::chrono::seconds{5}) {
+        last = end;
+        std::vector<std::pair<u64, u64>> order;
+        u64 total_ns = 0, total = 0;
+        for (const auto& [h, x] : entries) {
+            order.emplace_back(x.ns, h);
+            total_ns += x.ns;
+            total += x.count;
+        }
+        std::ranges::sort(order, std::greater{});
+        std::string text;
+        for (size_t i = 0; i < std::min<size_t>(order.size(), 12); ++i) {
+            const auto& x = entries[order[i].second];
+            text += fmt::format(" {:08x}: {} x {:.1f} us ({} 1-group, {:.0f} groups avg);", order[i].second,
+                                x.count, x.ns / 1e3 / x.count, x.one_group, double(x.groups) / x.count);
+        }
+        std::printf("Dispatch phases (5 s): bind resources %.1f ms, barriers %.1f ms, descriptor push %.1f ms, record+reset %.1f ms\n",
+                    g_dispatch_phase_ns[0] / 1e6, g_dispatch_phase_ns[1] / 1e6, g_dispatch_phase_ns[2] / 1e6, g_dispatch_phase_ns[3] / 1e6);
+        std::fill(std::begin(g_dispatch_phase_ns), std::end(g_dispatch_phase_ns), 0);
+        std::printf("Dispatch bind split (5 s): poll readbacks %.1f ms, user data %.1f ms, buffers %.1f ms, textures %.1f ms, DMA sync %.1f ms, all %.1f ms\n",
+                    g_bind_phase_ns[0] / 1e6, g_bind_phase_ns[1] / 1e6, g_bind_phase_ns[2] / 1e6, g_bind_phase_ns[3] / 1e6, g_bind_phase_ns[4] / 1e6, g_bind_phase_ns[5] / 1e6);
+        std::fill(std::begin(g_bind_phase_ns), std::end(g_bind_phase_ns), 0);
+        std::printf("Dispatch stats (5 s): %llu dispatches, %.1f ms on the GPU thread;%s\n",
+                    static_cast<unsigned long long>(total), total_ns / 1e6, text.c_str());
+        std::printf("Dispatch repeats (5 s): %llu after the same shader, %llu of them with the same user data\n",
+                    static_cast<unsigned long long>(same_shader), static_cast<unsigned long long>(same_user_data));
+        same_shader = same_user_data = 0;
+        std::fflush(stdout);
+        entries.clear();
+    }
+}
+
+// gow3 1 Nov 2026 (U3 chapter 2 device lost, analysis/handoff-book/11-U3-CH2-CRASH.md): the
+// effect/crowd skinning shaders (Shader::IsEffectShader) loop per vertex over a count from buffer
+// 0 (u32 count, u32 offset per vertex; vertex count = dword 0 at the user-data pointer s[2:3]).
+// Their last 32 dispatches are kept with buffer 0's V# and the largest of the first 16 counts in
+// guest memory, and printed when the device is lost; a count over 4096 is logged at once (the
+// shaders clamp their loop there, effect_loop_clamp_pass.cpp). GOW3_EFFECT_DISPATCH_LOG=0: off.
+namespace {
+struct EffectDispatch {
+    u64 hash, base, sequence;
+    u32 num_records, stride, vertices, max_count, groups;
+};
+std::array<EffectDispatch, 32> g_effect_dispatches{};
+std::atomic<u64> g_effect_dispatch_count{0};
+
+void ReportEffectDispatches() {
+    const u64 count = g_effect_dispatch_count.load();
+    std::fprintf(stderr, "Effect shader dispatches before the loss (newest last, %llu in all):\n",
+                 static_cast<unsigned long long>(count));
+    for (u64 i = count > g_effect_dispatches.size() ? count - g_effect_dispatches.size() : 0;
+         i < count; ++i) {
+        const auto& d = g_effect_dispatches[i % g_effect_dispatches.size()];
+        std::fprintf(stderr,
+                     "  #%llu cs %08llx: %u vertices, %u groups; buffer 0 at %#llx, %u records, "
+                     "stride %u; largest count of the first 16: %u\n",
+                     static_cast<unsigned long long>(d.sequence),
+                     static_cast<unsigned long long>(d.hash), d.vertices, d.groups,
+                     static_cast<unsigned long long>(d.base), d.num_records, d.stride, d.max_count);
+    }
+}
+} // namespace
+
+void Rasterizer::NoteEffectDispatch(const Shader::Info& cs, u32 groups) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_EFFECT_DISPATCH_LOG");
+        if (!(env && env[0] == '0')) {
+            Vulkan::g_device_lost_report = &ReportEffectDispatches;
+            return true;
+        }
+        return false;
+    }();
+    if (!enabled || cs.buffers.empty() || cs.buffers[0].IsSpecial() || cs.user_data.size() < 4) {
+        return;
+    }
+    EffectDispatch d{};
+    d.hash = cs.pgm_hash;
+    d.groups = groups;
+    const auto sharp = cs.buffers[0].GetSharp(cs);
+    d.base = sharp.base_address;
+    d.num_records = sharp.num_records;
+    d.stride = sharp.GetStride();
+    const VAddr counts_ptr = (VAddr(cs.user_data[3]) << 32 | cs.user_data[2]) & 0xFFFFFFFFFFFFULL;
+    if (counts_ptr && IsMapped(counts_ptr, 4)) {
+        memory->CopySparseMemory(counts_ptr, reinterpret_cast<u8*>(&d.vertices), 4);
+    }
+    // One copy of at most 512 bytes: the first counts (stride 8 in every dispatch seen).
+    const u32 stride = d.stride ? d.stride : 8;
+    const u32 n = stride >= 8 && stride <= 512
+                      ? std::min<u32>(std::min<u32>(d.vertices, d.num_records), 512u / stride)
+                      : 0u;
+    if (d.base && n && IsMapped(d.base, u64(n) * stride)) {
+        std::array<u8, 512> bytes{};
+        memory->CopySparseMemory(d.base, bytes.data(), u64(n - 1) * stride + 4);
+        for (u32 v = 0; v < n; ++v) {
+            u32 value = 0;
+            std::memcpy(&value, bytes.data() + u64(v) * stride, 4);
+            d.max_count = std::max(d.max_count, value);
+        }
+    }
+    const u64 sequence = g_effect_dispatch_count.load(std::memory_order_relaxed);
+    d.sequence = sequence;
+    g_effect_dispatches[sequence % g_effect_dispatches.size()] = d;
+    g_effect_dispatch_count.store(sequence + 1, std::memory_order_release);
+    if (d.max_count > 4096) {
+        static u32 reports = 0;
+        if (reports < 16) {
+            ++reports;
+            std::printf("Effect shader: cs %08llx dispatch with a loop count of %u (buffer 0 at "
+                        "%#llx, %u records, stride %u, %u vertices): clamped to 4096 on the GPU\n",
+                        static_cast<unsigned long long>(d.hash), d.max_count,
+                        static_cast<unsigned long long>(d.base), d.num_records, d.stride,
+                        d.vertices);
+            std::fflush(stdout);
+        }
+    }
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
@@ -2862,6 +3340,11 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     }
     if (SkippedShader(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
         return;
+    }
+    if (Shader::IsEffectShader(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
+        const auto& regs = CsRegs();
+        NoteEffectDispatch(pipeline->GetStage(Shader::SwStage::Compute),
+                           regs.dim_x * regs.dim_y * regs.dim_z);
     }
     FrameCapture::Poll();
     gbuffer_draw = false;
@@ -2886,6 +3369,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (ExecuteShaderHLE(cs, Regs(), cs_program, *this)) {
         return;
     }
+    NoteDisplayStorageWrite(cs);
     // gow3 diagnostics (GOW3_DUMP_CS_CONST=<hex shader hash>): the first 32 dwords (as floats) of
     // every buffer the dispatch reads that is up to 4 KiB, with a timestamp, 2000 lines at most.
     static const u64 dump_cs = [] {
@@ -2934,9 +3418,11 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             runtime.FlushBarriers();
         }
     }
+    const auto phase_t0 = g_dispatch_phases ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (!BindResources(pipeline)) {
         return;
     }
+    const auto phase_t1 = g_dispatch_phases ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     if (needs_barrier) {
         runtime.FlushBarriers();
@@ -2959,8 +3445,10 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         return !(env && env[0] == '0');
     }();
     const u64 serial_before_bind = scheduler.RecordSerial();
+    const auto phase_t2 = g_dispatch_phases ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     pipeline->BindResources(set_writes, push_data);
     const u64 serial_after_bind = scheduler.RecordSerial();
+    const auto phase_t3 = g_dispatch_phases ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     const vk::Pipeline handle = pipeline->Handle();
     u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y;
@@ -3006,6 +3494,14 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     DebugState.IncDispatch();
 
     ResetBindings(true);
+    if (g_dispatch_phases) {
+        const auto phase_t4 = std::chrono::steady_clock::now();
+        const auto ns = [](auto d) { return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count()); };
+        g_dispatch_phase_ns[0] += ns(phase_t1 - phase_t0);
+        g_dispatch_phase_ns[1] += ns(phase_t2 - phase_t1);
+        g_dispatch_phase_ns[2] += ns(phase_t3 - phase_t2);
+        g_dispatch_phase_ns[3] += ns(phase_t4 - phase_t3);
+    }
     if (ClothTraceEnabled() && (cs.pgm_hash == 0x1c957b01 || cs.pgm_hash == 0x809864d3)) {
         g_cloth_epoch = runtime.AccessEpoch();
         g_cloth_epoch_shader = cs.pgm_hash;
@@ -3039,6 +3535,7 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
     }
     scheduler.PopPendingOperations();
     const u32 offset = 0;
+    NoteDisplayStorageWrite(pipeline->GetStage(Shader::SwStage::Compute));
 
     if (!BindResources(pipeline)) {
         return;
@@ -3271,7 +3768,9 @@ void Rasterizer::SyncDmaMemory(const Shader::Info* stage) {
         // cover fiber stacks: those stay writable (gow3gpu.cpp Gow3KeepWritable).
         for (const VAddr base : bases) {
             if (IsMapped(base, window)) {
+                VideoCore::g_dma_sync_obtain = true;
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(base, static_cast<u32>(window), false);
+                VideoCore::g_dma_sync_obtain = false;
                 if (std::ranges::find(dma_read_arenas, buffer) == dma_read_arenas.end()) {
                     dma_read_arenas.push_back(buffer);
                 }
@@ -3988,7 +4487,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     set_writes.clear();
     buffer_infos.clear();
     image_infos.clear();
+    const bool bind_timed = g_dispatch_phases && pipeline->IsCompute();
+    const auto bt0 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     buffer_cache.PollReadbacks();
+    const auto bt1 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // gow3: G-buffer passes sample material textures for a scene rendered below the output
     // size; the temporal upscaler restores the detail of the output's mip level (FSR guide:
     // log2(render / output)). Shadows, post-processing and UI keep the guest's bias.
@@ -4039,8 +4541,16 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                               stage->samplers.size());
             stage->PushUd(binding, push_data);
             const PreparedStage* prepared = FindPreparedStage(*stage);
+            const auto bt2 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             BindBuffers(*stage, prepared, binding, push_data, set_write_index);
+            const auto bt3 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
+            if (bind_timed) {
+                const auto bt4 = std::chrono::steady_clock::now();
+                g_bind_phase_ns[1] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt2 - bt1).count());
+                g_bind_phase_ns[2] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt3 - bt2).count());
+                g_bind_phase_ns[3] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt4 - bt3).count());
+            }
             uses_dma |= stage->uses_dma;
             if (stage->uses_dma) {
                 dma_stage = stage;
@@ -4110,9 +4620,16 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         }
     }
 
+    const auto bt5 = bind_timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (uses_dma) {
         SyncDmaMemory(dma_stage);
         fault_process_pending = true;
+    }
+    if (bind_timed) {
+        const auto bt6 = std::chrono::steady_clock::now();
+        g_bind_phase_ns[0] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt1 - bt0).count());
+        g_bind_phase_ns[4] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt6 - bt5).count());
+        g_bind_phase_ns[5] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(bt6 - bt0).count());
     }
 
     return true;
@@ -4578,6 +5095,20 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
                 LOG_TRACE(Render_Vulkan, "Metadata update skipped");
                 return true;
             }
+            // gow3 2 Nov 2026 (GitHub #161, GOW3_HTILE_KEEP_CLEARS): the HTILE of a depth image
+            // freed since (Uncharted 1's water reflection depth): the clear is kept for the depth
+            // image made again there. The dispatch still runs (guest memory as before).
+            if (VideoCore::TextureCache::KeepHtileClears() &&
+                texture_cache.ClearRetiredMeta(address)) {
+                static std::atomic<int> lines{0};
+                if (lines.fetch_add(1, std::memory_order_relaxed) < 4) {
+                    std::printf("GPU: HTILE fill by cs %08llx at %#llx: the HTILE of a freed depth "
+                                "image, kept as its clear (GOW3_HTILE_KEEP_CLEARS)\n",
+                                static_cast<unsigned long long>(info.pgm_hash),
+                                static_cast<unsigned long long>(address));
+                    std::fflush(stdout);
+                }
+            }
         }
     }
     return false;
@@ -4767,76 +5298,138 @@ static void CheckClothInputs(Core::MemoryManager* memory, VideoCore::BufferCache
 // resolution above 1080p the box left the crosshair (4K: uv 0.25 instead of 0.5, the depth of the
 // wall beside Nate) and everything behind the target was blurred while aiming. The centre is
 // corrected to the HUD space for every render size (no change at 1080p). GOW3_AIM_FOCUS_FIX=0: off.
-static void FixAimFocusCentre(Core::MemoryManager* memory, VideoCore::BufferCache& buffer_cache,
-                              VAddr address) {
+namespace {
+// gow3 28 Oct 2026 (GitHub #276): the state of the correction, shared by its two paths: the
+// bind (BindBuffers, single-threaded rendering) and the constant ring copy (CollectRingBindings,
+// multithreaded rendering).
+struct AimFocusState {
+    // gow3 20 Oct 2026: what the fix did per 5 s (calls, skips by reason, corrections, writes
+    // through to the GPU's copy), printed while the shader runs.
+    std::atomic<u32> calls{0}, unmapped{0}, odd{0}, native{0}, same{0}, fixed{0}, through{0},
+        ring{0};
+    std::atomic<s64> last{0};
+    std::mutex mutex;
+    std::unordered_map<VAddr, std::pair<float, float>> corrected;
+    bool reported = false;
+};
+
+AimFocusState& AimFocus() {
+    static AimFocusState state;
+    return state;
+}
+
+bool AimFocusEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_AIM_FOCUS_FIX");
         return !(env && env[0] == '0');
     }();
-    // gow3 20 Oct 2026: what the fix did per 5 s (calls, skips by reason, corrections, writes
-    // through to the GPU's copy), printed while the shader runs.
-    static std::atomic<u32> n_calls{0}, n_unmapped{0}, n_odd{0}, n_native{0}, n_same{0}, n_fixed{0},
-        n_through{0};
-    static std::atomic<s64> n_last{0};
-    ++n_calls;
+    return enabled;
+}
+
+void AimFocusCount() {
+    auto& s = AimFocus();
+    ++s.calls;
     if (const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count();
-        now - n_last.load() >= 5) {
-        n_last = now;
+        now - s.last.load() >= 5) {
+        s.last = now;
         std::printf("Aim focus (5 s): %u binds; skipped %u unmapped, %u not the box constants, %u at "
-                    "1080p, %u already corrected; %u corrected (%u through to the GPU copy)\n",
-                    n_calls.exchange(0), n_unmapped.exchange(0), n_odd.exchange(0), n_native.exchange(0),
-                    n_same.exchange(0), n_fixed.exchange(0), n_through.exchange(0));
+                    "1080p, %u already corrected; %u corrected (%u through to the GPU copy, %u in "
+                    "the constant ring)\n",
+                    s.calls.exchange(0), s.unmapped.exchange(0), s.odd.exchange(0), s.native.exchange(0),
+                    s.same.exchange(0), s.fixed.exchange(0), s.through.exchange(0), s.ring.exchange(0));
         std::fflush(stdout);
     }
-    if (!enabled || !memory->IsValidGpuMapping(address, 32)) {
-        ++n_unmapped;
+}
+
+/// The corrected box centre for the 8 floats `c` of the block at `address`; false when they need
+/// none. Called with AimFocus().mutex held.
+bool AimFocusCorrection(const float* c, VAddr address, float fixed[2]) {
+    auto& s = AimFocus();
+    const float inv_width = c[6], inv_height = c[7];
+    if (!(inv_width > 0.0f && inv_width < 1.0f && inv_height > 0.0f && inv_height < 1.0f)) {
+        ++s.odd;
+        return false;
+    }
+    const float x_scale = 1920.0f * inv_width, y_scale = 1080.0f * inv_height;
+    if (std::abs(x_scale - 1.0f) < 1e-4f && std::abs(y_scale - 1.0f) < 1e-4f) {
+        ++s.native;
+        return false; // 1080p: already right
+    }
+    // The block may be bound by more than one draw: values corrected once stay as they are.
+    if (const auto it = s.corrected.find(address);
+        it != s.corrected.end() && it->second == std::pair{c[0], c[1]}) {
+        ++s.same;
+        return false;
+    }
+    ++s.fixed;
+    fixed[0] = c[0] / x_scale;
+    fixed[1] = c[1] / y_scale;
+    if (s.corrected.size() >= 512) {
+        s.corrected.clear();
+    }
+    s.corrected[address] = {fixed[0], fixed[1]};
+    if (!s.reported) {
+        s.reported = true;
+        std::printf("Aim focus: crosshair box centre %.4f,%.4f -> %.4f,%.4f (render %ux%u)\n", c[0], c[1],
+                    fixed[0], fixed[1], u32(1.0f / inv_width + 0.5f), u32(1.0f / inv_height + 0.5f));
+        std::fflush(stdout);
+    }
+    return true;
+}
+} // namespace
+
+static void FixAimFocusCentre(Core::MemoryManager* memory, VideoCore::BufferCache& buffer_cache,
+                              VAddr address) {
+    auto& s = AimFocus();
+    AimFocusCount();
+    if (!AimFocusEnabled() || !memory->IsValidGpuMapping(address, 32)) {
+        ++s.unmapped;
         return;
     }
     float c[8];
     memory->CopySparseMemory(address, reinterpret_cast<u8*>(c), sizeof(c));
-    const float inv_width = c[6], inv_height = c[7];
-    if (!(inv_width > 0.0f && inv_width < 1.0f && inv_height > 0.0f && inv_height < 1.0f)) {
-        ++n_odd;
+    std::scoped_lock lock{s.mutex};
+    float fixed[2];
+    if (!AimFocusCorrection(c, address, fixed)) {
         return;
     }
-    const float x_scale = 1920.0f * inv_width, y_scale = 1080.0f * inv_height;
-    if (std::abs(x_scale - 1.0f) < 1e-4f && std::abs(y_scale - 1.0f) < 1e-4f) {
-        ++n_native;
-        return; // 1080p: already right
-    }
-    // The block may be bound by more than one draw: values corrected once stay as they are.
-    static std::mutex mutex;
-    static std::unordered_map<VAddr, std::pair<float, float>> corrected;
-    std::scoped_lock lock{mutex};
-    if (const auto it = corrected.find(address);
-        it != corrected.end() && it->second == std::pair{c[0], c[1]}) {
-        ++n_same;
-        return;
-    }
-    ++n_fixed;
-    const float fixed[2] = {c[0] / x_scale, c[1] / y_scale};
     // gow3 20 Oct 2026: written through to the GPU's copy as well (BufferCache::WriteThrough).
     // A write to the backing view alone is not seen by the page tracking: when another draw had
     // already uploaded the block in that frame, the GPU kept the uncorrected centre. The user
     // saw the aim blur again in Uncharted 2 at 4K: the focus read back alternated between the
     // target's 2.1 m and 5.64 m, the wall beside Nate.
     if (buffer_cache.WriteThrough(address, fixed, sizeof(fixed))) {
-        ++n_through;
+        ++s.through;
     } else {
         memory->TryWriteBacking(reinterpret_cast<void*>(address), fixed, sizeof(fixed));
     }
-    if (corrected.size() >= 512) {
-        corrected.clear();
+}
+
+// gow3 28 Oct 2026 (GitHub #276, aim blur with DLAA at 3440x1440 and 4K, Uncharted 2 and 3):
+// with multithreaded rendering (GOW3_DRAW_PIPE) the box constants reach the GPU as a copy in the
+// constant ring made when the draw is queued, and BindBuffers binds that copy without calling
+// FixAimFocusCentre: the centre stayed uncorrected (3440x1440: uv 0.28,0.38 instead of 0.5,0.5)
+// and the focus came from beside the crosshair. The ring copy `dst` is corrected here; the
+// game's own block is left as it wrote it.
+static void FixAimFocusCentreRing(u8* dst, VAddr address, u64 size) {
+    if (size < 32) {
+        return;
     }
-    corrected[address] = {fixed[0], fixed[1]};
-    static bool reported = false;
-    if (!reported) {
-        reported = true;
-        std::printf("Aim focus: crosshair box centre %.4f,%.4f -> %.4f,%.4f (render %ux%u)\n", c[0], c[1],
-                    fixed[0], fixed[1], u32(1.0f / inv_width + 0.5f), u32(1.0f / inv_height + 0.5f));
-        std::fflush(stdout);
+    auto& s = AimFocus();
+    AimFocusCount();
+    if (!AimFocusEnabled()) {
+        ++s.unmapped;
+        return;
+    }
+    float c[8];
+    std::memcpy(c, dst, sizeof(c));
+    std::scoped_lock lock{s.mutex};
+    float fixed[2];
+    if (AimFocusCorrection(c, address, fixed)) {
+        std::memcpy(dst, fixed, sizeof(fixed));
+        ++s.ring;
     }
 }
 
@@ -5017,7 +5610,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             if (unbound || garbage) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
-                const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                const u64 size = mapped_size; // the clamp above (same range)
                 // gow3 diagnostics (GOW3_TRACE_BIND_RANGE=<lo>:<hi> hex): bindings that overlap
                 // the range, by shader and slot, 5 s statistics.
                 {
@@ -5348,7 +5941,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     }
     const u32 first_image_idx = image_infos.size();
     TextureSet* set_slot = nullptr;
-    if (!on_helper && BindTexturesFromSet(stage, prepared, first_image_idx, barrier, set_slot)) {
+    if (!on_helper && !GarbageSlotTarget(stage.pgm_hash) &&
+        BindTexturesFromSet(stage, prepared, first_image_idx, barrier, set_slot)) {
         // Descriptor writes: one per image (no mip arrays in a memoized set).
         for (u32 i = 0; i < stage.images.size(); ++i) {
             auto& set_write = set_writes[write_index++];
@@ -5389,8 +5983,36 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         const auto& image_desc = stage.images[image_index];
         auto fetched_tsharp =
             prepared ? prepared->image_sharps[image_index] : image_desc.GetSharp(stage);
+        // The pipeline layout's descriptor count for this slot (Shader::ImageResource::
+        // NumBindings of the same T#), taken before the test knobs below edit the T#.
+        const u32 layout_count =
+            image_desc.mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex
+                ? static_cast<u32>(fetched_tsharp.last_level - fetched_tsharp.base_level + 1)
+                : 1u;
         TestGarbageTSharp(fetched_tsharp);
+        TestGarbageSlot(stage, image_index, image_desc, fetched_tsharp);
         const auto tsharp = fetched_tsharp;
+        // A null descriptor for this slot. gow3 1 Nov 2026 (TypedNullImages): of the binding's
+        // own type (storage for a written image) and with the layout's descriptor count.
+        const auto bind_null = [&](const char* reason) {
+            auto& null_desc = image_desc_storage.emplace_back();
+            u32 count = 1;
+            if (TypedNullImages()) {
+                if (image_desc.is_written) {
+                    null_desc.type = VideoCore::TextureCache::BindingType::Storage;
+                }
+                count = layout_count;
+            }
+            for (u32 i = 0; i < count; ++i) {
+                image_bindings.emplace_back(VideoCore::ImageId{}, &null_desc);
+                image_binding_entries.push_back(nullptr);
+                binding_proxy_ok.push_back(false);
+            }
+            image_descriptor_array_sizes.push_back(count);
+            if (reason) {
+                NoteNullImage(stage, image_index, image_desc, tsharp, count, reason);
+            }
+        };
         if (TracedShader(stage.pgm_hash)) {
             static std::atomic<int> traced{0};
             if (traced.fetch_add(1) < 80) {
@@ -5412,10 +6034,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            // No texture: the game's own empty slot, or a T# GetSharp nulled (reserved tile
+            // mode or swizzle, inverted mips). Logged for storage slots only (the mistyped ones).
+            bind_null(image_desc.is_written ? "no image (null T#)" : nullptr);
             continue;
         }
 
@@ -5429,10 +6050,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             if (!prepared && !on_helper && (image_desc.sharp_fetch.load_mask & 1)) {
                 DescribeSharpSource(stage, image_desc.sharp_fetch.offsets[0], "texture");
             }
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            bind_null(!memory->IsValidGpuMapping(tsharp.Address(), 0) ? "rejected, base not mapped"
+                      : !IsKnownFormat(data_fmt, num_fmt)            ? "rejected, unknown format"
+                                                                     : "rejected, impossible fields");
             continue;
         }
 
@@ -5458,10 +6078,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                             stage.pgm_hash, tsharp.Address(), desc_entry.desc.info.guest_size,
                             tsharp.width + 1, tsharp.height + 1);
             }
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            bind_null("garbage, impossible image size or range");
             continue;
         }
         // GOW3_SCENE_DEBUG: proxied scene targets this binding reads at the native size, and why.
@@ -5683,6 +6300,7 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
+        TestGarbageSamplerSlot(stage, sampler_index, ssharp);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
@@ -6206,7 +6824,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         image.usage.depth_target = true;
         if (upscaler->Enabled()) {
             VulkanUpscalerTarget depth_redirect;
-            depth_redirected = upscaler->RedirectDepth(image_id, depth_redirect);
+            depth_redirected =
+                upscaler->RedirectDepth(image_id, depth_redirect, color_redirected);
             if (depth_redirected) {
                 guest_extent = {image.info.size.width, image.info.size.height};
                 attachment.image_view = depth_redirect.view;

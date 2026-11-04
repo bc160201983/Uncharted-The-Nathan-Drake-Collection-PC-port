@@ -37,7 +37,7 @@ mkdir -p "$stage/gow3_pc/out/hdr"
 cp gow3_pc/hdr/*.spv "$stage/gow3_pc/out/hdr/"
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/install_update.py \
-    tools/net_overlay.py "$stage/tools/"
+    tools/net_overlay.py tools/check_game_files.py tools/game_files_102.json.gz "$stage/tools/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
 mkdir -p "$stage/tools/pkgtool"
 cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool/"
@@ -96,7 +96,14 @@ done
 if [[ -f gow3_pc/out/gow3_dlss.dll && -f gow3_pc/out/nvngx_dlss.dll ]]; then
     cp gow3_pc/out/gow3_dlss.dll gow3_pc/out/nvngx_dlss.dll "$stage/gow3_pc/out/"
     mkdir -p "$licenses/nvidia-dlss" "$licenses/gow3-dlss-bridge"
-    cp downloads/dlss-sdk-*/LICENSE.txt "$licenses/nvidia-dlss/LICENSE.txt"
+    dlss_license=${NVIDIA_DLSS_LICENSE:-}
+    if [[ -z $dlss_license ]]; then
+        for file in downloads/dlss-sdk-*/LICENSE.txt; do
+            [[ -f $file ]] && { dlss_license=$file; break; }
+        done
+    fi
+    [[ -f $dlss_license ]] || { echo 'Need the DLSS license (NVIDIA_DLSS_LICENSE).' >&2; exit 1; }
+    cp "$dlss_license" "$licenses/nvidia-dlss/LICENSE.txt"
     cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$licenses/gow3-dlss-bridge/LICENSE.txt"
 fi
 if [[ -f gow3_pc/fsr4_shaders/fsr4_model_v07_i8_native_1080_pre.spv ]]; then
@@ -129,8 +136,7 @@ if [[ -n $forbidden ]]; then
 fi
 
 rm -f dist/Uncharted-windows.zip
-(cd dist/stage && powershell -NoProfile -Command \
-    "Compress-Archive -Path Uncharted-windows -DestinationPath ../Uncharted-windows.zip")
+"$python_home/python.exe" -m zipfile -c dist/Uncharted-windows.zip "$stage"
 rm -rf dist/Uncharted-windows
 mv "$stage" dist/Uncharted-windows
 du -sh dist/Uncharted-windows dist/Uncharted-windows.zip

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 #include "core/memory.h"
@@ -15,12 +16,27 @@ namespace VideoCore {
 Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sampler,
                  const AmdGpu::BorderColorBuffer border_color_base, const bool is_depth, float extra_lod_bias) {
     using namespace Vulkan;
+    // gow3 29 Oct 2026 (graphics fidelity): GOW3_ANISOTROPY=<2..16> raises texture filtering for
+    // mipmapped, linearly filtered colour textures (world surfaces seen at an angle) to at least
+    // that ratio; depth/compare samplers, point-filtered and mip-less textures (UI, lookup tables,
+    // render targets) keep the game's own setting. 0 or unset = the game's setting.
+    static const float forced_aniso = [] {
+        const char* env = std::getenv("GOW3_ANISOTROPY");
+        const float value = env ? static_cast<float>(std::atof(env)) : 0.0f;
+        return value >= 2.0f ? std::min(value, 16.0f) : 0.0f;
+    }();
+    const bool force_aniso = forced_aniso > 0.0f && !is_depth &&
+                             sampler.xy_min_filter != AmdGpu::Filter::Point &&
+                             sampler.xy_min_filter != AmdGpu::Filter::AnisoPoint &&
+                             sampler.mip_filter != AmdGpu::MipFilter::None && sampler.MaxLod() > 0.0f;
     const bool anisotropy_enable = instance.IsAnisotropicFilteringSupported() &&
-                                   (AmdGpu::IsAnisoFilter(sampler.xy_mag_filter) ||
+                                   (force_aniso || AmdGpu::IsAnisoFilter(sampler.xy_mag_filter) ||
                                     AmdGpu::IsAnisoFilter(sampler.xy_min_filter));
     const float max_anisotropy =
-        anisotropy_enable ? std::clamp(sampler.MaxAniso(), 1.0f, instance.MaxSamplerAnisotropy())
-                          : 1.0f;
+        anisotropy_enable
+            ? std::clamp(force_aniso ? std::max(sampler.MaxAniso(), forced_aniso) : sampler.MaxAniso(),
+                         1.0f, instance.MaxSamplerAnisotropy())
+            : 1.0f;
     auto border_color = LiverpoolToVK::BorderColor(sampler.border_color_type);
     if (border_color == vk::BorderColor::eFloatCustomEXT &&
         !instance.IsCustomBorderColorSupported()) {
@@ -90,6 +106,10 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
     if (override_mode == 3 || override_mode == 4) {
         border_color = override_mode == 3 ? vk::BorderColor::eFloatOpaqueBlack : vk::BorderColor::eFloatOpaqueWhite;
     }
+    static const bool guard_lod = [] {
+        const char* env = std::getenv("GOW3_TSHARP_GUARD");
+        return !(env && env[0] == '0');
+    }();
     const auto address = [&](AmdGpu::ClampMode mode) {
         if (override_mode == 3 || override_mode == 4) {
             return vk::SamplerAddressMode::eClampToBorder;
@@ -117,7 +137,10 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
                      : sampler_compare_override == 2 ? vk::CompareOp::eAlways
                                                       : LiverpoolToVK::DepthCompare(sampler.depth_compare_func),
         .minLod = sampler.MinLod(),
-        .maxLod = sampler.MaxLod(),
+        // gow3 1 Nov 2026: a garbage S# (resource table slots holding other data) can have
+        // min LOD > max LOD, which Vulkan forbids (VUID-VkSamplerCreateInfo-maxLod-01973). Real
+        // S#s never do. GOW3_TSHARP_GUARD=0: as given (tests).
+        .maxLod = guard_lod ? std::max(sampler.MinLod(), sampler.MaxLod()) : sampler.MaxLod(),
         .borderColor = border_color,
         .unnormalizedCoordinates = false, // Handled in shader due to Vulkan limitations.
     };

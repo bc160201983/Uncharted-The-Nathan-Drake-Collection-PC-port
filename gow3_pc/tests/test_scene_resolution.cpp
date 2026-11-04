@@ -12,6 +12,10 @@
 #include "video_core/texture_cache/blit_helper.h"
 #include <vk_mem_alloc.h>
 
+// Match the renderer's Vulkan-Hpp dispatcher layout before enabling test assertions.
+#undef NDEBUG
+#include <cassert>
+
 int main() {
     using namespace Vulkan;
     Instance instance(0, false);

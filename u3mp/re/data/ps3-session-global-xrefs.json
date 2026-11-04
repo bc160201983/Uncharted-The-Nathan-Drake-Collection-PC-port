@@ -1,0 +1,2153 @@
+{
+  "targets": [
+    "0x122ec60"
+  ],
+  "pointer_slots": {
+    "0x112bcdc": [
+      "0x122ec60"
+    ],
+    "0x112d104": [
+      "0x122ec60"
+    ],
+    "0x112e074": [
+      "0x122ec60"
+    ],
+    "0x112e2cc": [
+      "0x122ec60"
+    ],
+    "0x112e718": [
+      "0x122ec60"
+    ],
+    "0x112ec10": [
+      "0x122ec60"
+    ],
+    "0x112ef30": [
+      "0x122ec60"
+    ],
+    "0x112ef6c": [
+      "0x122ec60"
+    ],
+    "0x112f134": [
+      "0x122ec60"
+    ],
+    "0x112f384": [
+      "0x122ec60"
+    ],
+    "0x112fa20": [
+      "0x122ec60"
+    ],
+    "0x112fc70": [
+      "0x122ec60"
+    ],
+    "0x1130894": [
+      "0x122ec60"
+    ],
+    "0x11309d8": [
+      "0x122ec60"
+    ]
+  },
+  "xrefs": {
+    "0x122ec60": [
+      {
+        "function": "0x002529FC",
+        "function_end": "0x00252B18",
+        "instruction": "0x00252A74",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7F7C(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112BCDC",
+        "kind": "load"
+      },
+      {
+        "function": "0x0027F268",
+        "function_end": "0x0027FB14",
+        "instruction": "0x0027F8A8",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x0027F268",
+        "function_end": "0x0027FB14",
+        "instruction": "0x0027FA8C",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00282718",
+        "function_end": "0x002827DC",
+        "instruction": "0x002827B0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00282BC0",
+        "function_end": "0x00282C78",
+        "instruction": "0x00282C14",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00282E98",
+        "function_end": "0x00282FA4",
+        "instruction": "0x00282EC4",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00282FA4",
+        "function_end": "0x00283154",
+        "instruction": "0x00282FD0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00283DF0",
+        "function_end": "0x00284178",
+        "instruction": "0x00283EA0",
+        "mnemonic": "lwz",
+        "operands": "r31, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00283DF0",
+        "function_end": "0x00284178",
+        "instruction": "0x00284084",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00284178",
+        "function_end": "0x00284520",
+        "instruction": "0x002843E8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00284178",
+        "function_end": "0x00284520",
+        "instruction": "0x002843F8",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002846D8",
+        "function_end": "0x00284854",
+        "instruction": "0x00284728",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00286248",
+        "function_end": "0x002864C0",
+        "instruction": "0x0028629C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00286248",
+        "function_end": "0x002864C0",
+        "instruction": "0x002862E0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00286248",
+        "function_end": "0x002864C0",
+        "instruction": "0x00286474",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002867EC",
+        "function_end": "0x00286BFC",
+        "instruction": "0x00286A3C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002867EC",
+        "function_end": "0x00286BFC",
+        "instruction": "0x00286A5C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002867EC",
+        "function_end": "0x00286BFC",
+        "instruction": "0x00286A74",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002872B0",
+        "function_end": "0x00287770",
+        "instruction": "0x002874F0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00287770",
+        "function_end": "0x00288000",
+        "instruction": "0x00287D40",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00287770",
+        "function_end": "0x00288000",
+        "instruction": "0x00287E64",
+        "mnemonic": "lwz",
+        "operands": "r11, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00287770",
+        "function_end": "0x00288000",
+        "instruction": "0x00287EDC",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00288000",
+        "function_end": "0x00288394",
+        "instruction": "0x00288064",
+        "mnemonic": "lwz",
+        "operands": "r27, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00288D1C",
+        "function_end": "0x00288FD0",
+        "instruction": "0x00288DB4",
+        "mnemonic": "lwz",
+        "operands": "r26, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00288D1C",
+        "function_end": "0x00288FD0",
+        "instruction": "0x00288ECC",
+        "mnemonic": "lwz",
+        "operands": "r4, 0x0(r9)",
+        "toc": "0x011C2070",
+        "via": "0x0122EC60",
+        "kind": "load"
+      },
+      {
+        "function": "0x002892A8",
+        "function_end": "0x00289CC8",
+        "instruction": "0x00289650",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002892A8",
+        "function_end": "0x00289CC8",
+        "instruction": "0x0028976C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002892A8",
+        "function_end": "0x00289CC8",
+        "instruction": "0x0028990C",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002892A8",
+        "function_end": "0x00289CC8",
+        "instruction": "0x00289AF4",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002892A8",
+        "function_end": "0x00289CC8",
+        "instruction": "0x00289B80",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002892A8",
+        "function_end": "0x00289CC8",
+        "instruction": "0x00289BA8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x0028C4A0",
+        "function_end": "0x0028C6D8",
+        "instruction": "0x0028C644",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x0028CB80",
+        "function_end": "0x0028D358",
+        "instruction": "0x0028CD68",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x0028DBF8",
+        "function_end": "0x0028F070",
+        "instruction": "0x0028E9BC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x0028DBF8",
+        "function_end": "0x0028F070",
+        "instruction": "0x0028E9C4",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x0028DBF8",
+        "function_end": "0x0028F070",
+        "instruction": "0x0028E9F8",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x0028DBF8",
+        "function_end": "0x0028F070",
+        "instruction": "0x0028EA98",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x0028FB64",
+        "function_end": "0x0028FD0C",
+        "instruction": "0x0028FC70",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00290CA0",
+        "function_end": "0x0029246C",
+        "instruction": "0x00291A18",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00292BAC",
+        "function_end": "0x00292E3C",
+        "instruction": "0x00292DF4",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00292E3C",
+        "function_end": "0x0029366C",
+        "instruction": "0x00293168",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00292E3C",
+        "function_end": "0x0029366C",
+        "instruction": "0x002931B8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00292E3C",
+        "function_end": "0x0029366C",
+        "instruction": "0x00293554",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00294858",
+        "mnemonic": "lwz",
+        "operands": "r24, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00294A24",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00294A44",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00294DF8",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00295140",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x002959F8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00295E10",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00295E34",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00295E7C",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x00294798",
+        "function_end": "0x00295FF8",
+        "instruction": "0x00295F48",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7D80(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112D104",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B3EEC",
+        "function_end": "0x002B4040",
+        "instruction": "0x002B3F24",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4040",
+        "function_end": "0x002B40DC",
+        "instruction": "0x002B4060",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B40DC",
+        "function_end": "0x002B420C",
+        "instruction": "0x002B40FC",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B420C",
+        "function_end": "0x002B4444",
+        "instruction": "0x002B42BC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B420C",
+        "function_end": "0x002B4444",
+        "instruction": "0x002B4338",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B420C",
+        "function_end": "0x002B4444",
+        "instruction": "0x002B4378",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B420C",
+        "function_end": "0x002B4444",
+        "instruction": "0x002B43A8",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4444",
+        "function_end": "0x002B4B04",
+        "instruction": "0x002B44B4",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4444",
+        "function_end": "0x002B4B04",
+        "instruction": "0x002B45D0",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4444",
+        "function_end": "0x002B4B04",
+        "instruction": "0x002B4694",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4444",
+        "function_end": "0x002B4B04",
+        "instruction": "0x002B46F8",
+        "mnemonic": "lwz",
+        "operands": "r31, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4444",
+        "function_end": "0x002B4B04",
+        "instruction": "0x002B479C",
+        "mnemonic": "lwz",
+        "operands": "r4, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4444",
+        "function_end": "0x002B4B04",
+        "instruction": "0x002B4864",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4444",
+        "function_end": "0x002B4B04",
+        "instruction": "0x002B4A74",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4B04",
+        "function_end": "0x002B534C",
+        "instruction": "0x002B4DC0",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4B04",
+        "function_end": "0x002B534C",
+        "instruction": "0x002B4ED8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4B04",
+        "function_end": "0x002B534C",
+        "instruction": "0x002B504C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B4B04",
+        "function_end": "0x002B534C",
+        "instruction": "0x002B51A0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B534C",
+        "function_end": "0x002B59A0",
+        "instruction": "0x002B53D4",
+        "mnemonic": "lwz",
+        "operands": "r31, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B534C",
+        "function_end": "0x002B59A0",
+        "instruction": "0x002B54D4",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B534C",
+        "function_end": "0x002B59A0",
+        "instruction": "0x002B562C",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B534C",
+        "function_end": "0x002B59A0",
+        "instruction": "0x002B5674",
+        "mnemonic": "lwz",
+        "operands": "r31, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B534C",
+        "function_end": "0x002B59A0",
+        "instruction": "0x002B572C",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B534C",
+        "function_end": "0x002B59A0",
+        "instruction": "0x002B57E4",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002B534C",
+        "function_end": "0x002B59A0",
+        "instruction": "0x002B583C",
+        "mnemonic": "lwz",
+        "operands": "r31, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E074",
+        "kind": "load"
+      },
+      {
+        "function": "0x002C770C",
+        "function_end": "0x002C7780",
+        "instruction": "0x002C775C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002C7900",
+        "function_end": "0x002C7A68",
+        "instruction": "0x002C79F4",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002C9750",
+        "function_end": "0x002C9960",
+        "instruction": "0x002C97B8",
+        "mnemonic": "lwz",
+        "operands": "r10, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002CAFF0",
+        "function_end": "0x002CB10C",
+        "instruction": "0x002CB02C",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002CC524",
+        "function_end": "0x002CCA9C",
+        "instruction": "0x002CC580",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002CC524",
+        "function_end": "0x002CCA9C",
+        "instruction": "0x002CC668",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002CC524",
+        "function_end": "0x002CCA9C",
+        "instruction": "0x002CC704",
+        "mnemonic": "lwz",
+        "operands": "r26, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002E88FC",
+        "function_end": "0x002E8AB0",
+        "instruction": "0x002E8980",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002E8AB0",
+        "function_end": "0x002E8BC0",
+        "instruction": "0x002E8B18",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002ECC20",
+        "function_end": "0x002ECCF4",
+        "instruction": "0x002ECCA0",
+        "mnemonic": "lwz",
+        "operands": "r0, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002ECC20",
+        "function_end": "0x002ECCF4",
+        "instruction": "0x002ECCD8",
+        "mnemonic": "nop",
+        "operands": "",
+        "toc": "0x011C2070",
+        "via": "0x0122EC60",
+        "kind": "address"
+      },
+      {
+        "function": "0x002F44A4",
+        "function_end": "0x002F4FD8",
+        "instruction": "0x002F4504",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002F4FD8",
+        "function_end": "0x002F54D8",
+        "instruction": "0x002F4FF8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002F4FD8",
+        "function_end": "0x002F54D8",
+        "instruction": "0x002F53BC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002F4FD8",
+        "function_end": "0x002F54D8",
+        "instruction": "0x002F5480",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002F54D8",
+        "function_end": "0x002F5600",
+        "instruction": "0x002F557C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7EB8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E2CC",
+        "kind": "load"
+      },
+      {
+        "function": "0x002F9754",
+        "function_end": "0x002F9800",
+        "instruction": "0x002F97CC",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x002FA268",
+        "function_end": "0x002FA2A0",
+        "instruction": "0x002FA27C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00300B70",
+        "function_end": "0x00300C50",
+        "instruction": "0x00300B90",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00301098",
+        "function_end": "0x00301214",
+        "instruction": "0x00301138",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00301840",
+        "function_end": "0x00301A28",
+        "instruction": "0x00301860",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x003033A4",
+        "function_end": "0x003038B0",
+        "instruction": "0x00303638",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x003033A4",
+        "function_end": "0x003038B0",
+        "instruction": "0x0030368C",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00304948",
+        "function_end": "0x00304EA0",
+        "instruction": "0x00304BA8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00305598",
+        "function_end": "0x0030573C",
+        "instruction": "0x003055D8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00309CA4",
+        "function_end": "0x00309F08",
+        "instruction": "0x00309EA0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x0030B718",
+        "function_end": "0x0030D16C",
+        "instruction": "0x0030B7D0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x0030B718",
+        "function_end": "0x0030D16C",
+        "instruction": "0x0030BD04",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x0030E7A4",
+        "function_end": "0x0030ED24",
+        "instruction": "0x0030E894",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x0030E7A4",
+        "function_end": "0x0030ED24",
+        "instruction": "0x0030E8EC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x0030ED24",
+        "function_end": "0x0030EE70",
+        "instruction": "0x0030EE14",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x0030F564",
+        "function_end": "0x0030FA38",
+        "instruction": "0x0030F76C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x003144B0",
+        "function_end": "0x00315108",
+        "instruction": "0x0031467C",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x003144B0",
+        "function_end": "0x00315108",
+        "instruction": "0x003147AC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00315108",
+        "function_end": "0x003161CC",
+        "instruction": "0x003155A0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00317878",
+        "function_end": "0x0031807C",
+        "instruction": "0x00317A98",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00317878",
+        "function_end": "0x0031807C",
+        "instruction": "0x00317AF8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00317878",
+        "function_end": "0x0031807C",
+        "instruction": "0x00317BA8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x00317878",
+        "function_end": "0x0031807C",
+        "instruction": "0x00317E54",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031B458",
+        "function_end": "0x0031BD14",
+        "instruction": "0x0031B7B4",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FEC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112E718",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E100",
+        "function_end": "0x0031E1D4",
+        "instruction": "0x0031E128",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E1D4",
+        "function_end": "0x0031E284",
+        "instruction": "0x0031E1F4",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E1D4",
+        "function_end": "0x0031E284",
+        "instruction": "0x0031E23C",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E36C",
+        "function_end": "0x0031E4C0",
+        "instruction": "0x0031E3D4",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E36C",
+        "function_end": "0x0031E4C0",
+        "instruction": "0x0031E480",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E4C0",
+        "function_end": "0x0031E73C",
+        "instruction": "0x0031E50C",
+        "mnemonic": "lwz",
+        "operands": "r31, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E4C0",
+        "function_end": "0x0031E73C",
+        "instruction": "0x0031E628",
+        "mnemonic": "lwz",
+        "operands": "r31, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E73C",
+        "function_end": "0x0031EA80",
+        "instruction": "0x0031E868",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E73C",
+        "function_end": "0x0031EA80",
+        "instruction": "0x0031E8E4",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031E73C",
+        "function_end": "0x0031EA80",
+        "instruction": "0x0031E914",
+        "mnemonic": "lwz",
+        "operands": "r4, 0x0(r9)",
+        "toc": "0x011C2070",
+        "via": "0x0122EC60",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EA80",
+        "function_end": "0x0031EC7C",
+        "instruction": "0x0031EAD0",
+        "mnemonic": "lwz",
+        "operands": "r11, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EC7C",
+        "function_end": "0x0031F120",
+        "instruction": "0x0031ED38",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EC7C",
+        "function_end": "0x0031F120",
+        "instruction": "0x0031EDB4",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EC7C",
+        "function_end": "0x0031F120",
+        "instruction": "0x0031EE18",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EC7C",
+        "function_end": "0x0031F120",
+        "instruction": "0x0031EE6C",
+        "mnemonic": "lwz",
+        "operands": "r27, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EC7C",
+        "function_end": "0x0031F120",
+        "instruction": "0x0031EF44",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EC7C",
+        "function_end": "0x0031F120",
+        "instruction": "0x0031EF70",
+        "mnemonic": "lwz",
+        "operands": "r0, 0x0(r9)",
+        "toc": "0x011C2070",
+        "via": "0x0122EC60",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EC7C",
+        "function_end": "0x0031F120",
+        "instruction": "0x0031EF88",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x0031EC7C",
+        "function_end": "0x0031F120",
+        "instruction": "0x0031F09C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FDC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EC10",
+        "kind": "load"
+      },
+      {
+        "function": "0x00321CF8",
+        "function_end": "0x00321D34",
+        "instruction": "0x00321D18",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x8000(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF30",
+        "kind": "load"
+      },
+      {
+        "function": "0x00321D44",
+        "function_end": "0x00321E04",
+        "instruction": "0x00321D68",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x8000(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF30",
+        "kind": "load"
+      },
+      {
+        "function": "0x00321E04",
+        "function_end": "0x00322214",
+        "instruction": "0x003221CC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x8000(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF30",
+        "kind": "load"
+      },
+      {
+        "function": "0x00322B24",
+        "function_end": "0x00322BDC",
+        "instruction": "0x00322B44",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00322BDC",
+        "function_end": "0x00322CCC",
+        "instruction": "0x00322BFC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00322F3C",
+        "function_end": "0x00323018",
+        "instruction": "0x00322F54",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00323188",
+        "function_end": "0x00323314",
+        "instruction": "0x003231AC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x003234A8",
+        "function_end": "0x00323614",
+        "instruction": "0x003234C8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00323614",
+        "function_end": "0x0032379C",
+        "instruction": "0x00323634",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032379C",
+        "function_end": "0x00323B80",
+        "instruction": "0x003237BC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00323B80",
+        "function_end": "0x00324488",
+        "instruction": "0x00323E60",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00323B80",
+        "function_end": "0x00324488",
+        "instruction": "0x00323F04",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00323B80",
+        "function_end": "0x00324488",
+        "instruction": "0x00323F54",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00323B80",
+        "function_end": "0x00324488",
+        "instruction": "0x00323F8C",
+        "mnemonic": "ld",
+        "operands": "r0, 0x0(r3)",
+        "toc": "0x011C2070",
+        "via": "0x0122EC60",
+        "kind": "load"
+      },
+      {
+        "function": "0x00323B80",
+        "function_end": "0x00324488",
+        "instruction": "0x0032401C",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x00323B80",
+        "function_end": "0x00324488",
+        "instruction": "0x003240A0",
+        "mnemonic": "ld",
+        "operands": "r7, 0x0(r25)",
+        "toc": "0x011C2070",
+        "via": "0x0122EC60",
+        "kind": "load"
+      },
+      {
+        "function": "0x003245B0",
+        "function_end": "0x003246B0",
+        "instruction": "0x00324640",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x003245B0",
+        "function_end": "0x003246B0",
+        "instruction": "0x00324664",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x003246B0",
+        "function_end": "0x0032492C",
+        "instruction": "0x0032480C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00324B78",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00324DA8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00324DC8",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00325158",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00325220",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003252D0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x0032536C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003255F8",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003257EC",
+        "mnemonic": "lwz",
+        "operands": "r4, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00325918",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00325A2C",
+        "mnemonic": "lwz",
+        "operands": "r27, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00325C70",
+        "mnemonic": "lwz",
+        "operands": "r4, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00325CF4",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00325DA8",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003261E8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326218",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003262A0",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326370",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003263B4",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326414",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003264D4",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003265B4",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x0032680C",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003269B4",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326A8C",
+        "mnemonic": "lwz",
+        "operands": "r28, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326C44",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326DC0",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326E24",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326E80",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00326FA0",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003270DC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x0032711C",
+        "mnemonic": "lwz",
+        "operands": "r27, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327360",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327418",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x003275E0",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327760",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x0032788C",
+        "mnemonic": "lwz",
+        "operands": "r27, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327948",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327A1C",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327AC8",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327B6C",
+        "mnemonic": "lwz",
+        "operands": "r9, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327BB4",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032492C",
+        "function_end": "0x0032806C",
+        "instruction": "0x00327D4C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112EF6C",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032D3D4",
+        "function_end": "0x0032D4D8",
+        "instruction": "0x0032D424",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7F34(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112F384",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032D3D4",
+        "function_end": "0x0032D4D8",
+        "instruction": "0x0032D448",
+        "mnemonic": "lwz",
+        "operands": "r9, 0x0(r3)",
+        "toc": "0x011C2070",
+        "via": "0x0122EC60",
+        "kind": "load"
+      },
+      {
+        "function": "0x0032D3D4",
+        "function_end": "0x0032D4D8",
+        "instruction": "0x0032D464",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7F34(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112F384",
+        "kind": "load"
+      },
+      {
+        "function": "0x00345C98",
+        "function_end": "0x0034634C",
+        "instruction": "0x00345DEC",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7F34(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112F384",
+        "kind": "load"
+      },
+      {
+        "function": "0x00345C98",
+        "function_end": "0x0034634C",
+        "instruction": "0x00345EB8",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7F34(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112F384",
+        "kind": "load"
+      },
+      {
+        "function": "0x0034634C",
+        "function_end": "0x00346C98",
+        "instruction": "0x00346B88",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7F34(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112F384",
+        "kind": "load"
+      },
+      {
+        "function": "0x003540D8",
+        "function_end": "0x003541C4",
+        "instruction": "0x0035415C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FE0(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112FA20",
+        "kind": "load"
+      },
+      {
+        "function": "0x0035BF14",
+        "function_end": "0x0035C7A4",
+        "instruction": "0x0035C69C",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7ED8(r30)",
+        "toc": "0x011C2070",
+        "via": "0x0112FC70",
+        "kind": "load"
+      },
+      {
+        "function": "0x00377144",
+        "function_end": "0x003774F4",
+        "instruction": "0x00377298",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x01130894",
+        "kind": "load"
+      },
+      {
+        "function": "0x0037771C",
+        "function_end": "0x00377804",
+        "instruction": "0x00377794",
+        "mnemonic": "lwz",
+        "operands": "r3, -0x7FFC(r30)",
+        "toc": "0x011C2070",
+        "via": "0x01130894",
+        "kind": "load"
+      },
+      {
+        "function": "0x0037ECE4",
+        "function_end": "0x0037F01C",
+        "instruction": "0x0037EDCC",
+        "mnemonic": "lwz",
+        "operands": "r29, -0x7F08(r30)",
+        "toc": "0x011C2070",
+        "via": "0x011309D8",
+        "kind": "load"
+      }
+    ]
+  }
+}

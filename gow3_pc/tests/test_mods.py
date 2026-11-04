@@ -77,7 +77,12 @@ class ModTests(unittest.TestCase):
 
     def test_mod_symlinks_rejected(self):
         a = self.mod('A')
-        (a / 'dvdroot_ps4/escape').symlink_to(self.assets, target_is_directory=True)
+        try:
+            (a / 'dvdroot_ps4/escape').symlink_to(self.assets, target_is_directory=True)
+        except OSError as error:
+            if os.name == 'nt' and error.winerror == 1314:
+                self.skipTest('Creating symlinks requires Windows Developer Mode or elevation')
+            raise
         with self.assertRaises(ValueError):
             mods.build_overlay(self.game, self.root / 'out', [('A', a)])
 

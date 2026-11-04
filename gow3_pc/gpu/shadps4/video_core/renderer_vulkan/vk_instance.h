@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <span>
 #include <unordered_map>
 
@@ -19,6 +20,9 @@ struct WindowSystemInfo;
 VK_DEFINE_HANDLE(VmaAllocator)
 
 namespace Vulkan {
+
+/// gow3 1 Nov 2026: Instance::IsLowVideoMemory() for code without the instance (image.cpp).
+extern bool g_low_video_memory;
 
 class Instance {
 public:
@@ -285,6 +289,25 @@ public:
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
     }
 
+    /// gow3 1 Nov 2026 (#328): the subgroup size compute shaders must be given where the driver
+    /// may pick another one per shader (Intel: 8, 16 or 32), 0 where it cannot (NVIDIA: always
+    /// 32) or 64 is used (IsSubgroupSize64Supported). The recompiler splits the guest's 64-lane
+    /// waves by SubgroupSize(), so a shader the driver built narrower ran its wave work (ballots,
+    /// lane reads, LDS hand-offs) on the wrong lanes. GOW3_SUBGROUP_FIXED=0: off.
+    u32 FixedComputeSubgroupSize() const {
+        static const bool enabled = [] {
+            const char* env = std::getenv("GOW3_SUBGROUP_FIXED");
+            return !(env && env[0] == '0');
+        }();
+        const u32 size = vk11_props.subgroupSize;
+        if (!enabled || IsSubgroupSize64Supported() || !vk13_features.subgroupSizeControl ||
+            !(vk13_props.requiredSubgroupSizeStages & vk::ShaderStageFlagBits::eCompute) ||
+            vk13_props.minSubgroupSize >= size || size > vk13_props.maxSubgroupSize) {
+            return 0;
+        }
+        return size;
+    }
+
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
     bool IsWorkgroupMemoryExplicitLayoutSupported() const {
         return workgroup_memory_explicit_layout &&
@@ -375,6 +398,17 @@ public:
     /// Returns if the device is an integrated GPU.
     bool IsIntegrated() const {
         return properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu;
+    }
+
+    /// gow3 1 Nov 2026 (2 GB cards, experimental): GOW3_LOW_VRAM=1, or =auto on a discrete card
+    /// with at most 4.5 GiB of video memory; off otherwise. Memory reserves kept for speed are smaller.
+    bool IsLowVideoMemory() const {
+        return low_video_memory;
+    }
+
+    /// gow3 1 Nov 2026: shader reads of sparse memory that is not bound return zeros.
+    bool IsSparseResidencyStrict() const {
+        return properties.sparseProperties.residencyNonResidentStrict;
     }
 
     /// Returns the pipeline cache unique identifier
@@ -518,6 +552,11 @@ public:
     /// (VK_EXT_memory_budget: what this process can use now, other processes included).
     [[nodiscard]] u64 GetDeviceMemoryBudgetNow() const;
 
+    /// gow3 1 Nov 2026 (2 GB cards): GOW3_VRAM_REPORT=<file>: what the VMA allocator holds in
+    /// video memory (blocks vs allocations, per memory type) printed, and its full allocation
+    /// list (vmaBuildStatsString) written to <file>. A test aid.
+    void ReportAllocatorMemory() const;
+
     /// Returns the total memory budget available to the device.
     [[nodiscard]] u64 GetTotalMemoryBudget() const {
         return total_memory_budget;
@@ -603,6 +642,7 @@ private:
     bool device_fault{};
     bool memory_priority{};
     bool pageable_device_memory{};
+    bool low_video_memory{};
     bool address_binding_report{};
     bool pipeline_binaries{};
     vk::PipelineBinaryKeyKHR pipeline_binary_global_key{};

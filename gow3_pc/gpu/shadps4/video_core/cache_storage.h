@@ -61,6 +61,10 @@ public:
     size_t CountBlobs(BlobType type);
     /// gow3: the names of the blobs of a type (as Load takes them), without reading them.
     void ForEachBlobName(BlobType type, const std::function<void(const std::string& name)>& func);
+    /// gow3 26 Oct 2026: the cache folder (the zip file with the archived cache; empty before Open).
+    [[nodiscard]] std::filesystem::path Folder() const {
+        return opened ? cache_path : std::filesystem::path{};
+    }
 
 private:
     std::jthread io_worker{};

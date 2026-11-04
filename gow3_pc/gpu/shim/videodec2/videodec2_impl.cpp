@@ -366,8 +366,16 @@ bool VdecDecoder::WriteMovieCopy(const AVFrame& frame, u64 base) {
     }
     // The movie keeps its own shape inside the display size: black bars at the top and bottom
     // (16:10) or at the sides (ultrawide) instead of a stretched picture. 16:9 sizes fill it.
-    u32 fit_width = width, fit_height = height;
-    if ((u64)frame.width * height > (u64)frame.height * width) {
+    // gow3 1 Nov 2026 (GitHub #145, ultrawide players): GOW3_MOVIE_STRETCH=1 (launcher "Movies:
+    // Stretch") fills the whole display instead, as before 0.3.
+    static const bool stretch = [] {
+        const char* env = std::getenv("GOW3_MOVIE_STRETCH");
+        return env && env[0] == '1';
+    }();
+    u32 fit_width = width & ~1u, fit_height = height & ~1u;
+    if (stretch) {
+        // the whole display
+    } else if ((u64)frame.width * height > (u64)frame.height * width) {
         fit_height = std::min(height, (u32)((u64)width * frame.height / frame.width) & ~1u);
     } else {
         fit_width = std::min(width, (u32)((u64)height * frame.width / frame.height) & ~1u);

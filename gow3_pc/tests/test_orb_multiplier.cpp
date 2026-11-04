@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <chrono>
+#include <fstream>
 #include "gow3_settings.h"
 #ifdef _WIN32
 #include <windows.h>
@@ -92,16 +94,21 @@ int main(int argc, char** argv) {
     assert(settings.red_orbs_supported);
     gow3_orbs_status(0);
     assert(!settings.red_orbs_supported);
-    auto config = std::filesystem::temp_directory_path() / "gow3-orb-multiplier-test.ini";
+    auto config = std::filesystem::temp_directory_path() /
+        ("gow3-orb-multiplier-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".ini");
     assert(!std::filesystem::exists(config));
 #ifdef _WIN32
     _putenv_s("GOW3_CONFIG", config.string().c_str());
 #else
     setenv("GOW3_CONFIG", config.string().c_str(), 1);
 #endif
-    settings.red_orb_multiplier = 0.125f;
-    settings.cheats[0] = true;
-    settings.cheats[2] = true;
+    // Legacy GOW3 keys still load, but Uncharted's menu leaves them unchanged on disk.
+    {
+        std::ofstream out(config);
+        out << "red_orb_multiplier=0.125\ncheat_health=1\ncheat_item=1\n";
+    }
+    Gow3Settings::Load();
+    assert(settings.red_orb_multiplier == 0.125f && settings.cheats[0] && settings.cheats[2]);
     Gow3Settings::Save();
     settings.red_orb_multiplier = 1;
     settings.cheats[0] = false;

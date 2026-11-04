@@ -25,3 +25,8 @@ const MouseLookSite *runtime_mouselook_sites(unsigned *count);
 void runtime_mouselook_set_image(unsigned char *image);
 /* runtime_pad.c: the aim button (L2) was held at the last pad read. */
 int runtime_pad_aim_held(void);
+/* gow3 1 Nov 2026: GOW3_MOUSE_TRACE=<file> pad lines (runtime_pad.c sample_mouse, each read). */
+void runtime_mouselook_trace_pad(int direct, float stick_x, float stick_y);
+/* gow3 1 Nov 2026: code patches besides the entry hooks (Uncharted 1's stick reads after the follow
+ * camera's turn); probe.c calls it once after the sites, while the image is still writable. */
+void runtime_mouselook_install_patches(void);

@@ -138,6 +138,9 @@ struct Values {
     /// two SDL gamepad button names ("lefttrigger"/"righttrigger" for the triggers) joined by
     /// '+'; and the keyboard key that opens the menu (SDL key name). Guarded by ControlsMutex().
     std::string menu_pad = "lefttrigger+rightstick", menu_key = "Insert";
+    /// gow3 1 Nov 2026 (user): closes the game when L1 + R1 + View + Menu (controller) or
+    /// Ctrl + Shift + Q (keyboard) are held for 2 seconds (gow3_overlay.cpp CloseShortcut).
+    std::atomic<bool> close_shortcut{true};
     /// The games' own draw distances in percent (Uncharted 2 and 3, src/runtime_gamesettings.c):
     /// object fade distance, sun and point/spot light shadow distances.
     std::atomic<int> fade_distance{100}, sun_shadow_distance{100}, light_shadow_distance{100};
