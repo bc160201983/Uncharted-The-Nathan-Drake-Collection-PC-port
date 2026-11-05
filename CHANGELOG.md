@@ -4,6 +4,51 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 5 November 2026 (0.8.2)
+
+- **Uncharted 1 jeep gun with the mouse** (#250, the-best-is-best, PR #349): a mouse-look hook at the
+  turret's stick read (0x2a9690, 24 bytes checked; GOW3_MOUSE_LOOK_U1_RAIL=0: off), with the
+  game's invert settings (0x95ca28).
+- **Save list** (the-best-is-best, PR #349): labels cut at whole UTF-8 characters and Arabic `_` shown
+  as spaces; Delete / Triangle twice deletes an entry (`runtime_savedata_trash`: the save folder is
+  moved to `<user dir>/savedata-deleted/<user>/<title>/<dir>-<time>`, never a mounted one); a 456x256
+  PNG of the last frame in play (`gow3_thumbnail.cpp`, read back after the frame's present fence;
+  GOW3_SAVE_PICTURE=0: off) written as `thumb.png` in the save's `.sce_sys` folder on unmount, shown
+  in the list before the game's icon. Also: fault_count clamped below MaxPageFaults, image descriptor
+  capacity from NUM_IMAGES/NUM_SAMPLERS, the LAN outbox capped at 16 MB with header and body queued
+  together, player ids 1..NET_MAX_PLAYERS, the updater's rollback continues past a failed item and
+  keeps files it could not replace (`update-kept-*`), a damaged param.sfo is an UpdateError.
+- **Uncharted 1 physics above 60 FPS**: the rigid-body world step (1.02 0x2358c0, dt in xmm0) gets an
+  entry stub that scales the sticky-contact speed/omega thresholds (0.1, 0.1) by min(1, 60 dt), the
+  settle step counts (10 / 30) by its inverse and the artificial damping (0.9998 per step) to
+  0.9998^(60 dt). At 120 FPS objects no longer stick in mid-air and bodies no longer settle after
+  half the time. All six operands found by unique patterns (US and EU); GOW3_U1_STICKY=0,
+  GOW3_U1_SETTLE=0, GOW3_U1_DAMPING=0 turn the parts off, GOW3_U1_PHYSICS_TRACE=1 prints the steps.
+- **Uncharted 2 convoy** (chapter 21): adding an animation node copies a params bool (+0x11) as
+  `flag << 2` into the previous node's flags; the convoy's bump animation never writes that bool, so
+  stack garbage (0x64) also set bit 4, "reference frame follows the object", and the truck sank 2-4 m
+  for half a second after each bump. The 20 bytes now take bit 0 only (UNCHARTED_CONVOY_SINK=0: off).
+- **Upscaler jitter**: draws of up to 6 indices that write depth or test it for equality are scene
+  geometry, not full-screen passes, and get the jitter (Uncharted 3's chateau wall panels: rows of
+  blue dots, the scene colour's clear, through the seams; GOW3_JITTER_SMALL=0: off). GOW3_JITTER_PS
+  adds b2a42acf (Uncharted 1 boat details) and 1a08df2d (Uncharted 3 London bar surfaces).
+- **Constant ring stall** (#356): with multithreaded rendering, stage B stamps each packet's ring end
+  per submission tick and publishes the previous end when a later tick records. A full ring stops
+  moving (allocations fail, the end repeats), so the last region was never published and the ring
+  stayed full for the rest of the session: every constant fell back to stage B binding and each try
+  queried the GPU semaphore. The repeated end is now published once its tick has passed
+  (GOW3_RING_STALL_FIX=0: off); Retire checks the oldest stamp against the known GPU tick first and
+  queries the driver at most every 20 us (GOW3_RING_RETIRE_THROTTLE=0: off). A "Constant ring:" line
+  with the frame stats shows allocations, failed allocations and GPU queries per second.
+- **Pipeline cache lock**: `PipelineCache::programs_mutex` is a Windows SRW lock
+  (`common/srw_shared_mutex.h`). libc++'s std::shared_mutex takes an inner mutex on every shared
+  lock, so the GPU command thread and the draw-preparation workers queued behind each other on each
+  program lookup. GOW3_SRW_LOCKS=0: std::shared_mutex.
+- **Crash guards**: `TextureCache::FindImage` copies the merged ImageInfo (a reference into
+  slot_images went stale when ResolveOverlap inserted an image); `WaitOnDeCounterDiff` no longer
+  waits forever when the DE counter is ahead of the CE (the unsigned difference never shrank); an
+  Ajm instance for an unsupported codec (AAC) returns ERR_INVALID_PARAMETER instead of exit(21).
+
 ## 1 November 2026, night (0.8.1)
 
 - **Mouse in cover** (#250 #291 #275 #190 #158): the Uncharted 2 and 3 cover cameras take the mouse

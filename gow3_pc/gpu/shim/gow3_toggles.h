@@ -148,6 +148,15 @@ inline std::atomic<std::uint64_t> gpu_sys_us{0}, gpu_user_us{0}, gpu_invol_switc
     gpu_vol_switches{0}, gpu_minor_faults{0};
 /// Protection faults (signals) taken by the GPU thread itself.
 inline std::atomic<std::uint64_t> gpu_signal_faults{0};
+/// gow3 4 Nov 2026: constant ring (vk_constant_ring.h), written by stage A only (plain
+/// load+store, no locked add): allocations, failed allocations (ring still in use by the GPU:
+/// the binding falls back to stage B), GPU progress queries, and stalled regions published
+/// by the stall fix. Printed with the frame stats every 5 s.
+inline std::atomic<std::uint64_t> ring_allocations{0}, ring_failed{0}, ring_queries{0},
+    ring_stall_publishes{0};
+inline void Bump(std::atomic<std::uint64_t>& counter) {
+    counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
 /// Protection changes: calls and pages, those removing write access (TLB shootdowns) apart.
 inline std::atomic<std::uint64_t> protect_calls{0}, protect_pages{0}, protect_revoke_calls{0},
     protect_revoke_pages{0};

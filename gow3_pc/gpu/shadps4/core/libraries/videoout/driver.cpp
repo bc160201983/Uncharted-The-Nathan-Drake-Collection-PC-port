@@ -655,6 +655,27 @@ void VideoOutDriver::Flip(const Request& req) {
                         Gow3Stats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(Gow3Stats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(Gow3Stats::scene_draws.exchange(0)) / frames : 0.0);
+            // gow3 4 Nov 2026: the constant ring (vk_constant_ring.h). Failed allocations bind
+            // their constants on the draw recording thread instead; a steady stream of them
+            // means the ring is stalled.
+            {
+                static u64 last_allocs = 0, last_failed = 0, last_queries = 0, last_stalls = 0;
+                const u64 allocs = Gow3Stats::ring_allocations.load(std::memory_order_relaxed);
+                const u64 failed = Gow3Stats::ring_failed.load(std::memory_order_relaxed);
+                const u64 queries = Gow3Stats::ring_queries.load(std::memory_order_relaxed);
+                const u64 stalls = Gow3Stats::ring_stall_publishes.load(std::memory_order_relaxed);
+                if (allocs != last_allocs) {
+                    std::printf("Constant ring: %.0f allocations/s, %.0f failed/s, %.0f GPU "
+                                "queries/s, %llu stalled regions published\n",
+                                (allocs - last_allocs) / window, (failed - last_failed) / window,
+                                (queries - last_queries) / window,
+                                static_cast<unsigned long long>(stalls - last_stalls));
+                }
+                last_allocs = allocs;
+                last_failed = failed;
+                last_queries = queries;
+                last_stalls = stalls;
+            }
             // gow3 20 Oct 2026: the presentation waits of the window (share of its wall time).
             static u32 window_long_waits;
             const u32 long_waits = presenter->LongFrameWaits();

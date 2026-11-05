@@ -1169,7 +1169,12 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::WaitOnDeCounterDiff: {
             const auto diff = it_body[0];
-            while ((cblock.de_count - cblock.ce_count) >= diff) {
+            // gow3 4 Nov 2026: the CE waits while it is ahead of the DE, until the DE catches up (as
+            // before). With the DE ahead of the CE the unsigned difference was a count that never
+            // shrinks while the CE waits (it is the one that would have to count): the CE waited
+            // for good and the DE then waited for the CE. It goes on now.
+            while (cblock.ce_count > cblock.de_count &&
+                   (cblock.de_count - cblock.ce_count) >= diff) {
                 YIELD_CE();
             }
             break;

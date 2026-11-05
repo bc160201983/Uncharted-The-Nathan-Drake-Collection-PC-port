@@ -2776,8 +2776,26 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
+    // gow3 4 Nov 2026: a draw of up to 6 indices is usually a full-screen quad, but a quad that
+    // writes depth or tests it for equality is scene geometry: Uncharted 3's chateau wall panels
+    // are single quads. Unjittered, they sat a fraction of a pixel off their jittered neighbours and
+    // the seams opened into pinholes showing the scene colour's clear (0, 0, 1, 0): rows of bright
+    // blue dots, only with an upscaler on. Full-screen depth copies and resolves write depth with
+    // an always-passing test: not these. GOW3_JITTER_SMALL=0: off.
+    static const bool jitter_small = [] {
+        const char* env = std::getenv("GOW3_JITTER_SMALL");
+        return !(env && env[0] == '0');
+    }();
+    const auto small_scene_geometry = [&] {
+        if (!jitter_small || !regs.depth_control.depth_enable) {
+            return false;
+        }
+        const auto func = regs.depth_control.depth_func;
+        return func != AmdGpu::CompareFunc::Always &&
+               (bool(regs.depth_control.depth_write_enable) || func == AmdGpu::CompareFunc::Equal);
+    };
     if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 || small_scene_geometry())) {
         draw_jitter = upscaler->Jitter();
     } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
                ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash) &&

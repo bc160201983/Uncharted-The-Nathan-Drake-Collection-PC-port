@@ -9,7 +9,10 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
 
+#include "gow3_toggles.h"
 #include "common/assert.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -39,9 +42,11 @@ public:
             at += Capacity - at % Capacity; // wrap to the ring start
         }
         const auto in_use = [&] { return at + size > Capacity && at + size - Capacity > retired; };
+        Gow3Stats::Bump(Gow3Stats::ring_allocations);
         if (in_use()) {
             Retire();
             if (in_use()) {
+                Gow3Stats::Bump(Gow3Stats::ring_failed);
                 return std::nullopt;
             }
         }
@@ -70,10 +75,24 @@ public:
     /// Stage B, after recording a packet whose allocations end at `end`. Stamps of one
     /// submission tick are merged: only the last end per tick is published.
     void Stamp(u64 end) {
+        const u64 tick = scheduler.CurrentTick();
         if (end == pending_end) {
+            // gow3 4 Nov 2026: a full ring stops moving (every allocation fails), so the same end
+            // comes again and again. Its region must still be published once a later tick
+            // records, or it never retires and the ring stays full for the rest of the session
+            // (every constant then bound by stage B, a GPU query per try).
+            // GOW3_RING_STALL_FIX=0: as before.
+            static const bool fix = [] {
+                const char* env = std::getenv("GOW3_RING_STALL_FIX");
+                return !(env && env[0] == '0');
+            }();
+            if (fix && tick != pending_tick && pending_end != last_published) {
+                Publish(pending_end, pending_tick);
+                pending_tick = tick;
+                Gow3Stats::ring_stall_publishes.fetch_add(1, std::memory_order_relaxed);
+            }
             return;
         }
-        const u64 tick = scheduler.CurrentTick();
         if (tick != pending_tick && pending_end != last_published) {
             Publish(pending_end, pending_tick);
         }
@@ -94,7 +113,23 @@ private:
 
     void Retire() {
         auto* semaphore = scheduler.GetWorkSemaphore();
-        semaphore->Refresh();
+        // gow3 4 Nov 2026: Refresh asks the driver for the GPU's progress (a system call). While
+        // the GPU is behind, every allocation comes here: the oldest stamp is first checked
+        // against the progress already known, and the driver is asked at most every 20 us.
+        // GOW3_RING_RETIRE_THROTTLE=0: a query every time, as before.
+        static const bool throttle = [] {
+            const char* env = std::getenv("GOW3_RING_RETIRE_THROTTLE");
+            return !(env && env[0] == '0');
+        }();
+        const u64 tail = stamps_tail.load(std::memory_order_relaxed);
+        const bool known_free = tail < stamps_head.load(std::memory_order_acquire) &&
+                                semaphore->IsFree(stamps[tail % stamps.size()].tick);
+        const auto now = std::chrono::steady_clock::now();
+        if (!throttle || (!known_free && now - last_refresh >= std::chrono::microseconds(20))) {
+            semaphore->Refresh();
+            last_refresh = now;
+            Gow3Stats::Bump(Gow3Stats::ring_queries);
+        }
         u64 at = stamps_tail.load(std::memory_order_relaxed);
         const u64 head = stamps_head.load(std::memory_order_acquire);
         while (at < head && semaphore->IsFree(stamps[at % stamps.size()].tick)) {
@@ -112,6 +147,7 @@ private:
     VideoCore::Buffer buffer;
     u64 position = 0;     ///< stage A
     u64 retired = 0;      ///< stage A: the GPU is done with everything before this
+    std::chrono::steady_clock::time_point last_refresh{}; ///< stage A
     u64 pending_end = 0, pending_tick = 0, last_published = 0; ///< stage B
     std::array<StampEntry, 1024> stamps{};
     alignas(64) std::atomic<u64> stamps_head{0}; ///< stage B writes
