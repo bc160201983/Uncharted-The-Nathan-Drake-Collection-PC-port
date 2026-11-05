@@ -622,15 +622,26 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         // In case of partial transition, we need to change the specified subresources only.
         // Otherwise all subresources need to be set to the same state so we can use a full
         // resource transition for the next time.
+        // gow3 5 Nov 2026: a garbage T# can ask for levels or layers past the image it matched
+        // (the view's levels are not clamped): the range stops at the image's own (it ended the
+        // game on the assertion below, exit 23).
+        const u32 level_end = std::min<u32>(info.resources.levels,
+                                            subres_range ? subres_range->base.level +
+                                                               subres_range->extent.levels
+                                                         : info.resources.levels);
+        const u32 layer_end = std::min<u32>(info.resources.layers,
+                                            subres_range ? subres_range->base.layer +
+                                                               subres_range->extent.layers
+                                                         : info.resources.layers);
         const auto mips =
             needs_partial_transition
-                ? std::ranges::views::iota(subres_range->base.level,
-                                           subres_range->base.level + subres_range->extent.levels)
+                ? std::ranges::views::iota(std::min<u32>(subres_range->base.level, level_end),
+                                           level_end)
                 : std::views::iota(0u, info.resources.levels);
         const auto layers =
             needs_partial_transition
-                ? std::ranges::views::iota(subres_range->base.layer,
-                                           subres_range->base.layer + subres_range->extent.layers)
+                ? std::ranges::views::iota(std::min<u32>(subres_range->base.layer, layer_end),
+                                           layer_end)
                 : std::views::iota(0u, info.resources.layers);
 
         for (u32 mip : mips) {

@@ -13,6 +13,7 @@
 #include "video_core/texture_cache/readback_sources.h"
 #include <chrono>
 #include "gow3_toggles.h"
+#include "common/srw_shared_mutex.h"
 #include <optional>
 #include <cstdlib>
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -221,7 +222,7 @@ public:
         return std::format("{} images ({} backings, {} views, at most {} per backing), {} view "
                            "slots, {} samplers, {} alias states, {} surface metas",
                            images, backings, views, max_views, slot_image_views.size(),
-                           samplers.size(), alias_states.size(), surface_metas.size());
+                           samplers.size(), alias_states.size(), MetaCount());
     }
 
     /// Updates image contents if it was modified by CPU.
@@ -332,6 +333,7 @@ public:
 
     /// Returns meta type if the specified address is a metadata surface.
     std::optional<MetaType> IsMeta(VAddr address) const {
+        std::shared_lock lock{metas_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             return it->second.type;
@@ -341,6 +343,7 @@ public:
 
     /// Returns true if a slice of the specified metadata surface has been cleared.
     bool IsMetaCleared(VAddr address, u32 slice) const {
+        std::shared_lock lock{metas_mutex};
         const auto& it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             return it.value().clear_mask & (1u << slice);
@@ -350,6 +353,7 @@ public:
 
     /// Clears all slices of the specified metadata surface.
     bool ClearMeta(VAddr address) {
+        std::unique_lock lock{metas_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             it.value().clear_mask = u32(-1);
@@ -370,6 +374,7 @@ public:
 
     /// Updates the state of a slice of the specified metadata surface.
     bool TouchMeta(VAddr address, u32 slice, bool is_clear) {
+        std::unique_lock lock{metas_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             if (is_clear) {
@@ -628,6 +633,14 @@ private:
         s32 clear_mask = -1;
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    /// gow3 5 Nov 2026: guards surface_metas. FreeImage erases entries on guest threads (unmaps,
+    /// under the cache mutex) while the GPU command thread looks them up per draw and dispatch
+    /// without that mutex; a robin map moves entries on erase, so a lookup could read a moved slot.
+    mutable Common::SrwSharedMutex metas_mutex;
+    size_t MetaCount() const {
+        std::shared_lock lock{metas_mutex};
+        return surface_metas.size();
+    }
     /// gow3 (GOW3_HTILE_KEEP_CLEARS): HTILE surfaces of freed depth images, by HTILE address.
     struct RetiredHtile {
         VAddr depth_address;

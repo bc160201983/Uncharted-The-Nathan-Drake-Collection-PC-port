@@ -3443,6 +3443,12 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     const vk::Pipeline handle = pipeline->Handle();
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+    // gow3 5 Nov 2026: a workgroup compiled as smaller ones (Shader::WorkgroupSplit) needs that
+    // many times the workgroups in X.
+    const u32 groups_x =
+        dim_x * Shader::WorkgroupSplit(cs.pgm_hash, {cs_program.num_thread_x.full,
+                                                     cs_program.num_thread_y.full,
+                                                     cs_program.num_thread_z.full});
     scheduler.Checkpoint("dispatch",cs.pgm_hash);
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
@@ -3464,7 +3470,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         if (!bound) {
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
         }
-        cmdbuf.dispatch(dim_x, dim_y, dim_z);
+        cmdbuf.dispatch(groups_x, dim_y, dim_z);
         if (full_barrier) {
             RecordFullBarrier(cmdbuf);
         }
@@ -3519,6 +3525,18 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
                                         u32 size) {
     if (SkippedShader(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
         return;
+    }
+    // gow3 5 Nov 2026: the workgroup count of an indirect dispatch is in GPU memory, so a split
+    // shader (Shader::WorkgroupSplit) would run a quarter of its threads. Never seen (48 frame
+    // captures of the three games): named in the log if it happens.
+    if (const u64 hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
+        Shader::WorkgroupSplitListed(hash)) {
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true)) {
+            std::fprintf(stderr, "GPU: indirect dispatch of the split compute shader %#llx: part "
+                                 "of its work is skipped (GOW3_WORKGROUP_SPLIT=0 avoids it)\n",
+                         static_cast<unsigned long long>(hash));
+        }
     }
     scheduler.PopPendingOperations();
     const u32 offset = 0;
@@ -5974,7 +5992,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         // NumBindings of the same T#), taken before the test knobs below edit the T#.
         const u32 layout_count =
             image_desc.mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex
-                ? static_cast<u32>(fetched_tsharp.last_level - fetched_tsharp.base_level + 1)
+                ? Shader::ImageResource::MipBindingCount(fetched_tsharp)
                 : 1u;
         TestGarbageTSharp(fetched_tsharp);
         TestGarbageSlot(stage, image_index, image_desc, fetched_tsharp);
@@ -6047,7 +6065,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         // Same as image_desc.NumBindings(stage), without fetching the T# again.
         const u32 num_bindings =
             mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex
-                ? static_cast<u32>(tsharp.last_level - tsharp.base_level + 1)
+                ? Shader::ImageResource::MipBindingCount(tsharp)
                 : 1u;
         const bool proxy_candidate = sample_proxies && num_bindings == 1 &&
                                      !image_desc.needs_native && !image_desc.is_written &&

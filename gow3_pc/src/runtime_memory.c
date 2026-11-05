@@ -18,6 +18,7 @@
 #include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <intrin.h>
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -61,8 +62,9 @@ _Static_assert(sizeof(BatchEntry)==32,"PS4 batch map entry layout");
 /* Region table lock. Lookups (GPU per-draw queries, VirtualQuery, GPU page
  * protection) share it; map/unmap/protect take it exclusively. Both nest: code
  * under the lock may write guest memory, and a GPU-tracked page then faults into
- * runtime_memory_gpu_protect on the same thread. Readers nest because glibc's
- * default rwlock prefers readers; a thread holding it exclusively skips relocking. */
+ * runtime_memory_gpu_protect on the same thread. A thread holding it exclusively skips
+ * relocking. Readers must NOT write guest memory while they hold it: winpthreads' rwlock (the
+ * Windows build) lets a waiting writer go first, so a nested reader deadlocks (gow3 5 Nov 2026). */
 static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
 static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
@@ -208,6 +210,49 @@ static size_t save_protections(uintptr_t start, uintptr_t end, ProtRun **runs, s
 }
 static uint64_t mono_ns(void);
 
+/* gow3 5 Nov 2026 ("closes after playing a while"): a partial map or unmap of a view (carve_host)
+ * unmaps the whole view and maps the untouched pages back. For that moment other threads (guest
+ * threads, GPU copy threads, draw preparation) found pages missing that were never unmapped: a
+ * fatal fault. A fault inside the window now waits for the carve to end and retries; a fault
+ * raised during a carve whose handler only ran after it ended retries once when the page is
+ * there again. Carves run under the region write lock: one at a time. */
+static volatile uintptr_t carve_lo, carve_hi;
+static volatile DWORD carve_thread;
+static volatile LONG carve_active, carve_seq;
+static volatile uint64_t carve_end_tsc; /* __rdtsc() when the last carve ended */
+int runtime_memory_wait_carve(uintptr_t address) {
+    static int on=-1;
+    if (on<0) { const char *env=getenv("GOW3_CARVE_WAIT"); on=!(env && env[0]=='0'); }
+    if (!on) return 0;
+    if (InterlockedCompareExchange(&carve_active,0,0)) {
+        if (address<carve_lo || address>=carve_hi || GetCurrentThreadId()==carve_thread) return 0;
+        while (InterlockedCompareExchange(&carve_active,0,0)) YieldProcessor();
+        return 1;
+    }
+    if (address<carve_lo || address>=carve_hi || GetCurrentThreadId()==carve_thread) return 0;
+    /* Only right after a carve (about 1 ms): GPU write-tracking faults in that range otherwise
+     * paid a VirtualQuery and a second fault each. */
+    if (__rdtsc()-carve_end_tsc > UINT64_C(4000000)) return 0;
+    static __thread LONG retried_seq=-1;
+    static __thread uintptr_t retried_address;
+    const LONG seq=InterlockedCompareExchange(&carve_seq,0,0);
+    if (retried_seq==seq && retried_address==address) return 0; /* retried once already */
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery((void *)address,&m,sizeof(m)) || m.State!=MEM_COMMIT ||
+        (m.Protect & (PAGE_NOACCESS|PAGE_GUARD))) return 0;
+    retried_seq=seq; retried_address=address;
+    return 1;
+}
+/* The saved protections of one side, GPU write tracking included, right after it is mapped
+ * back (it comes back writable: a view can't be raised above the protection it was mapped with). */
+static void restore_protections(const ProtRun *runs, size_t from, size_t to) {
+    for (size_t i=from;i<to;++i) {
+        DWORD old;
+        if (runs[i].protect!=PAGE_READWRITE && !VirtualProtect((void *)runs[i].start,runs[i].end-runs[i].start,runs[i].protect,&old))
+            win_fail("restoring page protection",runs[i].start,runs[i].end-runs[i].start);
+    }
+}
+
 static size_t carve_host_timed(uintptr_t a, uintptr_t b);
 /* Leaves [a,b) as exactly one unmapped placeholder; returns its region index. */
 static size_t carve_host(uintptr_t a, uintptr_t b) {
@@ -230,6 +275,11 @@ static size_t carve_host_timed(uintptr_t a, uintptr_t b) {
     ProtRun *runs=NULL; size_t nruns=0, capacity=0, left_runs=0;
     if (keep_left) left_runs=nruns=save_protections(lo,a,&runs,nruns,&capacity);
     if (keep_right) nruns=save_protections(b,hi,&runs,nruns,&capacity);
+    const int window=keep_left || keep_right;
+    if (window) {
+        carve_lo=lo; carve_hi=hi; carve_thread=GetCurrentThreadId();
+        InterlockedExchange(&carve_active,1);
+    }
     for (size_t i=first;i<last;++i) if (regions[i].mapped) {
         if (!UnmapViewOfFile2(GetCurrentProcess(),(void *)regions[i].start,MEM_PRESERVE_PLACEHOLDER))
             win_fail("UnmapViewOfFile2",regions[i].start,regions[i].end-regions[i].start);
@@ -246,6 +296,7 @@ static size_t carve_host_timed(uintptr_t a, uintptr_t b) {
         if (keep_left) {
             regions[at].phys=left.phys; regions[at].mapped=1;
             view_map(&regions[at],PAGE_READWRITE);
+            restore_protections(runs,0,left_runs);
         }
         ++at;
     }
@@ -256,14 +307,14 @@ static size_t carve_host_timed(uintptr_t a, uintptr_t b) {
         if (keep_right) {
             regions[at+1].phys=right.phys+(b-right.start); regions[at+1].mapped=1;
             view_map(&regions[at+1],PAGE_READWRITE);
+            restore_protections(runs,left_runs,nruns);
         }
     }
-    for (size_t i=0;i<nruns;++i) {
-        DWORD old;
-        if (runs[i].protect!=PAGE_READWRITE && !VirtualProtect((void *)runs[i].start,runs[i].end-runs[i].start,runs[i].protect,&old))
-            win_fail("restoring page protection",runs[i].start,runs[i].end-runs[i].start);
+    if (window) {
+        InterlockedIncrement(&carve_seq);
+        carve_end_tsc=__rdtsc();
+        InterlockedExchange(&carve_active,0);
     }
-    (void)left_runs;
     __atomic_add_fetch(&mt_carve_runs,nruns,__ATOMIC_RELAXED);
     free(runs);
     return at;
@@ -363,6 +414,7 @@ static int pool(void) {
     return 0;
 }
 void runtime_memory_reserve(void) {}
+int runtime_memory_wait_carve(uintptr_t address) { (void)address; return 0; } /* mmap replaces in place */
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
@@ -783,11 +835,15 @@ static ABI int32_t query_protection(void *address, void **start, void **end, uin
     size_t first=i, last=i;
     while (first && vmas[first-1].end==vmas[first].start && vmas[first-1].kind!=KIND_RESERVED && vmas[first-1].prot==vmas[i].prot) --first;
     while (last+1<vma_count && vmas[last+1].start==vmas[last].end && vmas[last+1].kind!=KIND_RESERVED && vmas[last+1].prot==vmas[i].prot) ++last;
-    if (start) *start=(void *)vmas[first].start;
-    if (end) *end=(void *)vmas[last].end;
-    if (prot) *prot=(uint32_t)vmas[i].prot;
+    /* gow3 5 Nov 2026: the results go to guest memory only after the lock is released (see
+     * virtual_query). */
+    void *run_start=(void *)vmas[first].start, *run_end=(void *)vmas[last].end;
+    const uint32_t run_prot=(uint32_t)vmas[i].prot;
     __atomic_add_fetch(&queries,1,__ATOMIC_RELAXED);
     read_unlock();
+    if (start) *start=run_start;
+    if (end) *end=run_end;
+    if (prot) *prot=run_prot;
     return 0;
 }
 /* Diagnostic names belong to the VMAs, including after protection/range splits.
@@ -820,23 +876,34 @@ static ABI int32_t virtual_query(const void *address, int flags, VirtualQueryInf
     size_t i=vma_index((uintptr_t)address);
     if (i==vma_count || (vmas[i].start>(uintptr_t)address && !(flags & 1))) { read_unlock(); return ACCESS; }
     Vma v=vmas[i];
-    memset(info,0,sizeof(*info));
-    info->start=v.start; info->end=v.end;
-    info->offset=v.kind==KIND_DIRECT ? v.phys : 0;
-    info->protection=v.prot; info->memory_type=v.type;
-    info->flags=(v.kind==KIND_FLEXIBLE ? 1u : 0) | (v.kind==KIND_DIRECT ? 2u : 0) | (v.kind!=KIND_RESERVED ? 16u : 0);
-    memcpy(info->name,v.name,sizeof(info->name));
     __atomic_add_fetch(&queries,1,__ATOMIC_RELAXED);
     read_unlock();
+    /* gow3 5 Nov 2026: filled after the lock is released. A store into a GPU-tracked guest page
+     * faults, and the handler takes this lock again on the same thread (runtime_memory_gpu_protect):
+     * winpthreads' rwlock lets a waiting writer go first, so the nested reader waited for the
+     * writer and the writer for this thread: a silent freeze. */
+    VirtualQueryInfo result;
+    memset(&result,0,sizeof(result));
+    result.start=v.start; result.end=v.end;
+    result.offset=v.kind==KIND_DIRECT ? v.phys : 0;
+    result.protection=v.prot; result.memory_type=v.type;
+    result.flags=(v.kind==KIND_FLEXIBLE ? 1u : 0) | (v.kind==KIND_DIRECT ? 2u : 0) | (v.kind!=KIND_RESERVED ? 16u : 0);
+    memcpy(result.name,v.name,sizeof(result.name));
+    memcpy(info,&result,sizeof(result));
     return 0;
 }
 static ABI int32_t direct_memory_type(uint64_t phys, int *type, void **start, void **end) {
     read_lock();
     for (int i=0;i<LIMIT;++i) if (blocks[i].used && phys>=blocks[i].start && phys-blocks[i].start<blocks[i].size) {
-        if (type) *type=blocks[i].type;
-        if (start) *start=(void *)(uintptr_t)blocks[i].start;
-        if (end) *end=(void *)(uintptr_t)(blocks[i].start+blocks[i].size);
-        read_unlock(); return 0;
+        /* gow3 5 Nov 2026: written to guest memory after the lock is released (see virtual_query). */
+        const int block_kind=blocks[i].type;
+        void *block_start=(void *)(uintptr_t)blocks[i].start;
+        void *block_end=(void *)(uintptr_t)(blocks[i].start+blocks[i].size);
+        read_unlock();
+        if (type) *type=block_kind;
+        if (start) *start=block_start;
+        if (end) *end=block_end;
+        return 0;
     }
     read_unlock();
     return ACCESS;

@@ -334,6 +334,16 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
     const auto& vk12_props = instance.GetVk12Properties();
+    // gow3 5 Nov 2026: 1024-thread skinning workgroups as 4 of 256 on NVIDIA (Shader::WorkgroupSplit,
+    // runtime_info.h). Set before any shader is loaded: the split shaders have their own cache names.
+    {
+        const char* env = std::getenv("GOW3_WORKGROUP_SPLIT");
+        Shader::WorkgroupSplitOn() =
+            env && env[0] ? env[0] == '1'
+                          : instance.GetDriverID() == vk::DriverId::eNvidiaProprietary;
+        std::printf("GPU: skinning shaders' 1024-thread workgroups %s (GOW3_WORKGROUP_SPLIT)\n",
+                    Shader::WorkgroupSplitOn() ? "run as 4 workgroups of 256" : "run whole");
+    }
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
         .max_viewport_height = instance.GetMaxViewportHeight(),
@@ -1619,9 +1629,23 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             return {};
         }
         runtime_fault_recover = &recover;
-        info.RefreshFlatBuf();
-        auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+        // gow3 5 Nov 2026: a GPU library assertion on this guess (stale or garbage tables, mostly
+        // after "garbage T#/V#" warnings) throws here and the draw is left to the GPU thread, as
+        // for the compute precompile; it stopped the game with exit 23 before.
+        std::optional<Shader::StageSpecialization> guessed;
+        gow3_assert_throws = true;
+        try {
+            info.RefreshFlatBuf();
+            guessed.emplace(info, runtime_info, profile, binding);
+        } catch (...) {
+        }
+        gow3_assert_throws = false;
         runtime_fault_recover = nullptr;
+        if (!guessed) {
+            worker.failed = true;
+            return {};
+        }
+        auto& spec = *guessed;
         const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
         if (it == program->modules.end()) {
             worker.failed = true;

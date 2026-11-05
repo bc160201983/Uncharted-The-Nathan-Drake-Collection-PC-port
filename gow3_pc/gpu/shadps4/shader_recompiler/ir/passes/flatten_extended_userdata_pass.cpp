@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <queue>
@@ -38,6 +40,34 @@ static const u8* g_srt_codegen_start = nullptr;
 // gow3: the shader compiler and the background cache warm-up append walkers from different
 // threads.
 static std::mutex g_srt_codegen_mutex;
+// gow3 5 Nov 2026: walkers by their bytes (under g_srt_codegen_mutex). The buffer has a fixed
+// size and nothing in it is ever freed: every walker loaded from the pipeline cache and every one
+// translated was appended again, also when the same bytes were already there, so a big cache and a
+// long session filled the 32 MB and Xbyak's "code is too big" ended the game. Walkers are
+// position-independent (the cache copies them anywhere): the same bytes share one copy now.
+static std::unordered_map<std::string, Shader::PFN_SrtWalker> g_srt_walkers;
+static size_t g_srt_reused_bytes = 0;
+
+// GOW3_SRT_SHARE=0: every walker gets its own copy again (as before).
+static bool SrtShareOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_SRT_SHARE");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+static void NoteSrtCodegenUse() {
+    static size_t reported_mb = 0;
+    const size_t mb = g_srt_codegen.getSize() >> 20;
+    if (mb >= reported_mb + 4) {
+        reported_mb = mb;
+        std::printf("SRT walkers: %zu MB of 32 MB used by %zu distinct walkers (%zu MB of repeats "
+                    "shared)\n",
+                    mb, g_srt_walkers.size(), g_srt_reused_bytes >> 20);
+        std::fflush(stdout);
+    }
+}
 
 namespace {
 static bool SrtWalkerSignalHandler(void* context, void* fault_address);
@@ -65,9 +95,16 @@ namespace Shader {
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     std::scoped_lock lock{g_srt_codegen_mutex};
     RegisterSrtWalkerFaultHandler();
+    std::string key(reinterpret_cast<const char*>(ptr), size);
+    if (const auto it = g_srt_walkers.find(key); SrtShareOn() && it != g_srt_walkers.end()) {
+        g_srt_reused_bytes += size;
+        return it->second;
+    }
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
+    g_srt_walkers.emplace(std::move(key), func_addr);
+    NoteSrtCodegenUse();
     return func_addr;
 }
 
@@ -764,6 +801,20 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
 
     info.srt_info.walker_func_size =
         c.getCurr() - reinterpret_cast<const u8*>(info.srt_info.walker_func);
+    // gow3 5 Nov 2026: the same bytes as a walker already in the buffer: that one, and the new
+    // copy is taken back (see g_srt_walkers).
+    {
+        const u8* const start = reinterpret_cast<const u8*>(info.srt_info.walker_func);
+        std::string key(reinterpret_cast<const char*>(start), info.srt_info.walker_func_size);
+        if (const auto it = g_srt_walkers.find(key); SrtShareOn() && it != g_srt_walkers.end()) {
+            c.setSize(static_cast<size_t>(start - c.getCode()));
+            g_srt_reused_bytes += info.srt_info.walker_func_size;
+            info.srt_info.walker_func = it->second;
+        } else {
+            g_srt_walkers.emplace(std::move(key), info.srt_info.walker_func);
+            NoteSrtCodegenUse();
+        }
+    }
 
     if (EmulatorSettings.IsDumpShaders()) {
         DumpSrtProgram(info, reinterpret_cast<const u8*>(info.srt_info.walker_func),

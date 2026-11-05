@@ -47,9 +47,11 @@ static constexpr u32 PipelineKeyVersion = 5u; // gow3: Info layout (ImageResourc
 /// gow3 1 Nov 2026: the effect/crowd skinning shaders with a clamped loop bound (and the test
 /// count) get their own names too (effect_loop_clamp_pass.cpp).
 static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
-    return fmt::format("{:#018x}_{}{}{}", pgm_hash, perm_idx,
+    // gow3 5 Nov 2026: split workgroups (Shader::WorkgroupSplit) have their own names too.
+    return fmt::format("{:#018x}_{}{}{}{}", pgm_hash, perm_idx,
                        Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "",
-                       Shader::Optimization::EffectLoopClamp(pgm_hash) ? "_lc1" : "");
+                       Shader::Optimization::EffectLoopClamp(pgm_hash) ? "_lc1" : "",
+                       Shader::WorkgroupSplitListed(pgm_hash) ? "_ws256" : "");
 }
 } // namespace Serialization
 

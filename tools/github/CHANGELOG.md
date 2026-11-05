@@ -4,6 +4,44 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 6 November 2026 (0.8.3)
+
+- **Workgroup split for the skinning shaders** (#350 #362 #353): cs 8f067540 and 7d7e7206 run
+  1024-thread workgroups (no LDS, barriers or atomics; thread index WorkgroupId.x * 1024 +
+  LocalInvocationId.x). On NVIDIA's driver each guest workgroup runs as 4 host workgroups of 256
+  (`Shader::WorkgroupSplit`, runtime_info.h): LocalSize X / 4, the guest WorkgroupId.x and
+  LocalInvocationId / Index rebuilt in the SPIR-V, the dispatch with 4 times the groups in X. The
+  split shaders have their own cache name (`_ws256`), so only they recompile. An indirect dispatch
+  of them is named in the log (none seen in 48 frame captures). GOW3_WORKGROUP_SPLIT=0: off, =1: on
+  for every driver.
+- **Uncharted 3 museum exit device lost** (#292 #295 #354 #328): pixel shader 689d1af9 (a
+  soft-shadow filter of all three games) loops over a tap count read from a constant buffer; its
+  integer compares with a loop counter now use min(count, 256) (effect_loop_clamp_pass.cpp, same
+  switch GOW3_EFFECT_LOOP_CLAMP).
+- **GPU breadcrumbs** (GOW3_GPU_BREADCRUMBS=1, or GOW3_GPU_CHECKPOINTS on cards without NVIDIA's
+  diagnostic checkpoints): a barrier and a 4-byte write of the checkpoint number to a host-visible
+  buffer after every dispatch and at every render pass end; a lost device prints the checkpoints
+  that did not finish with their shader hashes (vk_scheduler.cpp).
+- **Deadlock in the memory region lock:** VirtualQuery, the direct memory type query and
+  query_protection wrote their results to guest memory while holding the read lock; a store into a
+  GPU-tracked page faulted into runtime_memory_gpu_protect, which took the lock again, and
+  winpthreads' rwlock let a waiting writer go first. The results are written after unlocking.
+- **Partial unmaps:** carve_host maps the untouched pages of a view back; another thread touching
+  them meanwhile faulted fatally. Faults inside the window wait for the carve and retry, and for
+  about 1 ms after it a fault there retries once if the page is back; each side's saved
+  protections are restored right after it is mapped. GOW3_CARVE_WAIT=0: off.
+- **SRT walker buffer:** the fixed 32 MB code buffer only grew (every cached walker and every
+  translation appended bytes, duplicates too) until Xbyak's "code is too big"; identical walkers
+  now share one copy. GOW3_SRT_SHARE=0: off.
+- **Smaller crash guards:** a dynamically indexed storage image with last_level < base_level
+  bound about 4e9 null descriptors (now 1); surface_metas is guarded by its own SRW lock (erased on
+  guest threads during unmaps while the GPU thread probes it); WAIT_ON_CE_COUNTER no longer calls
+  done() on a missing CE task; image barriers clamp a garbage T#'s level and layer range to the
+  image; assertions on draw-preparation workers drop the guess instead of exit 23.
+- **Uncharted 2 leg IK NaN** (character-leg-ik.cpp:391): the assert path, reached only when a
+  lane is not finite, zeroes the root delta for that frame (1.02 and 1.00). UNCHARTED_LEG_IK_RESET=0:
+  not applied.
+
 ## 5 November 2026 (0.8.2)
 
 - **Uncharted 1 jeep gun with the mouse** (#250, the-best-is-best, PR #349): a mouse-look hook at the

@@ -28,6 +28,9 @@ void runtime_mutex_report(void);
 uintptr_t runtime_memory_resolve(const char *name);
 void runtime_memory_report(void);
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+/* gow3 5 Nov 2026: from the fault handler: a fault inside a partial remap in progress (or just
+ * ended) waits for it; 1: retry the access. */
+int runtime_memory_wait_carve(uintptr_t address);
 const char *runtime_import_name(const char *name);
 uintptr_t runtime_rwlock_resolve(const char *name);
 void runtime_rwlock_report(void);

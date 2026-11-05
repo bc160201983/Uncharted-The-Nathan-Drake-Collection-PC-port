@@ -276,6 +276,29 @@ CONVOY_SINK_PATCH = ("Uncharted 2 convoy: animation node flag from bit 0 of its 
 ])
 
 
+# gow3 5 Nov 2026: Uncharted 2's leg IK (character-leg-ik.cpp:391, IsFinite(deltaTransform)) asserts
+# on a NaN root delta (upstream #88/#253, the chapter 1 train wreck). The assert path is taken only
+# when the vector compare found a non-finite lane (vmovmskps; test; jz over it); it now zeroes the
+# delta ([r15]) for that frame and goes on where the finite path goes on. 1.02: 58 bytes (the
+# handler from a global, then the reload of [r15]); 1.00: 51 bytes (the handler from a call; the
+# reload follows). Each occurs once in its executable. UNCHARTED_LEG_IK_RESET=0: not applied.
+LEG_IK_NAN_PATCHES = {
+    "big2-ps4_Shipping.elf": [
+        ("Uncharted 2 leg IK: a NaN delta is zeroed instead of asserting", [
+            ("488b05b8cb0f01 4885c0 7427 488d3df8a2a000 488d35c3a1a000 488d15d486a500 488d0d932f9800"
+             " 41b887010000 4531c9 ffd0 cd41 c4c1782807", 0,
+             bytes.fromhex("488b05b8cb0f014885c07427488d3df8a2a000488d35c3a1a000488d15d486a500"
+                           "488d0d932f980041b8870100004531c9ffd0cd41c4c1782807"),
+             bytes.fromhex("c5f857c0c4c1782907eb2f") + b"\xcc" * 47),
+            ("e8a3cbbfff 4885c0 7427 488d3d1bfe2500 488d3592fc2500 488d1506fe2500 488d0dd1fc2500"
+             " 41b887010000 4531c9 ffd0 cd41", 0,
+             bytes.fromhex("e8a3cbbfff4885c07427488d3d1bfe2500488d3592fc2500488d1506fe2500"
+                           "488d0dd1fc250041b8870100004531c9ffd0cd41"),
+             bytes.fromhex("c5f857c0c4c1782907eb2d") + b"\xcc" * 40),
+        ]),
+    ],
+}
+
 JOB_PARAMS_GUARD = {  # executable: (pattern start, the two loads, exit landing, cave)
     "eboot.bin": ("49c7424800000000488b05a4b6b80049894210498b4208488b482049894a18488b4818",
                   0x616aed, 0x616b00, 0x6175ab, 0x617602),
@@ -1459,6 +1482,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         patches.extend(REWARD_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_FOCUS_RESET", "1") != "0":
         patches.extend(FOCUS_NAN_PATCHES.get(executable, []))
+    if os.environ.get("UNCHARTED_LEG_IK_RESET", "1") != "0":
+        patches.extend(LEG_IK_NAN_PATCHES.get(executable, []))
     if executable in JOB_PARAMS_GUARD and os.environ.get("UNCHARTED_JOB_PARAMS_GUARD", "1") != "0":
         patches.append(job_params_guard_patch(executable))
     if executable in ("eboot.bin", "big2-ps4_Shipping.elf") and os.environ.get("UNCHARTED_MOVE_POOL", "1") != "0":

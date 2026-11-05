@@ -973,6 +973,15 @@ private:
     bool recorder_sleeping = false; ///< waiting on recorder_cv (guarded by recorder_mutex)
     bool direct_mode = false; ///< the command buffer is recorded on the caller's thread
     bool checkpoint_callers = false; ///< GOW3_GPU_CHECKPOINTS=2: marks CommandBuffer() callers
+    // gow3 5 Nov 2026: GPU breadcrumbs (vk_scheduler.cpp Checkpoint), for cards without NVIDIA's
+    // diagnostic checkpoints (AMD, Intel, GeForce GTX 10-series): a 4-byte host-visible counter
+    // the GPU writes after each dispatch and render pass; read when the device is lost.
+    void CreateBreadcrumbs();
+    void WriteBreadcrumb(u64 value);
+    vk::Buffer crumb_buffer{};
+    vk::DeviceMemory crumb_memory{};
+    volatile u32* crumb_mapped = nullptr;
+    u64 crumb_pending = 0; ///< the open render pass's checkpoints: written at EndRendering
     u64 host_copies_issued = 0;
     std::atomic<u64> host_copies_done{0};
     std::atomic<u64> guest_write_epoch{0};

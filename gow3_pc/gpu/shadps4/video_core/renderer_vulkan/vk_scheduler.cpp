@@ -41,6 +41,13 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     const char* env = std::getenv("GOW3_VK_RECORD_THREAD");
     const char* checkpoints = std::getenv("GOW3_GPU_CHECKPOINTS");
     checkpoint_callers = instance.HasGpuCheckpoints() && checkpoints && checkpoints[0] == '2';
+    // gow3 5 Nov 2026: breadcrumbs with GOW3_GPU_BREADCRUMBS=1, or with GOW3_GPU_CHECKPOINTS on a
+    // card that has no NVIDIA checkpoints (the same reports for every vendor).
+    const char* crumbs = std::getenv("GOW3_GPU_BREADCRUMBS");
+    if ((crumbs && crumbs[0] == '1') ||
+        (!instance.HasGpuCheckpoints() && checkpoints && checkpoints[0] && checkpoints[0] != '0')) {
+        CreateBreadcrumbs();
+    }
     if (threaded_recording && !(env && env[0] == '0')) {
         record_chunk = AcquireChunk();
         recorder_thread = std::jthread(std::bind_front(&Scheduler::RecorderThread, this));
@@ -216,6 +223,10 @@ void Scheduler::EndRendering() {
     }
     is_rendering = false;
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
+    if (crumb_pending) { // gow3 5 Nov 2026: the pass's draws (breadcrumbs, Checkpoint)
+        WriteBreadcrumb(crumb_pending);
+        crumb_pending = 0;
+    }
 }
 
 void Scheduler::TraceDirectRecording(void* caller) {
@@ -494,11 +505,83 @@ std::array<GpuCheckpoint,65536> gpu_checkpoints;
 std::atomic<u64> checkpoint_index{};
 }
 void Scheduler::Checkpoint(const char* operation,u64 first,u64 second) {
-    if (!instance.HasGpuCheckpoints()) return;
+    const bool nv=instance.HasGpuCheckpoints();
+    if (!nv && !crumb_mapped) return;
     const u64 sequence=checkpoint_index.fetch_add(1);
     auto* marker=&gpu_checkpoints[sequence%gpu_checkpoints.size()];
     *marker={operation,first,second,sequence};
-    Record([marker](vk::CommandBuffer commands) { commands.setCheckpointNV(static_cast<const void*>(marker)); });
+    if (nv) {
+        Record([marker](vk::CommandBuffer commands) { commands.setCheckpointNV(static_cast<const void*>(marker)); });
+    }
+    if (crumb_mapped) {
+        // gow3 5 Nov 2026 (breadcrumbs): the counter holds "every checkpoint below this one
+        // finished". A buffer write is not allowed inside a render pass: a checkpoint there (a
+        // draw) is covered by the write at EndRendering; outside (a dispatch, before its command)
+        // the write goes now.
+        if (is_rendering) {
+            crumb_pending=sequence+1;
+        } else {
+            WriteBreadcrumb(sequence);
+        }
+    }
+}
+
+void Scheduler::CreateBreadcrumbs() {
+    const vk::Device device=instance.GetDevice();
+    auto [buffer_result,buffer]=device.createBuffer(vk::BufferCreateInfo{
+        .size=16,
+        .usage=vk::BufferUsageFlagBits::eTransferDst,
+    });
+    if (buffer_result!=vk::Result::eSuccess) return;
+    const auto requirements=device.getBufferMemoryRequirements(buffer);
+    const auto properties=instance.GetPhysicalDevice().getMemoryProperties();
+    const auto wanted=vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent;
+    u32 type=~0u;
+    for (u32 i=0;i<properties.memoryTypeCount;++i) {
+        if ((requirements.memoryTypeBits&(1u<<i)) && (properties.memoryTypes[i].propertyFlags&wanted)==wanted) {
+            type=i;
+            break;
+        }
+    }
+    vk::DeviceMemory memory{};
+    void* mapped=nullptr;
+    if (type!=~0u) {
+        auto [memory_result,allocated]=device.allocateMemory(vk::MemoryAllocateInfo{
+            .allocationSize=requirements.size,.memoryTypeIndex=type});
+        if (memory_result==vk::Result::eSuccess) memory=allocated;
+    }
+    if (memory && device.bindBufferMemory(buffer,memory,0)==vk::Result::eSuccess) {
+        auto [map_result,pointer]=device.mapMemory(memory,0,VK_WHOLE_SIZE);
+        if (map_result==vk::Result::eSuccess) mapped=pointer;
+    }
+    if (!mapped) {
+        if (memory) device.freeMemory(memory);
+        device.destroyBuffer(buffer);
+        std::printf("GPU breadcrumbs: unavailable (no host-visible memory)\n");
+        return;
+    }
+    crumb_buffer=buffer;
+    crumb_memory=memory;
+    crumb_mapped=static_cast<volatile u32*>(mapped);
+    for (u32 i=0;i<4;++i) crumb_mapped[i]=0;
+    std::printf("GPU breadcrumbs: on (a GPU barrier after every dispatch and render pass: slower; "
+                "a lost device names the work that did not finish)\n");
+    std::fflush(stdout);
+}
+
+void Scheduler::WriteBreadcrumb(u64 value) {
+    const vk::Buffer buffer=crumb_buffer;
+    const u32 low=static_cast<u32>(value);
+    Record([buffer,low](vk::CommandBuffer commands) {
+        const vk::MemoryBarrier2 barrier{
+            .srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask=vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask=vk::PipelineStageFlagBits2::eAllTransfer,
+            .dstAccessMask=vk::AccessFlagBits2::eTransferWrite,
+        };
+        commands.pipelineBarrier2({.memoryBarrierCount=1,.pMemoryBarriers=&barrier});
+        commands.fillBuffer(buffer,0,4,low);
+    });
 }
 /// Set by the buffer cache: prints which arena and guest address a GPU address belongs to.
 std::function<void(u64)> g_describe_gpu_address;
@@ -570,7 +653,26 @@ void DumpGpuCheckpoints(const Instance& instance) {
                      (unsigned long long)marker.first,(unsigned long long)marker.second);
     }
 }
-void Scheduler::ReportCheckpoints() const { DumpGpuCheckpoints(instance); }
+void Scheduler::ReportCheckpoints() const {
+    DumpGpuCheckpoints(instance);
+    if (!crumb_mapped) return;
+    // gow3 5 Nov 2026 (breadcrumbs): the counter's low 32 bits, widened by the recorded count.
+    const u64 recorded=checkpoint_index.load();
+    u64 done=(recorded&~0xffffffffull)|crumb_mapped[0];
+    if (done>recorded && done>=(1ull<<32)) done-=1ull<<32;
+    std::fprintf(stderr,"GPU breadcrumbs: every checkpoint before %llu finished, %llu recorded; "
+                 "the GPU stopped in one of these:\n",
+                 (unsigned long long)done,(unsigned long long)recorded);
+    for (u64 sequence=done;sequence<recorded && sequence<done+16;++sequence) {
+        if (recorded-sequence>gpu_checkpoints.size()) continue;
+        const auto& marker=gpu_checkpoints[sequence%gpu_checkpoints.size()];
+        std::fprintf(stderr,"GPU breadcrumbs:   %llu %s shaders %08llx %08llx\n",
+                     (unsigned long long)marker.sequence,marker.operation ? marker.operation : "?",
+                     (unsigned long long)(marker.first&0xffffffffull),
+                     (unsigned long long)(marker.second&0xffffffffull));
+    }
+    std::fflush(stderr);
+}
 
 void Scheduler::Finish(std::source_location caller) {
     // When finishing, we need to wait for the submission to have executed on the device.

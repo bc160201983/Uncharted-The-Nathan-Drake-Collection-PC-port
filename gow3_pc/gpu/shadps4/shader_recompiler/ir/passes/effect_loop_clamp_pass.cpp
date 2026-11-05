@@ -28,6 +28,66 @@ namespace Shader::Optimization {
 // the clamp off, a large n reproduces the hang; with it on, the dispatch stays short).
 constexpr u32 MaxEffectLoopCount = 4096;
 
+// gow3 5 Nov 2026 (Uncharted 3 chapters 2-3 device lost at the museum exit, GitHub #292 #295 #354
+// #328): pixel shader 689d1af9, a soft-shadow filter shared by the three games, loops over a line
+// of depth taps whose count it reads from a constant buffer (one u32). The same stale or garbage
+// data as above turns that count into billions and the GPU resets. A tap count is small, so its
+// loop compares are clamped lower, to MaxShadowTaps. Same switch (GOW3_EFFECT_LOOP_CLAMP=0: off).
+constexpr u64 ShadowTapShader = 0x689d1af9;
+constexpr u32 MaxShadowTaps = 256;
+
+static bool IsLoopCompare(IR::Opcode op) {
+    switch (op) {
+    case IR::Opcode::ULessThan32:
+    case IR::Opcode::ULessThanEqual32:
+    case IR::Opcode::UGreaterThan32:
+    case IR::Opcode::UGreaterThanEqual32:
+    case IR::Opcode::SLessThan32:
+    case IR::Opcode::SLessThanEqual32:
+    case IR::Opcode::SGreaterThan32:
+    case IR::Opcode::SGreaterThanEqual32:
+    case IR::Opcode::IEqual32:
+    case IR::Opcode::INotEqual32:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// The shadow-tap shader: every integer compare of a constant-buffer u32 with a loop counter (a
+/// phi, either operand) compares with min(count, MaxShadowTaps) instead. Returns the counts patched.
+static u32 ClampShadowTapLoops(IR::Program& program) {
+    u32 patched = 0;
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            const IR::Opcode op = inst.GetOpcode();
+            if (op != IR::Opcode::ReadConstBuffer && op != IR::Opcode::LoadBufferU32) {
+                continue;
+            }
+            std::vector<IR::Use> compares;
+            for (const IR::Use& use : inst.Uses()) {
+                if (!IsLoopCompare(use.user->GetOpcode())) {
+                    continue;
+                }
+                if (use.user->Arg(use.operand == 0 ? 1 : 0).IsPhi()) {
+                    compares.push_back(use);
+                }
+            }
+            if (compares.empty()) {
+                continue;
+            }
+            IR::IREmitter ir{*inst.GetParent(),
+                             std::next(IR::Block::InstructionList::s_iterator_to(inst))};
+            const IR::U32 bound = ir.IMin(IR::U32{&inst}, ir.Imm32(MaxShadowTaps), false);
+            for (const IR::Use& use : compares) {
+                use.user->SetArg(use.operand, bound);
+            }
+            ++patched;
+        }
+    }
+    return patched;
+}
+
 static u32 TestEffectLoopCount() {
     static const u32 value = [] {
         const char* env = std::getenv("GOW3_TEST_EFFECT_LOOP_COUNT");
@@ -41,12 +101,27 @@ bool EffectLoopClamp(u64 pgm_hash) {
         const char* env = std::getenv("GOW3_EFFECT_LOOP_CLAMP");
         return !(env && env[0] == '0');
     }();
+    if (pgm_hash == ShadowTapShader) {
+        return enabled;
+    }
     return IsEffectShader(pgm_hash) && (enabled || TestEffectLoopCount() != 0);
 }
 
 void EffectLoopClampPass(IR::Program& program) {
     const u64 hash = program.info.pgm_hash;
     if (!EffectLoopClamp(hash)) {
+        return;
+    }
+    if (hash == ShadowTapShader) {
+        const u32 patched = ClampShadowTapLoops(program);
+        static u32 shadow_reports = 0;
+        if (shadow_reports < 4) {
+            ++shadow_reports;
+            std::printf("GPU: shadow filter %#llx: tap loop clamped to %u in %u place(s) "
+                        "(GOW3_EFFECT_LOOP_CLAMP)\n",
+                        static_cast<unsigned long long>(hash), MaxShadowTaps, patched);
+            std::fflush(stdout);
+        }
         return;
     }
     static const bool clamp_on = [] {

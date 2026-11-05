@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+
 #include "common/assert.h"
 #include "common/div_ceil.h"
 #include "common/logging/log.h"
@@ -486,8 +488,21 @@ void EmitContext::DefineInputs() {
         break;
     }
     case SwStage::Compute:
+        // gow3 5 Nov 2026: split workgroups (WorkgroupSplit): the guest IDs come from the host
+        // workgroup ID too. Only shaders that share nothing within a workgroup may be listed (the
+        // dispatch splits by the same list): one that does would be named in the log.
+        workgroup_split = WorkgroupSplit(info.pgm_hash, runtime_info.hw.cs.workgroup_size);
+        if (workgroup_split > 1 &&
+            (info.shared_types != IR::Type::Void || info.shared_memory_scratch_size != 0 ||
+             info.loads.GetAny(IR::Attribute::WorkgroupIndex))) {
+            std::fprintf(stderr, "GPU: compute shader %#llx shares data within its workgroup: "
+                                 "listed for WorkgroupSplit by mistake\n",
+                         static_cast<unsigned long long>(info.pgm_hash));
+        }
         if (info.loads.GetAny(IR::Attribute::WorkgroupIndex) ||
-            info.loads.GetAny(IR::Attribute::WorkgroupId)) {
+            info.loads.GetAny(IR::Attribute::WorkgroupId) ||
+            (workgroup_split > 1 && (info.loads.GetAny(IR::Attribute::LocalInvocationId) ||
+                                     info.loads.Get(IR::Attribute::LocalInvocationIndex)))) {
             workgroup_id =
                 DefineVariable(U32[3], spv::BuiltIn::WorkgroupId, spv::StorageClass::Input);
         }

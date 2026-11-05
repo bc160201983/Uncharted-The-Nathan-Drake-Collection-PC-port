@@ -442,6 +442,11 @@ static void cover_current_stack(const CONTEXT *context) {
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    /* gow3 5 Nov 2026: a page briefly missing while another thread remaps its view (runtime_memory.c
+     * runtime_memory_wait_carve): retry once the remap is done. */
+    if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2 &&
+        runtime_memory_wait_carve((uintptr_t)record->ExceptionInformation[1]))
+        return EXCEPTION_CONTINUE_EXECUTION;
     if (code==EXCEPTION_STACK_OVERFLOW) {
         /* gow3 1 Nov 2026: a stack overflow leaves almost no stack for the report below (the
          * 2 GB card simulation died silently). First a few fixed lines written with no stack use:
