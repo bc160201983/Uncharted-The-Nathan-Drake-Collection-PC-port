@@ -114,6 +114,19 @@ public:
         return *square_pipeline;
     }
 
+    /// gow3: the same pipeline with an RGBA16F color target 0, for draws the HDR10 chain sends
+    /// to its float HUD / display images (TemporalUpscaler::RedirectColor). Null unless the
+    /// pipeline has one RGBA8 color target.
+    vk::Pipeline FloatTargetHandle() const noexcept {
+        return *float_pipeline;
+    }
+
+    /// gow3: HDR10 tone pass: this draw again with a replacement fragment shader
+    /// (hdr/fs_<hash>_hdr.spv) into an RGBA16F shadow target. Null for other pipelines.
+    vk::Pipeline HdrShadowHandle() const noexcept {
+        return *hdr_shadow_pipeline;
+    }
+
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>
     void GetVertexInputs(VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
@@ -135,6 +148,9 @@ private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
     vk::UniquePipeline square_pipeline;
+    vk::UniquePipeline float_pipeline;
+    vk::UniquePipeline hdr_shadow_pipeline;
+    bool hdr_settings_binding = false;
 };
 
 struct ClipDistanceShaderKey {

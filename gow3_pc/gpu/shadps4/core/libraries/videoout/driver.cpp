@@ -396,8 +396,10 @@ void VideoOutDriver::Flip(const Request& req) {
     const vk::Semaphore flip_ready_semaphore = req.frame ? req.frame->ready_semaphore : vk::Semaphore{};
     const u64 flip_ready_tick = req.frame ? req.frame->ready_tick : 0;
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
+    // gow3: the menu's HDR setting outputs HDR10 for games that only render SDR.
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
-        presenter->SetHDR(hdr);
+        const bool own_hdr = Gow3Settings::Get().hdr && !hdr;
+        presenter->SetHDR(hdr || own_hdr, own_hdr);
         presenter->Present(frame);
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left

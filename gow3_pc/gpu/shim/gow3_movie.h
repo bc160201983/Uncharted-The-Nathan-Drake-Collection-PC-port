@@ -43,6 +43,14 @@ bool IsMovieShader(const std::uint32_t* code, std::size_t words);
 // A movie shader literal at the display size; false for any other value.
 bool MovieShaderConstant(std::uint32_t bits, float& patched);
 
+// Uncharted 2's movie shader is a compute shader of 32x2 threads, one per pixel, and the player
+// dispatches width / 32 groups rounded down: exact at 1920, but 16 columns short at 3440 or 2288
+// (a .5), so the right edge kept whatever was there before (a white bar). For a movie shader's key
+// (ShaderKey) the group counts are raised to cover the display size; the extra threads past the
+// target's edge are dropped by the GPU (robust image access). Unchanged for any other shader.
+void CoverDisplay(std::uint64_t key, std::uint32_t threads_x, std::uint32_t threads_y,
+                  std::uint32_t& groups_x, std::uint32_t& groups_y);
+
 // An image over a recorded frame described with the display size: the plane in the scratch
 // frame, else as decoded (address, size and pitch in elements). bits: bits per element (8 luma,
 // 16 chroma). True when changed.

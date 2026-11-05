@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// gow3: HDR10 HUD composition. The HUD draws into the upscaled frame through sRGB views (they
+// blend in linear light) and the later draws into the display buffer through UNORM views (they
+// blend the stored values). With the float images of the HDR10 chain each keeps that domain:
+// MODE 0: the 8-bit upscaled frame (stored sRGB-encoded values) -> linear, for the HUD;
+// MODE 1: the linear frame with its HUD -> stored values, into the display buffer;
+// MODE 2: the upscaled HDR scene (linear, 1.0 = the game's white) -> the HUD's domain: equal up
+//         to 1.0 (the SDR frame's value there), above it the value the presenter's gamma 2.2
+//         decode of the stored value turns back into the scene's own. A source smaller than
+//         the target (TAA at the render size, the Scene shadow without an upscaler) is
+//         stretched bilinearly from its top-left source_width x source_height.
+// Values above 1.0 (HDR highlights) keep the curves' extension.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#if MODE == 0
+layout(binding = 0, rgba8) uniform readonly image2D source;
+#else
+layout(binding = 0, rgba16f) uniform readonly image2D source;
+#endif
+layout(binding = 1, rgba16f) uniform writeonly image2D target;
+// Scene storage is rebased to UI white before native HUD/menu blending.
+layout(push_constant) uniform HdrComposition {
+    float stored_scale;
+    uint source_width, source_height;
+} settings;
+
+vec3 Decode(vec3 v) {
+    const vec3 a = abs(v);
+    return sign(v) * mix(pow((a + 0.055) / 1.055, vec3(2.4)), a / 12.92, lessThanEqual(a, vec3(0.04045)));
+}
+
+vec3 Encode(vec3 v) {
+    const vec3 a = abs(v);
+    return sign(v) * mix(1.055 * pow(a, vec3(1.0 / 2.4)) - 0.055, a * 12.92, lessThan(a, vec3(0.0031308)));
+}
+
+vec4 Load(ivec2 pixel, ivec2 target_size) {
+#if MODE == 2
+    const ivec2 size = ivec2(settings.source_width, settings.source_height);
+    if (size != target_size) {
+        const vec2 p = (vec2(pixel) + 0.5) * vec2(size) / vec2(target_size) - 0.5;
+        const ivec2 base = ivec2(floor(p));
+        const vec2 f = p - vec2(base);
+        const ivec2 last = size - 1;
+        const vec4 c00 = imageLoad(source, clamp(base, ivec2(0), last));
+        const vec4 c10 = imageLoad(source, clamp(base + ivec2(1, 0), ivec2(0), last));
+        const vec4 c01 = imageLoad(source, clamp(base + ivec2(0, 1), ivec2(0), last));
+        const vec4 c11 = imageLoad(source, clamp(base + ivec2(1, 1), ivec2(0), last));
+        return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    }
+#endif
+    return imageLoad(source, pixel);
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 target_size = imageSize(target);
+    if (any(greaterThanEqual(pixel, target_size))) {
+        return;
+    }
+    vec4 color = Load(pixel, target_size);
+#if MODE == 0
+    color.rgb = Decode(color.rgb);
+#elif MODE == 1
+    color.rgb = Encode(color.rgb);
+#else
+    color.rgb = max(color.rgb, 0.0);
+    color.rgb = mix(color.rgb, Decode(pow(color.rgb, vec3(1.0 / 2.2))), greaterThan(color.rgb, vec3(1.0)));
+    color.a = 1.0;
+#endif
+#if MODE != 1
+    // Work in the game's stored-value domain so changing UI white cancels exactly
+    // at presentation for the scene. Native UI sources still use white = 1.
+    color.rgb = Decode(Encode(color.rgb) * settings.stored_scale);
+#endif
+    imageStore(target, pixel, color);
+}
