@@ -34,6 +34,16 @@ class UpdateError(Exception):
 
 def sfo_values(path):
     """The entries of a param.sfo (strings and integers)."""
+    try:
+        return _sfo_values(path)
+    except UpdateError:
+        raise
+    except (struct.error, ValueError, IndexError, OSError) as error:
+        # Truncated or corrupt file: tell the player instead of failing silently.
+        raise UpdateError(f"The update's param.sfo is damaged ({error}).") from error
+
+
+def _sfo_values(path):
     data = Path(path).read_bytes()
     magic, _, keys, values, count = struct.unpack_from("<IIIII", data)
     if magic != 0x46535000:

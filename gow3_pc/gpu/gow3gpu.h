@@ -34,8 +34,10 @@ int gow3gpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
 int gow3gpu_text_input_poll(char *out_utf8, uint64_t size);
 /* A list for the player to choose from, drawn over the game (save list). images: a PNG path per
  * item drawn beside it (NULL array or entry: none). begin: 0 when no window exists.
- * poll: -1 while open, -2 cancelled, else the chosen index. */
-int gow3gpu_choice_begin(const char *title, const char *const *items, const char *const *images, int count, int focus);
+ * deletable_from: the first entry the player may delete (Delete / Triangle twice), -1: none.
+ * poll: -1 while open, -2 cancelled, <= -3 entry -3 - result deleted, else the chosen index. */
+int gow3gpu_choice_begin(const char *title, const char *const *items, const char *const *images, int count, int focus,
+                         int deletable_from);
 int gow3gpu_choice_poll(void);
 /* Trophies (gow3_trophies.cpp): the running game's list (its trophy pack, a host path; the list
  * number 1-3; 128 earned flags), then each newly earned trophy, shown as a popup. */
@@ -56,6 +58,12 @@ int gow3gpu_mouse_take_look(float *dx, float *dy);
 int gow3gpu_mouse_look_recent(void);
 /* 20 Oct 2026: camera hook calls so far, and whether hooks get the mouse (0) or not (1). */
 unsigned gow3gpu_mouse_look_calls(void);
+/* The last picture of the game in play (gow3_thumbnail.h) written as a PNG for the save list;
+ * 1 when written, 2 when the game is not in play now (the next picture once it is, within 10
+ * minutes), 0 when it could not be written. */
+int gow3gpu_thumbnail_save(const char *path);
+/* Options was pressed (runtime_pad.c): the picture now is kept for a save made from the save list. */
+void gow3gpu_thumbnail_pause(void);
 void gow3gpu_mouse_look_pause(int paused);
 void gow3gpu_mouse_inject(float dx, float dy);
 /* Button prompts (gow3_prompts.cpp): per PS4 button a label. Set 0, keyboard and mouse: its key

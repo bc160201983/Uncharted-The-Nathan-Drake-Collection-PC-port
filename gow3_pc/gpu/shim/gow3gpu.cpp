@@ -5,6 +5,7 @@
 #include "gow3_overlay.h"
 #include "gow3_png.h"
 #include "gow3_settings.h"
+#include "gow3_thumbnail.h"
 #include "gow3_trophies.h"
 #include "gow3_copy.h"
 #ifndef _WIN32
@@ -627,7 +628,7 @@ static int TestChoice() {
 }
 
 extern "C" int gow3gpu_choice_begin(const char* title, const char* const* items, const char* const* images,
-                                    int count, int focus) {
+                                    int count, int focus, int deletable_from) {
     if (!g_window || count <= 0) return 0;
     if (const int pick = TestChoice(); pick >= 0) {
         g_test_choice = std::min(pick, count - 1);
@@ -642,8 +643,11 @@ extern "C" int gow3gpu_choice_begin(const char* title, const char* const* items,
             LOG_WARNING(Lib_SaveDataDialog, "save list: no picture from {}", images[i]);
         }
     }
+    if (title && std::strcmp(title, "Save game") == 0) {
+        Gow3Thumbnail::NoteSaveList();
+    }
     Gow3Overlay::BeginChoice(title ? title : "", std::vector<std::string>(items, items + count),
-                             std::move(pictures), focus);
+                             std::move(pictures), focus, deletable_from);
     return 1;
 }
 

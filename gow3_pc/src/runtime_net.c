@@ -137,24 +137,35 @@ static int net_game = -1;                      /* the net game: host's own, or f
 static char title[48];                         /* the game's title (GOW3_NET_TITLE / the welcome) */
 static volatile LONG public_players = 1;       /* for the LAN search: us + joiners with a hello */
 
-static void out_append(NetPeer *p, const void *data, size_t n) {
-    if (p->out_len + n > p->out_cap) {
-        size_t cap = p->out_cap ? p->out_cap : 65536;
-        while (cap < p->out_len + n) cap *= 2;
-        unsigned char *b = realloc(p->out, cap);
-        if (!b) return;
-        p->out = b;
-        p->out_cap = cap;
-    }
-    memcpy(p->out + p->out_len, data, n);
-    p->out_len += n;
+/* A peer that stops reading (frozen, stalled network with the socket still open) must not make
+ * the outbox grow without limit: past this the connection is closed. */
+#define NET_OUT_MAX ((size_t)16 << 20)
+static int out_reserve(NetPeer *p, size_t n) {
+    if (p->out_len + n <= p->out_cap) return 1;
+    size_t cap = p->out_cap ? p->out_cap : 65536;
+    while (cap < p->out_len + n) cap *= 2;
+    unsigned char *b = realloc(p->out, cap);
+    if (!b) return 0;
+    p->out = b;
+    p->out_cap = cap;
+    return 1;
 }
 static void queue_frame(NetPeer *p, uint32_t kind, uint32_t bits, const void *words) {
     const uint32_t head[2] = {kind, bits};
+    const size_t body = (size_t)(bits + 31) / 32 * 4;
     EnterCriticalSection(&lock);
     if (p->up) {
-        out_append(p, head, sizeof(head));
-        out_append(p, words, (bits + 31) / 32 * 4);
+        /* Header and body go in together: a header without its body would misalign every
+         * later frame on the other side. */
+        if (p->out_len + sizeof(head) + body > NET_OUT_MAX || !out_reserve(p, sizeof(head) + body)) {
+            printf("Net: player %d is not taking data (%zu bytes waiting): closing that connection\n",
+                   p->id, p->out_len);
+            p->up = 0;
+        } else {
+            memcpy(p->out + p->out_len, head, sizeof(head));
+            memcpy(p->out + p->out_len + sizeof(head), words, body);
+            p->out_len += sizeof(head) + body;
+        }
     }
     LeaveCriticalSection(&lock);
 }
@@ -490,14 +501,15 @@ static void hello(NetPeer *p, const NetFrame *f) {
     if (f->words[0] != NET_VERSION)
         printf("Net: player %d runs another version of this transport (%u, ours %u)\n", id, f->words[0], NET_VERSION);
     int given = id;
-    if (hosting && (id <= 1 || id >= 32 || id_taken(p, id))) {
+    /* ids are player slots 1..NET_MAX_PLAYERS: a larger one would map onto the host's slot */
+    if (hosting && (id <= 1 || id > NET_MAX_PLAYERS || id_taken(p, id))) {
         /* "auto" (0) or a taken id: the lowest free one (1 is the host) */
         given = 0;
-        for (int k = 2; k < 32 && !given; ++k)
+        for (int k = 2; k <= NET_MAX_PLAYERS && !given; ++k)
             if (!id_taken(p, k)) given = k;
         if (given) printf("Net: player %s gets id %d\n", name, given);
     }
-    if (given <= 0 || given >= 32 || id_taken(p, given)) {
+    if (given <= 0 || given > NET_MAX_PLAYERS || id_taken(p, given)) {
         printf("Net: player id %d is out of range or taken: closing that connection\n", id);
         shutdown(p->sock, SD_BOTH);
         return;

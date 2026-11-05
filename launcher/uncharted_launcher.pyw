@@ -1340,7 +1340,11 @@ def write_config(config):
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
-        CONFIG_FILE.write_text(text, encoding="utf-8")
+        try:
+            CONFIG_FILE.write_text(text, encoding="utf-8")
+        except OSError as error:
+            # Still locked: the settings are kept for the next write; the launcher keeps running.
+            print(f"Could not write {CONFIG_FILE}: {error}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -3203,9 +3207,12 @@ class Launcher:
                 self.update_busy = False
                 messagebox.showerror(APP_TITLE, f"The update could not be started:\n\n{error}")
                 return
-            self.config["window_xy"] = [self.root.winfo_x(), self.root.winfo_y()]
-            write_config(self.config)
-            self.root.destroy()
+            try:
+                self.config["window_xy"] = [self.root.winfo_x(), self.root.winfo_y()]
+                write_config(self.config)
+            finally:
+                # The updater waits for this process to exit: close even if the settings failed.
+                self.root.destroy()
             return
         done, total = self.update_progress
         amount = f"{100 * done / total:.0f}%" if total else f"{done / 1e6:.0f} MB"

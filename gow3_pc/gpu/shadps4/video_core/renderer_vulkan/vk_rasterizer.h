@@ -397,9 +397,12 @@ private:
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
-    boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+    // gow3: descriptor elements for a whole pipeline (all stages), with one per mip of a mip-array
+    // image (up to 16, also for a typed null) and one per sampler: NUM_IMAGES overflowed there.
+    static constexpr size_t MaxImageDescriptors = Shader::NUM_IMAGES * 16 + Shader::NUM_SAMPLERS * 5;
+    boost::container::static_vector<vk::DescriptorImageInfo, MaxImageDescriptors> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
-    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
+    boost::container::static_vector<VideoCore::ImageId, MaxImageDescriptors> bound_images;
     struct BoundBuffer {
         const VideoCore::Buffer* buffer;
         u64 offset;
@@ -477,7 +480,7 @@ private:
                                                               const Shader::ImageResource& res) {
         return CachedImageDescEntry(sharp, res).desc;
     }
-    boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
+    boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES * 16> image_bindings;
     struct VertexBinds {
         VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
         VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
@@ -519,7 +522,7 @@ private:
     /// Draws whose textures the helper bound completely, partly or not at all (GOW3_FRAME_STATS).
     u64 helper_full = 0, helper_partial = 0, helper_serial = 0;
     /// The memoized cache entry of each image binding (FindImage memo taken), else null.
-    boost::container::static_vector<ImageDescCacheEntry*, Shader::NUM_IMAGES> image_binding_entries;
+    boost::container::static_vector<ImageDescCacheEntry*, Shader::NUM_IMAGES * 16> image_binding_entries;
     bool fault_process_pending{};
     // gow3: small shader storage writes since the last submission (GOW3_SYNC_GPU_CONSTANTS).
     std::vector<std::pair<VAddr, u64>> small_gpu_writes;

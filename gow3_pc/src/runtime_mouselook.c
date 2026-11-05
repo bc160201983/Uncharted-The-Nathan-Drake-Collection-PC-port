@@ -1053,6 +1053,65 @@ static ABI void *u1_cover_camera_input(unsigned char *location, unsigned char *c
     return NULL;
 }
 
+/* The jeep's mounted gun (CameraControlRailVehicle, GitHub #250; the camera of the rail vehicle chases,
+ * the gun fires where it looks). Its update (0x2a7530, vtable 0x92ebd0 + 0x98) calls the look step
+ * 0x2a9690(camera, look, pad input): look + 4 the yaw and + 8 the pitch (radians), each turned by
+ * -stick * rate * the game's camera speed (0xa4cb10) degrees past a dead zone (right x: rate tune[0x20],
+ * dead zone tune[0x44]; right y: tune[0x1c], tune[0x40]; tune = *(camera + 0x1e8 + facing * 8), facing
+ * camera + 0x204), with their own invert options (ints at 0x95ca28 left/right, 0x95ca2c up/down), then
+ * kept inside tune[0x2c]..tune[0x30] (yaw) and tune[0x24]..tune[0x28] (pitch) degrees. The mouse turns
+ * the yaw and pitch at the step's entry, the same angle per count as the other cameras (pitch through
+ * the rates' ratio); the game's limits still apply after it. Not verified in game yet;
+ * GOW3_MOUSE_LOOK_U1_RAIL=0: the mouse is the stick there again. */
+static int u1_rail_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *env = getenv("GOW3_MOUSE_LOOK_U1_RAIL");
+        enabled = u1_enabled() && !(env && env[0] == '0');
+    }
+    return enabled;
+}
+static FrameTurn u1_rail_frame;
+static ABI void *u1_rail_look_input(unsigned char *camera, unsigned char *look, void *input) {
+    (void)input;
+    if (!camera || !look) return NULL;
+    float *yaw = (float *)(look + 4), *pitch = (float *)(look + 8);
+    const unsigned facing = *(const unsigned *)(camera + 0x204);
+    const float *tune = facing < 4 ? *(const float *const *)(camera + 0x1e8 + facing * 8) : NULL;
+    const float heading = *yaw * 57.29578f, pitch_in = *pitch * 57.29578f;
+    if (look_debug()) {
+        static uint64_t last;
+        const uint64_t now = now_ms();
+        if (now - last >= 500) {
+            last = now;
+            printf("U1 rail debug: facing %u, yaw %.1f, pitch %.1f, rates %g %g, mouse %s\n", facing, heading, pitch_in,
+                   tune ? tune[0x20 / 4] : 0.0f, tune ? tune[0x1c / 4] : 0.0f, u1_rail_enabled() ? "direct" : "stick (off)");
+            fflush(stdout);
+        }
+    }
+    if (!u1_rail_enabled() || !tune) {
+        mouse_trace("u1r", camera, 1, heading, pitch_in, 0.0f, 0.0f, 'o');
+        return NULL;
+    }
+    if (!isfinite(*yaw) || !isfinite(*pitch) || fabsf(*yaw) > 7.0f || fabsf(*pitch) > 3.2f) {
+        mouse_trace("u1r", camera, 1, heading, pitch_in, 0.0f, 0.0f, 'u');
+        return NULL;
+    }
+    float dx = 0, dy = 0;
+    char mode = '-';
+    const int took = frame_take(&u1_rail_frame, camera, &dx, &dy, &mode);
+    mouse_trace("u1r", camera, 1, heading, pitch_in, dx, dy, mode);
+    if (!took || (dx == 0.0f && dy == 0.0f)) return NULL;
+    game_invert((const int *)(image + 0x95ca28), &dx, &dy);
+    const float per_count = look_scale();
+    const float yaw_rate = tune[0x20 / 4], pitch_rate = tune[0x1c / 4];
+    const float ratio = isfinite(yaw_rate) && isfinite(pitch_rate) && yaw_rate > 1e-3f && pitch_rate > 0.0f
+                            ? pitch_rate / yaw_rate : 1.0f;
+    if (dx != 0.0f) *yaw -= dx * per_count;
+    if (dy != 0.0f) *pitch -= dy * per_count * look_invert() * ratio;
+    return NULL;
+}
+
 /* gow3 24 Oct 2026: direct mouse aim and cover cameras in Uncharted 2 and 3. While the aim button is
  * held the games turn their aim (zoom) cameras by the right stick through a shared aim function
  * (U3 0x9285c0, U2 0x71a1b0) with a dead zone, a response curve and a turn rate that ramps up while
@@ -1481,6 +1540,14 @@ static const MouseLookSite sites[] = {
       0x08, 0x03, 0x00, 0x00, 0x45, 0x89, 0xc4, 0x48},
      24,
      (void *)u1_aim_input},
+    /* The jeep's mounted gun (CameraControlRailVehicle's look step, #250). */
+    {"Uncharted 1 (rail vehicle gun)",
+     0x2a9690,
+     6, /* push rbp; mov rbp, rsp; push r15 */
+     {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0x49, 0x89,
+      0xd7, 0x49, 0x89, 0xf4, 0x49, 0x89, 0xfe, 0x45},
+     24,
+     (void *)u1_rail_look_input},
 };
 
 const MouseLookSite *runtime_mouselook_sites(unsigned *count) {

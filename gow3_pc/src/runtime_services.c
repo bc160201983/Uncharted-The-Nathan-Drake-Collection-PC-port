@@ -329,8 +329,33 @@ static struct {
     void *user_data;
     char dirs[32][32];
     int dir_count, has_new, choosing;
+    const char *title;
 } save_dialog;
-static char save_labels[33][200], save_icons[33][720];
+static char save_labels[33][768], save_icons[33][720];
+/* A param text field, at most `max` bytes, cut at a whole UTF-8 character (a cut inside one made the
+ * list show U+FFFD and swallowed the line break after it). Arabic titles come in presentation forms
+ * (U+FE70..U+FEFF, already in display order) with '_' for some spaces: those show as spaces. Trailing
+ * line breaks go. */
+static void save_text(char *out, size_t size, const char *field, size_t max) {
+    size_t n=strnlen(field,max);
+    if (n>=size) n=size-1;
+    if (n<strnlen(field,max+1)) {
+        size_t start=n;
+        while (start>0 && ((unsigned char)field[start-1]&0xc0)==0x80) --start;
+        if (start>0) {
+            const unsigned char lead=(unsigned char)field[start-1];
+            const size_t need=lead>=0xf0 ? 4 : lead>=0xe0 ? 3 : lead>=0xc0 ? 2 : 1;
+            if (n-(start-1)<need) n=start-1;
+        }
+    }
+    memcpy(out,field,n);
+    out[n]=0;
+    int arabic=0;
+    for (size_t i=0;i+1<n;++i)
+        if ((unsigned char)out[i]==0xef && (unsigned char)out[i+1]>=0xb9 && (unsigned char)out[i+1]<=0xbb) { arabic=1; break; }
+    if (arabic) for (size_t i=0;i<n;++i) if (out[i]=='_') out[i]=' ';
+    while (n && (out[n-1]=='\n' || out[n-1]=='\r' || out[n-1]==' ')) out[--n]=0;
+}
 static void save_label(char *out, size_t size, const char *dir) {
     unsigned char param[RUNTIME_SAVE_PARAM_SIZE];
     if (runtime_savedata_param(USER_ID,dir,param)) { snprintf(out,size,"%s",dir); return; }
@@ -342,9 +367,39 @@ static void save_label(char *out, size_t size, const char *dir) {
     localtime_r(&t,&tm);
 #endif
     char when[32]; strftime(when,sizeof(when),"%Y-%m-%d %H:%M",&tm);
-    const char *title=(const char *)param, *subtitle=(const char *)param+128;
-    /* Title, subtitle and date on their own lines, beside the save's picture. */
-    snprintf(out,size,"%.60s\n%.60s%s%s",title[0] ? title : dir,subtitle,subtitle[0] ? "\n" : "",when);
+    /* Title, subtitle (chapter and progress), detail (play time, treasures) and date on their own
+     * lines, beside the save's picture. */
+    char title[128], subtitle[128], detail[320];
+    save_text(title,sizeof(title),(const char *)param,127);
+    save_text(subtitle,sizeof(subtitle),(const char *)param+128,127);
+    save_text(detail,sizeof(detail),(const char *)param+256,1023);
+    snprintf(out,size,"%s\n%s%s%s%s%s",title[0] ? title : dir,subtitle,subtitle[0] ? "\n" : "",detail,
+             detail[0] ? "\n" : "",when);
+}
+/* Shows the list (New save first when offered, then the saves); the saves can be deleted from it.
+ * Nothing to show or no window: the dialog ends cancelled. */
+static void save_list_show(int focus) {
+    const char *labels[33], *icons[33]; int n=0;
+    if (save_dialog.has_new) { snprintf(save_labels[n],sizeof(save_labels[n]),"New save"); labels[n]=save_labels[n]; icons[n]=NULL; ++n; }
+    for (int i=0;i<save_dialog.dir_count;++i) {
+        save_label(save_labels[n],sizeof(save_labels[n]),save_dialog.dirs[i]); labels[n]=save_labels[n];
+        icons[n]=runtime_savedata_icon(USER_ID,save_dialog.dirs[i],save_icons[n],sizeof(save_icons[n])) ? NULL : save_icons[n];
+        ++n;
+    }
+    if (focus>=n) focus=n-1;
+    if (focus<0) focus=0;
+    const char *title=save_dialog.title;
+    if (!n || !gow3gpu_choice_begin(title,labels,icons,n,focus,save_dialog.dir_count ? save_dialog.has_new : -1)) {
+        printf("Runtime: SaveDataDialog list (%s): %s\n",title,n ? "no window, cancelled" : "no saves, cancelled");
+        save_dialog.choosing=0;
+        save_dialog.result=SAVE_RESULT_CANCELED;
+        save_dialog.dir_count=0;
+        dialogs[2].status=DIALOG_FINISHED; dialogs[2].button=0;
+        return;
+    }
+    printf("Runtime: SaveDataDialog list (%s): %d entries shown\n",title,n);
+    save_dialog.choosing=1;
+    dialogs[2].status=DIALOG_RUNNING;
 }
 static ABI int32_t save_init(void) { return dialog_init(2); }
 static ABI int32_t save_open(const unsigned char *p) {
@@ -362,29 +417,24 @@ static ABI int32_t save_open(const unsigned char *p) {
         save_dialog.has_new=new_item!=NULL;
     }
     if (save_dialog.mode!=SAVE_MODE_LIST) return dialog_open_mode(2,p,52,5);
-    const char *labels[33], *icons[33]; int n=0;
-    if (save_dialog.has_new) { snprintf(save_labels[n],sizeof(save_labels[n]),"New save"); labels[n]=save_labels[n]; icons[n]=NULL; ++n; }
-    for (int i=0;i<save_dialog.dir_count;++i) {
-        save_label(save_labels[n],sizeof(save_labels[n]),save_dialog.dirs[i]); labels[n]=save_labels[n];
-        icons[n]=runtime_savedata_icon(USER_ID,save_dialog.dirs[i],save_icons[n],sizeof(save_icons[n])) ? NULL : save_icons[n];
-        ++n;
-    }
     uint32_t type; memcpy(&type,p+56,4);
-    const char *title=type==1 ? "Save game" : type==2 ? "Load game" : "Delete save";
-    if (!n || !gow3gpu_choice_begin(title,labels,icons,n,0)) {
-        printf("Runtime: SaveDataDialog list (%s): %s\n",title,n ? "no window, cancelled" : "no saves, cancelled");
-        save_dialog.result=SAVE_RESULT_CANCELED;
-        dialogs[2].status=DIALOG_FINISHED; dialogs[2].button=0;
-        return 0;
-    }
-    printf("Runtime: SaveDataDialog list (%s): %d entries shown\n",title,n);
-    save_dialog.choosing=1;
-    dialogs[2].status=DIALOG_RUNNING;
+    save_dialog.title=type==1 ? "Save game" : type==2 ? "Load game" : "Delete save";
+    save_list_show(0);
     return 0;
 }
 static ABI int32_t save_status(void) {
     if (save_dialog.choosing) {
         int choice=gow3gpu_choice_poll();
+        if (choice<=-3) {
+            /* The player deleted a save from the list: it leaves the list, which shows again. */
+            const int entry=-3-choice, dir=entry-save_dialog.has_new;
+            if (dir>=0 && dir<save_dialog.dir_count && !runtime_savedata_trash(USER_ID,save_dialog.dirs[dir])) {
+                memmove(save_dialog.dirs[dir],save_dialog.dirs[dir+1],(size_t)(save_dialog.dir_count-dir-1)*32);
+                --save_dialog.dir_count;
+            }
+            save_list_show(entry);
+            return dialog_status(2);
+        }
         if (choice!=-1) {
             save_dialog.choosing=0;
             dialogs[2].status=DIALOG_FINISHED;
