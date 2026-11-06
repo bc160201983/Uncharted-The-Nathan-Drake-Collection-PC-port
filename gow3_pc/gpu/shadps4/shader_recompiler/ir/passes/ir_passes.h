@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <string>
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/passes/resource_pass.h"
 #include "shader_recompiler/ir/program.h"
@@ -47,6 +48,18 @@ bool MultiwaveLdsBarriers(u64 pgm_hash);
 /// (effect_loop_clamp_pass.cpp); EffectLoopClamp tells whether a shader gets it (cache names).
 void EffectLoopClampPass(IR::Program& program);
 bool EffectLoopClamp(u64 pgm_hash);
+/// gow3 6 Nov 2026: "safe cloth" for the cloth solvers 1c957b01 / 809864d3 (loop counts capped in
+/// EffectLoopClampPass; SafeClothExitPass gives their LDS-decided loop exit one decision for the
+/// whole group on GPUs with subgroups under 64 lanes). SafeClothCacheTag: cache name suffix.
+bool SafeCloth(u64 pgm_hash);
+/// gow3 6 Nov 2026: LDS accesses bounds-checked like the PS4 (shared_memory_bounds_pass.cpp).
+void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_info,
+                            const Profile& profile);
+bool SharedMemoryBounds(u64 pgm_hash);
+std::string SharedMemoryBoundsTag(u64 pgm_hash, bool compute);
+std::string SafeClothCacheTag(u64 pgm_hash);
+void SafeClothExitPass(IR::Program& program, const RuntimeInfo& runtime_info,
+                       const Profile& profile);
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);
 void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_info,
                                const Profile& profile);

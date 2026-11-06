@@ -156,7 +156,12 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::SsaRewritePass(program);
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
     Shader::Optimization::DeadCodeEliminationPass(program);
+    // gow3 6 Nov 2026: the game's LDS accesses checked like the PS4 (before the wave64 lowering
+    // adds its own scratch accesses, which go after the spare dword).
+    Shader::Optimization::SharedMemoryBoundsPass(program, runtime_info, profile);
     Shader::Optimization::LowerWave64BallotPass(program, runtime_info, profile);
+    // gow3 6 Nov 2026: after the passes that place barriers and LDS scratch (its word goes last).
+    Shader::Optimization::SafeClothExitPass(program, runtime_info, profile);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);
     if (info.sw_stage == SwStage::Fragment && profile.needs_integer_interpolation_fix) {

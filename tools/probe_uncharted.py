@@ -1616,13 +1616,15 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     profile = os.environ.get(f"UNCHARTED_SAVE_PROFILE_{game_key.upper()}", "1")
     env.setdefault("GOW3_USER_ID", profile if profile.isdigit() and 1 <= int(profile) <= 16 else "1")
     multithreaded = os.environ.get(f"UNCHARTED_MULTITHREADED_{game_key.upper()}")
-    # Drake's Fortune: its weapons (and at times other objects) drew with another draw's look on
-    # some frames with multithreaded rendering (flat grey guns, the player and GitHub #23, 18 Oct
-    # 2026), and it gains nothing from it (4 cores: 101.8 vs 103.2 FPS). Off until that is fixed;
-    # UNCHARTED_U1_MULTITHREADED_TEST=1 keeps the launcher's choice (tests).
+    # Drake's Fortune: its weapons drew with another draw's look on some frames with multithreaded
+    # rendering (flat grey guns, GitHub #23, 18 Oct 2026), so it ran without it until 0.8.4. The
+    # draw pipe's later fixes (writes pending until their packet ran, resource-table walks after
+    # the copy shaders) cover it: 0 flashes in 3,484 frame grabs (11 a minute on 18 Oct), and 91 ->
+    # 118-120 FPS at a jet ski checkpoint, where its GPU command thread was the limit.
+    # UNCHARTED_U1_SINGLE_THREAD=1: off for Drake's Fortune again.
     if executable == "eboot.bin" and multithreaded == "1" and \
-            os.environ.get("UNCHARTED_U1_MULTITHREADED_TEST") != "1":
-        print("Multithreaded rendering: off for Drake's Fortune (its weapons flicker with it)")
+            os.environ.get("UNCHARTED_U1_SINGLE_THREAD") == "1":
+        print("Multithreaded rendering: off for Drake's Fortune (UNCHARTED_U1_SINGLE_THREAD=1)")
         multithreaded = "0"
     # Drake's Deception froze for good with multithreaded rendering (GitHub #51, Steam Deck, 19 Oct
     # 2026: a fence write on the Vulkan recording thread faulted while the GPU command thread
@@ -1635,6 +1637,12 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         # alone) wins over the launcher's choice.
         env["GOW3_DRAW_PIPE"] = os.environ.get("GOW3_DRAW_PIPE", multithreaded)
         env["GOW3_VK_RECORD_THREAD"] = os.environ.get("GOW3_VK_RECORD_THREAD", multithreaded)
+    # 0.8.4: with multithreaded rendering the GPU command thread no longer waits for the draw
+    # recording thread before each nested compute buffer (their packets are checked one by one):
+    # Uncharted 2 drained ~5,600 times a second there, a quarter of that thread's time.
+    # GOW3_SKIP_IB_DRAIN=0: as before.
+    if multithreaded == "1":
+        env.setdefault("GOW3_SKIP_IB_DRAIN", "1")
     # Keyboard and mouse (launcher Controls tab, per game; explicit GOW3_* values win).
     for launcher_key, runtime_key in (("KEY_MAP", "GOW3_KEY_MAP"), ("MOUSE_MAP", "GOW3_MOUSE_MAP"),
                                       ("MOUSE", "GOW3_MOUSE"), ("MOUSE_SENS", "GOW3_MOUSE_SENS"),

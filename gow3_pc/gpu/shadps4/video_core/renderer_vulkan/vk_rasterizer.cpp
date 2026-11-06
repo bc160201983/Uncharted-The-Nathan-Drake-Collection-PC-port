@@ -3254,19 +3254,21 @@ std::array<EffectDispatch, 32> g_effect_dispatches{};
 std::atomic<u64> g_effect_dispatch_count{0};
 
 void ReportEffectDispatches() {
+    // gow3 6 Nov 2026: one write to stdout (line by line to stderr it came out mixed with other
+    // threads' output, character by character).
     const u64 count = g_effect_dispatch_count.load();
-    std::fprintf(stderr, "Effect shader dispatches before the loss (newest last, %llu in all):\n",
-                 static_cast<unsigned long long>(count));
+    std::string text = fmt::format("Effect shader dispatches before the loss (newest last, {} in all):\n",
+                                   count);
     for (u64 i = count > g_effect_dispatches.size() ? count - g_effect_dispatches.size() : 0;
          i < count; ++i) {
         const auto& d = g_effect_dispatches[i % g_effect_dispatches.size()];
-        std::fprintf(stderr,
-                     "  #%llu cs %08llx: %u vertices, %u groups; buffer 0 at %#llx, %u records, "
-                     "stride %u; largest count of the first 16: %u\n",
-                     static_cast<unsigned long long>(d.sequence),
-                     static_cast<unsigned long long>(d.hash), d.vertices, d.groups,
-                     static_cast<unsigned long long>(d.base), d.num_records, d.stride, d.max_count);
+        text += fmt::format("  #{} cs {:08x}: {} vertices, {} groups; buffer 0 at {:#x}, {} records, "
+                            "stride {}; largest count of the first 16: {}\n",
+                            d.sequence, d.hash, d.vertices, d.groups, d.base, d.num_records,
+                            d.stride, d.max_count);
     }
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    std::fflush(stdout);
 }
 } // namespace
 
@@ -3395,6 +3397,86 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             ++lines;
         }
         std::fflush(stdout);
+    }
+
+    // gow3 diagnostics 6 Nov 2026 (GOW3_CLOTH_BOUNDS=1): the loop counts the cloth solvers
+    // (1c957b01, 809864d3) read, from guest memory at dispatch time: constant buffer #1 dwords
+    // 160 (substeps), 163, 164 (convergence iterations), 165; #2 dwords 0 (N), 3, 22; and the
+    // largest per-vertex count (second u32 of the first 512 pairs) in buffers #10 and #18. The
+    // first 6 dispatches in full, then the largest values every 5 s (the caps of
+    // effect_loop_clamp_pass.cpp ClothBoundCap must stay far above them).
+    {
+        static const bool cloth_bounds = std::getenv("GOW3_CLOTH_BOUNDS") != nullptr;
+        if (cloth_bounds && (cs.pgm_hash == 0x1c957b01 || cs.pgm_hash == 0x809864d3)) {
+            const auto read_words = [&](u32 binding, std::initializer_list<u32> dwords,
+                                        u32* out) {
+                for (u32 k = 0; k < dwords.size(); ++k) {
+                    out[k] = 0xffffffffu;
+                }
+                if (binding >= cs.buffers.size() || cs.buffers[binding].IsSpecial()) {
+                    return;
+                }
+                const auto sharp = cs.buffers[binding].GetSharp(cs);
+                u32 k = 0;
+                for (const u32 dword : dwords) {
+                    const VAddr address = sharp.base_address + u64(dword) * 4;
+                    if (sharp.base_address && u64(dword) * 4 + 4 <= sharp.GetSize() &&
+                        IsMapped(address, 4)) {
+                        memory->CopySparseMemory(address, reinterpret_cast<u8*>(&out[k]), 4);
+                    }
+                    ++k;
+                }
+            };
+            const auto max_count = [&](u32 binding) -> u32 {
+                if (binding >= cs.buffers.size() || cs.buffers[binding].IsSpecial()) {
+                    return 0xffffffffu;
+                }
+                const auto sharp = cs.buffers[binding].GetSharp(cs);
+                const u64 bytes = std::min<u64>(sharp.GetSize(), 512 * 8);
+                if (!sharp.base_address || bytes < 8 || !IsMapped(sharp.base_address, bytes)) {
+                    return 0xffffffffu;
+                }
+                std::vector<u32> words(bytes / 4);
+                memory->CopySparseMemory(sharp.base_address, reinterpret_cast<u8*>(words.data()),
+                                         words.size() * 4);
+                u32 largest = 0;
+                for (size_t k = 1; k < words.size(); k += 2) {
+                    largest = std::max(largest, words[k]);
+                }
+                return largest;
+            };
+            u32 cb1[4], cb2[3];
+            read_words(1, {160, 163, 164, 165}, cb1);
+            read_words(2, {0, 3, 22}, cb2);
+            const u32 c10 = max_count(10), c18 = max_count(18);
+            static std::mutex bounds_mutex;
+            std::lock_guard bounds_lock{bounds_mutex};
+            static u32 full = 0;
+            static std::array<u32, 9> largest{};
+            static auto last = std::chrono::steady_clock::now();
+            const std::array<u32, 9> values{cb1[0], cb1[1], cb1[2], cb1[3], cb2[0],
+                                            cb2[1], cb2[2], c10,    c18};
+            for (size_t k = 0; k < values.size(); ++k) {
+                if (values[k] != 0xffffffffu) {
+                    largest[k] = std::max(largest[k], values[k]);
+                }
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (full < 6 || now - last >= std::chrono::seconds{5}) {
+                const auto& v = full < 6 ? values : largest;
+                std::printf("Cloth bounds %s cs %08llx: cb1[160]=%u [163]=%u [164]=%u [165]=%u "
+                            "cb2[0]=%u [3]=%u [22]=%u; counts #10 %u #18 %u\n",
+                            full < 6 ? "(dispatch)" : "(largest, 5 s)",
+                            static_cast<unsigned long long>(cs.pgm_hash), v[0], v[1], v[2], v[3],
+                            v[4], v[5], v[6], v[7], v[8]);
+                std::fflush(stdout);
+                if (full >= 6) {
+                    last = now;
+                    largest = {};
+                }
+                ++full;
+            }
+        }
     }
 
     // gow3 diagnostics (GOW3_TRACKER_CAP=<n>): a barrier before a dispatch once the barrier

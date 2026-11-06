@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <set>
+#include <tuple>
 #include <new>
 #include <ranges>
 #include <string>
@@ -608,7 +610,8 @@ void PipelineCache::PublishShaders(bool wait) {
         const auto perm_hash = HashCombine(hash, build->permutation);
         Vulkan::SetObjectName(instance.GetDevice(), build->module,
                              GetShaderName(build->info.hw_stage, hash, build->permutation));
-        RegisterShaderBinary(std::move(build->binary), hash, build->permutation);
+        RegisterShaderBinary(std::move(build->binary), hash, build->permutation,
+                             build->info.hw_stage == Shader::HwStage::Compute);
         {
             std::unique_lock lock{programs_mutex};
             if (build->initial) {
@@ -938,7 +941,7 @@ void PipelineCache::Adopt(PrecompiledCompute& job) {
     }
     auto& program = job.program;
     const u64 perm_hash = HashCombine(job.hash, 0);
-    RegisterShaderBinary(std::move(job.spirv), job.hash, 0);
+    RegisterShaderBinary(std::move(job.spirv), job.hash, 0, true); // compute precompile
     // user_data pointed into the job's registers: refreshed by the next lookup.
     program->info.user_data = {};
     RegisterShaderMeta(program->info, program->modules[0].spec.fetch_shader_data,
@@ -1574,7 +1577,8 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx,
+                         info.hw_stage == Shader::HwStage::Compute);
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
@@ -1781,6 +1785,24 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
+        // gow3 6 Nov 2026: a compute permutation built for another LDS size (its shared array has
+        // that size): logged once per shader and size pair (GOW3_LDS_SIZE_KEY=1 keys them apart).
+        if (hw_stage == Shader::HwStage::Compute &&
+            it->spec.runtime_info.hw.cs.shared_memory_size !=
+                runtime_info.hw.cs.shared_memory_size) {
+            static std::mutex lds_mutex;
+            static std::set<std::tuple<u64, u32, u32>> lds_seen;
+            const auto entry = std::make_tuple(params.hash, it->spec.runtime_info.hw.cs.shared_memory_size,
+                                               runtime_info.hw.cs.shared_memory_size);
+            std::scoped_lock lds_lock{lds_mutex};
+            if (lds_seen.size() < 64 && lds_seen.insert(entry).second) {
+                std::printf("GPU: cs %#llx permutation %zu built for %u bytes of LDS, dispatched "
+                            "with %u (GOW3_LDS_SIZE_KEY)\n",
+                            static_cast<unsigned long long>(params.hash), perm_idx,
+                            std::get<1>(entry), std::get<2>(entry));
+                std::fflush(stdout);
+            }
+        }
     }
     return std::make_tuple(&program->info, module,
                            AssignFetch(fetch, program->modules[perm_idx].spec.fetch_shader_data),

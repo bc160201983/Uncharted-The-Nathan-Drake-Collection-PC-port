@@ -1313,9 +1313,14 @@ def read_config():
     # a player who turns it off again keeps it off.
     if config.get("version", 1) < 8:
         games["u3"]["multithreaded"] = True
+    # Version 10 (0.8.4): Drake's Fortune with multithreaded rendering (the port no longer turns it
+    # off there): 91 -> 118-120 FPS where its GPU command thread was the limit. Once; a player who
+    # turns it off again keeps it off. (9 is a step of a development build.)
+    if config.get("version", 1) < 10:
+        games["u1"]["multithreaded"] = True
     for name in GAME_SETTING_DEFAULTS:
         config.pop(name, None)
-    config["version"] = 8
+    config["version"] = 10
     # Under Wine the game folder is also kept as a Linux path: another prefix can show the same
     # folder under another drive letter (Launcher.game_dir).
     folder = config.get("game_dir")
@@ -2151,8 +2156,8 @@ class Launcher:
                 widget.set(value)
         if name == "igpu":
             # The command thread is the limit on an integrated GPU, and multithreaded rendering
-            # takes part of it. Drake's Fortune keeps it off (its gun and camera misbehave with it).
-            settings["multithreaded"] = self.current_game()["key"] != "u1"
+            # takes part of it (Drake's Fortune too since 0.8.4).
+            settings["multithreaded"] = True
             if isinstance(self.widgets.get("multithreaded"), Toggle):
                 self.widgets["multithreaded"].set(settings["multithreaded"])
             settings["aa"] = "off"
@@ -2319,7 +2324,7 @@ class Launcher:
             page, "Multithreaded rendering (experimental)",
             "Prepares the picture on a second CPU core: more FPS where the CPU is the limit, mostly "
             "in Uncharted 2 and 3 (on by default in Uncharted 3; keep Frames queued at 1 with it). "
-            "Turn it off if a game hangs while loading. Drake's Fortune always runs without it.",
+            "Turn it off if a game hangs while loading.",
             multithreaded)
 
         def job_threads(parent):

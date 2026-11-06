@@ -4,6 +4,53 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 6 November 2026, afternoon (0.8.4)
+
+- **PS4 LDS bounds** (Uncharted 3 chapter 2 "device lost" as young Sully appears: #295 #138 #342
+  #292 #354 #328 #365 #238 #18; shared_memory_bounds_pass.cpp, GOW3_LDS_BOUNDS=0: off, =cloth or
+  hex hashes: only those): GCN checks every LDS access against the workgroup's allocation (reads
+  beyond it return 0, writes are dropped). The cloth solvers cs 1c957b01 / 809864d3 (1024 threads,
+  2 KiB) sum lds[i] + lds[i + 512] and rely on those zeros; on NVIDIA and Intel the reads landed
+  past the array (the old shirt flashes) or outside the workgroup's shared memory, a shader
+  exception and a lost device (an instruction-pointer fault with no bad address, after a 2-4 s
+  stall). #295's breadcrumbs (RTX 5070) named dispatch 1c957b01; a forced early exit of the solver's
+  convergence loop reproduced the loss on an RTX 5080 in 3 s and runs 2.5 min clean with the
+  checks. Every LDS access of a compute shader whose address is not a constant in range is now
+  checked against the dispatch's LDS size: out of range it goes to a spare dword after the
+  allocation (the wave64 ballot scratch now follows it), and loads and atomics return 0 there.
+  Compute shaders get the cache name suffix `_lba`; graphics shaders keep their binaries
+  (ShaderBinaryName, RegisterShaderBinary and BinaryMatchesMeta take the stage). A shader whose LDS
+  leaves no room for the spare dword under the device's limit is left unchecked (logged). The LDS
+  size is now part of a compute permutation's key (GOW3_LDS_SIZE_KEY=0: as before): a permutation
+  built for one size no longer serves another, whose accesses would be checked against the wrong
+  size (none seen in Uncharted 2 or 3). The pass logs the
+  shaders whose accesses provably reach past their allocation: U3 1c957b01 / 809864d3, U2 aec539f0
+  and 7095d6c2 (1024 B, up to byte 1536), 308607aa (3072 B, up to 4352), 9bd0e806 (32 KiB, up to
+  36736).
+- **Cloth loop caps** (effect_loop_clamp_pass.cpp, GOW3_SAFE_CLOTH=0: off):
+  the solvers' loop compares of counts read from memory with a loop counter use min(count, cap)
+  (signed or unsigned like the compare; cache suffix `_sc3`):
+  cb1[160] substeps 32 (real 2-9), cb1[163] 32 (3), cb1[164] convergence iterations 512 (128),
+  cb1[165] 64 (1-6), cb2[3] 4096 (252-260), cb2[22] 128 (7-8), per-vertex counts 128 (7-9). Every
+  count forced to 2^30 (GOW3_TEST_CLOTH_BOUND): 5 FPS, no fault. GOW3_TEST_CLOTH_DIVERGE: test.
+- **Drake's Fortune with multithreaded rendering** (probe_uncharted.py; launcher settings version
+  10 turns it on once; UNCHARTED_U1_SINGLE_THREAD=1: off again): off since 0.2.3 for #23 (weapons
+  drawn flat grey on single frames). A frame-grab watch of two holstered weapons (gunwatch, ~23
+  grabs/s, 150 s at 60 FPS) saw 0 flashes multithreaded and 0 single-threaded (11 a minute on 18
+  Oct), GOW3_PIPE_VERIFY=1 reported 0 changed resource tables, 4 starts without a fault. A jet ski
+  checkpoint (1080p, 120 FPS limit, RTX 5080): 91.1 / 91.7 -> 118.3 / 119.0 FPS.
+- **GOW3_SKIP_IB_DRAIN on with multithreaded rendering** (probe_uncharted.py; =0: off): the
+  compute queue no longer drains the draw pipe before a nested buffer (its packets are checked one
+  by one). Uncharted 2 drained ~5,600 times a second there (stage A waited 25%).
+- **Breadcrumbs**: the counter lives in host-visible system memory first (with resizable BAR the
+  first host-visible type is video memory, which read 0 after the reset: "every checkpoint before 0
+  finished"); DumpDeviceFault reports every scheduler's breadcrumbs once, so semaphore waits and
+  failed arena binds report them too, not only a failed submit; the lost-device reports (fault,
+  breadcrumbs, effect dispatches) are one stdout write each instead of stderr lines mixed character
+  by character with other threads' output.
+- **Diagnostics**: GOW3_CLOTH_BOUNDS=1 (the cloth solvers' loop counts per dispatch), a log line
+  when a compute permutation built for one LDS size would serve another.
+
 ## 6 November 2026 (0.8.3)
 
 - **Workgroup split for the skinning shaders** (#350 #362 #353): cs 8f067540 and 7d7e7206 run

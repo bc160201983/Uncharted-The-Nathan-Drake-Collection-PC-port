@@ -684,6 +684,8 @@ public:
     void Flush();
     void Checkpoint(const char* operation,u64 first,u64 second=0);
     void ReportCheckpoints() const;
+    mutable std::atomic<bool> crumbs_reported{false}; ///< gow3: ReportCheckpoints runs once
+    bool crumbs_registered = false; ///< gow3: in DumpDeviceFault's list (first WriteBreadcrumb)
 
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish(std::source_location caller = std::source_location::current());

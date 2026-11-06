@@ -46,12 +46,15 @@ static constexpr u32 PipelineKeyVersion = 5u; // gow3: Info layout (ImageResourc
 /// new name, so binaries cached before the fix are not found and only those shaders recompile.
 /// gow3 1 Nov 2026: the effect/crowd skinning shaders with a clamped loop bound (and the test
 /// count) get their own names too (effect_loop_clamp_pass.cpp).
-static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
+static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx, bool compute) {
     // gow3 5 Nov 2026: split workgroups (Shader::WorkgroupSplit) have their own names too.
-    return fmt::format("{:#018x}_{}{}{}{}", pgm_hash, perm_idx,
+    // gow3 6 Nov 2026: safe cloth (and its tests) too, SafeClothCacheTag.
+    return fmt::format("{:#018x}_{}{}{}{}{}", pgm_hash, perm_idx,
                        Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "",
                        Shader::Optimization::EffectLoopClamp(pgm_hash) ? "_lc1" : "",
-                       Shader::WorkgroupSplitListed(pgm_hash) ? "_ws256" : "");
+                       Shader::WorkgroupSplitListed(pgm_hash) ? "_ws256" : "",
+                       Shader::Optimization::SafeClothCacheTag(pgm_hash) +
+                           Shader::Optimization::SharedMemoryBoundsTag(pgm_hash, compute));
 }
 } // namespace Serialization
 
@@ -747,9 +750,9 @@ u64 TakeBinaryHash(u64 perm_hash) {
 /// Whether `spv` (the binary named by `pgm_hash`/`perm_idx`) is the one its meta was written
 /// with. Metas of earlier builds have no hash (0): their files must have been written together.
 bool BinaryMatchesMeta(const std::vector<u32>& spv, u64 binary_hash, u64 pgm_hash,
-                       size_t perm_idx) {
+                       size_t perm_idx, bool compute) {
     const auto meta_name = fmt::format("{:#018x}", HashCombine(pgm_hash, u64(perm_idx)));
-    const auto binary_name = Serialization::ShaderBinaryName(pgm_hash, perm_idx);
+    const auto binary_name = Serialization::ShaderBinaryName(pgm_hash, perm_idx, compute);
     auto& db = Storage::DataBase::Instance();
     const bool matches =
         binary_hash != 0 ? XXH3_64bits(spv.data(), spv.size() * sizeof(u32)) == binary_hash
@@ -848,7 +851,7 @@ void RegisterShaderMeta(const Shader::Info& info,
                                        fmt::format("{:#018x}", perm_hash), ar.TakeOff());
 }
 
-void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx) {
+void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx, bool compute) {
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
     }
@@ -859,7 +862,7 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
             XXH3_64bits(spv.data(), spv.size() * sizeof(u32));
     }
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       Serialization::ShaderBinaryName(pgm_hash, perm_idx),
+                                       Serialization::ShaderBinaryName(pgm_hash, perm_idx, compute),
                                        std::move(spv));
 }
 
@@ -1082,10 +1085,12 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
 
     std::vector<u32> spv{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       Serialization::ShaderBinaryName(program->info.pgm_hash, perm_idx),
+                                       Serialization::ShaderBinaryName(program->info.pgm_hash, perm_idx,
+                                           program->info.hw_stage == Shader::HwStage::Compute),
                                        spv);
     if (spv.empty() ||
-        !BinaryMatchesMeta(spv, binary_hash, program->info.pgm_hash, perm_idx)) {
+        !BinaryMatchesMeta(spv, binary_hash, program->info.pgm_hash, perm_idx,
+                           program->info.hw_stage == Shader::HwStage::Compute)) {
         return false;
     }
 
@@ -1450,12 +1455,14 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
                 if (meta_ok && !IsCrowdedShader(stage->program->info.pgm_hash)) {
                     std::vector<u32> spv;
                     db.Load(Storage::BlobType::ShaderBinary,
-                            Serialization::ShaderBinaryName(stage->program->info.pgm_hash,
-                                                            stage->perm_idx),
+                            Serialization::ShaderBinaryName(
+                                stage->program->info.pgm_hash, stage->perm_idx,
+                                stage->program->info.hw_stage == Shader::HwStage::Compute),
                             spv);
-                    if (!spv.empty() && BinaryMatchesMeta(spv, binary_hash,
-                                                          stage->program->info.pgm_hash,
-                                                          stage->perm_idx)) {
+                    if (!spv.empty() &&
+                        BinaryMatchesMeta(spv, binary_hash, stage->program->info.pgm_hash,
+                                          stage->perm_idx,
+                                          stage->program->info.hw_stage == Shader::HwStage::Compute)) {
                         const auto module_started = std::chrono::steady_clock::now();
                         stage->module = CompileSPV(spv, stage->device);
                         stage->binary_hash = binary_hash;

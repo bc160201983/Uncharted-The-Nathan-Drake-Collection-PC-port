@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdarg>
 #include "gow3_profiler.h"
 #include <thread>
 #include <algorithm>
@@ -31,6 +32,10 @@
 #include "gow3_threads.h"
 
 namespace Vulkan {
+
+/// gow3 6 Nov 2026: schedulers with breadcrumbs, reported by DumpDeviceFault.
+static std::array<const Scheduler*, 8> g_crumb_schedulers{};
+static std::atomic<u32> g_crumb_scheduler_count{0};
 
 std::mutex Scheduler::submit_mutex;
 
@@ -536,11 +541,19 @@ void Scheduler::CreateBreadcrumbs() {
     const auto requirements=device.getBufferMemoryRequirements(buffer);
     const auto properties=instance.GetPhysicalDevice().getMemoryProperties();
     const auto wanted=vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent;
+    // gow3 6 Nov 2026: system RAM first. With resizable BAR the first host-visible type is video
+    // memory, and after the reset that follows a lost device it read 0 ("every checkpoint before
+    // 0 finished" with 87412 recorded, RTX 5080): the counter must outlive the GPU's reset.
     u32 type=~0u;
-    for (u32 i=0;i<properties.memoryTypeCount;++i) {
-        if ((requirements.memoryTypeBits&(1u<<i)) && (properties.memoryTypes[i].propertyFlags&wanted)==wanted) {
-            type=i;
-            break;
+    for (int pass=0;pass<2 && type==~0u;++pass) {
+        for (u32 i=0;i<properties.memoryTypeCount;++i) {
+            const auto flags=properties.memoryTypes[i].propertyFlags;
+            const bool device_local=bool(flags&vk::MemoryPropertyFlagBits::eDeviceLocal);
+            if ((requirements.memoryTypeBits&(1u<<i)) && (flags&wanted)==wanted &&
+                (pass==1 || !device_local)) {
+                type=i;
+                break;
+            }
         }
     }
     vk::DeviceMemory memory{};
@@ -570,6 +583,16 @@ void Scheduler::CreateBreadcrumbs() {
 }
 
 void Scheduler::WriteBreadcrumb(u64 value) {
+    // gow3 6 Nov 2026: every lost-device path reports the breadcrumbs (DumpDeviceFault), not only
+    // a failed submit: Intel and most NVIDIA losses are seen by a semaphore wait first. A
+    // scheduler joins once it writes its first one (the presenter's never do: no empty reports).
+    if (!crumbs_registered) {
+        crumbs_registered = true;
+        const u32 slot = g_crumb_scheduler_count.fetch_add(1);
+        if (slot < g_crumb_schedulers.size()) {
+            g_crumb_schedulers[slot] = this;
+        }
+    }
     const vk::Buffer buffer=crumb_buffer;
     const u32 low=static_cast<u32>(value);
     Record([buffer,low](vk::CommandBuffer commands) {
@@ -588,17 +611,43 @@ std::function<void(u64)> g_describe_gpu_address;
 /// gow3 1 Nov 2026 (11-U3-CH2-CRASH.md): set by the rasterizer: its recent effect-shader
 /// dispatches (loop counts), printed when the device is lost.
 void (*g_device_lost_report)() = nullptr;
+/// gow3 6 Nov 2026: the lost-device reports are written as one piece to stdout, the stream of
+/// the rest of the log: written line by line to stderr they came out mixed character by
+/// character with the frame statistics of other threads.
+static void ReportLine(std::string& text, const char* format, ...) {
+    char line[1024];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    text += line;
+}
+static void ReportFlush(std::string& text) {
+    if (!text.empty()) {
+        std::fwrite(text.data(), 1, text.size(), stdout);
+        std::fflush(stdout);
+        text.clear();
+    }
+}
 void DescribeBoundAddress(u64 address);
 void DumpDeviceFault(const Instance& instance) {
+    std::string text;
     static std::atomic<bool> reported{false};
     if (g_device_lost_report && !reported.exchange(true)) {
         g_device_lost_report();
+    }
+    const u32 crumb_count = std::min<u32>(g_crumb_scheduler_count.load(), g_crumb_schedulers.size());
+    for (u32 i = 0; i < crumb_count; ++i) {
+        if (g_crumb_schedulers[i]) {
+            g_crumb_schedulers[i]->ReportCheckpoints();
+        }
     }
     if (!instance.HasDeviceFault()) return;
     const auto device=instance.GetDevice();
     vk::DeviceFaultCountsEXT counts{};
     if (device.getFaultInfoEXT(&counts,nullptr)!=vk::Result::eSuccess) {
-        std::fprintf(stderr,"GPU fault: no report\n");
+        ReportLine(text,"GPU fault: no report\n");
+        ReportFlush(text);
         return;
     }
     std::vector<vk::DeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
@@ -608,30 +657,33 @@ void DumpDeviceFault(const Instance& instance) {
     info.pVendorInfos=vendors.data();
     counts.vendorBinarySize=0;
     const auto result=device.getFaultInfoEXT(&counts,&info);
-    std::fprintf(stderr,"GPU fault (%s): %s\n",vk::to_string(result).c_str(),info.description);
+    ReportLine(text,"GPU fault (%s): %s\n",vk::to_string(result).c_str(),info.description);
     for (const auto& address:addresses) {
-        std::fprintf(stderr,"GPU fault address: type=%s address=%016llx precision=%llx\n",
+        ReportLine(text,"GPU fault address: type=%s address=%016llx precision=%llx\n",
                      vk::to_string(address.addressType).c_str(),
                      (unsigned long long)address.reportedAddress,
                      (unsigned long long)address.addressPrecision);
+        ReportFlush(text);
         if (g_describe_gpu_address) g_describe_gpu_address(address.reportedAddress);
         DescribeBoundAddress(address.reportedAddress);
     }
     for (const auto& vendor:vendors) {
-        std::fprintf(stderr,"GPU fault vendor: %s code=%llx data=%llx\n",vendor.description,
+        ReportLine(text,"GPU fault vendor: %s code=%llx data=%llx\n",vendor.description,
                      (unsigned long long)vendor.vendorFaultCode,
                      (unsigned long long)vendor.vendorFaultData);
     }
+    ReportFlush(text);
 }
 void DumpGpuCheckpoints(const Instance& instance) {
+    std::string text;
     if (!instance.HasGpuCheckpoints()) return;
     const auto checkpoints=instance.GetGraphicsQueue().getCheckpointDataNV();
     const u64 recorded=checkpoint_index.load();
 #ifdef _WIN32
-    std::fprintf(stderr,"GPU checkpoint records: %zu; markers recorded: %llu; image base %p\n",
+    ReportLine(text,"GPU checkpoint records: %zu; markers recorded: %llu; image base %p\n",
                  checkpoints.size(),(unsigned long long)recorded,static_cast<void*>(&__ImageBase));
 #else
-    std::fprintf(stderr,"GPU checkpoint records: %zu; markers recorded: %llu\n",checkpoints.size(),
+    ReportLine(text,"GPU checkpoint records: %zu; markers recorded: %llu\n",checkpoints.size(),
                  (unsigned long long)recorded);
 #endif
     u64 last=0;
@@ -641,37 +693,40 @@ void DumpGpuCheckpoints(const Instance& instance) {
         if (address<reinterpret_cast<uintptr_t>(gpu_checkpoints.data()) ||
             address>=reinterpret_cast<uintptr_t>(gpu_checkpoints.data()+gpu_checkpoints.size())) continue;
         last=std::max(last,marker->sequence);
-        std::fprintf(stderr,"GPU checkpoint: stage=%s sequence=%llu operation=%s shaders=%016llx,%016llx\n",
+        ReportLine(text,"GPU checkpoint: stage=%s sequence=%llu operation=%s shaders=%016llx,%016llx\n",
                      vk::to_string(checkpoint.stage).c_str(),(unsigned long long)marker->sequence,
                      marker->operation,(unsigned long long)marker->first,(unsigned long long)marker->second);
     }
     // Operations recorded after the newest marker the GPU reached; the fault is in this range.
     for (u64 sequence=last>24 ? last-24 : 0; sequence<recorded && sequence<=last+40; ++sequence) {
         const auto& marker=gpu_checkpoints[sequence%gpu_checkpoints.size()];
-        std::fprintf(stderr,"GPU pending: sequence=%llu operation=%s values=%016llx,%016llx\n",
+        ReportLine(text,"GPU pending: sequence=%llu operation=%s values=%016llx,%016llx\n",
                      (unsigned long long)marker.sequence,marker.operation,
                      (unsigned long long)marker.first,(unsigned long long)marker.second);
     }
+    ReportFlush(text);
 }
 void Scheduler::ReportCheckpoints() const {
+    std::string text;
+    if (crumbs_reported.exchange(true)) return;
     DumpGpuCheckpoints(instance);
     if (!crumb_mapped) return;
     // gow3 5 Nov 2026 (breadcrumbs): the counter's low 32 bits, widened by the recorded count.
     const u64 recorded=checkpoint_index.load();
     u64 done=(recorded&~0xffffffffull)|crumb_mapped[0];
     if (done>recorded && done>=(1ull<<32)) done-=1ull<<32;
-    std::fprintf(stderr,"GPU breadcrumbs: every checkpoint before %llu finished, %llu recorded; "
+    ReportLine(text,"GPU breadcrumbs: every checkpoint before %llu finished, %llu recorded; "
                  "the GPU stopped in one of these:\n",
                  (unsigned long long)done,(unsigned long long)recorded);
     for (u64 sequence=done;sequence<recorded && sequence<done+16;++sequence) {
         if (recorded-sequence>gpu_checkpoints.size()) continue;
         const auto& marker=gpu_checkpoints[sequence%gpu_checkpoints.size()];
-        std::fprintf(stderr,"GPU breadcrumbs:   %llu %s shaders %08llx %08llx\n",
+        ReportLine(text,"GPU breadcrumbs:   %llu %s shaders %08llx %08llx\n",
                      (unsigned long long)marker.sequence,marker.operation ? marker.operation : "?",
                      (unsigned long long)(marker.first&0xffffffffull),
                      (unsigned long long)(marker.second&0xffffffffull));
     }
-    std::fflush(stderr);
+    ReportFlush(text);
 }
 
 void Scheduler::Finish(std::source_location caller) {

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <span>
 #include "common/types.h"
 #include "shader_recompiler/frontend/tessellation.h"
@@ -249,13 +250,26 @@ struct HwFragmentRuntimeInfo {
     }
 };
 
+/// gow3 6 Nov 2026 (on by default with the PS4 LDS bounds checks, GOW3_LDS_SIZE_KEY=0: off): the
+/// shared memory size is part of a compute permutation's key. It sizes the shader's shared array (and bounds its accesses,
+/// SharedMemoryBoundsPass), and the same shader is dispatched with different sizes: without it a
+/// permutation built for a smaller size served larger ones, whose accesses then ran past the array.
+inline bool& LdsSizeKey() {
+    static bool value = [] {
+        const char* env = std::getenv("GOW3_LDS_SIZE_KEY");
+        return !(env && env[0] == '0');
+    }();
+    return value;
+}
+
 struct HwComputeRuntimeInfo {
     u32 shared_memory_size;
     std::array<u32, 3> workgroup_size;
     std::array<bool, 3> tgid_enable;
 
     bool operator==(const HwComputeRuntimeInfo& other) const noexcept {
-        return workgroup_size == other.workgroup_size && tgid_enable == other.tgid_enable;
+        return workgroup_size == other.workgroup_size && tgid_enable == other.tgid_enable &&
+               (!LdsSizeKey() || shared_memory_size == other.shared_memory_size);
     }
 };
 
