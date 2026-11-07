@@ -60,7 +60,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
 
     if (headless) {
         ASSERT_MSG(width && height, "Offscreen rendering requires nonzero dimensions");
-        extent = {width, height};
+        extent = vk::Extent2D{width, height};
         CreateOffscreenImages();
         return;
     }

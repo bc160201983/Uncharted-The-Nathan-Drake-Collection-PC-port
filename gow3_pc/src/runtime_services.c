@@ -17,6 +17,8 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 /* gow3 24 Oct 2026 (GitHub #66, save profiles): the PS4 user the games play as. Their saves live

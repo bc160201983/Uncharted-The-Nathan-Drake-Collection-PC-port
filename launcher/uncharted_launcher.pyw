@@ -477,7 +477,7 @@ class Gamepads:
         self.sdl = None
         self.pads = {}
         msys = Path(os.environ.get("MSYS2_ROOT", "C:/msys64"))
-        for path in (ROOT / "gow3_pc/out/SDL3.dll", msys / "clang64/bin/SDL3.dll", ROOT.parent / "msys64/clang64/bin/SDL3.dll"):
+        for path in (ROOT / "gow3_pc/out/SDL3.dll", *((Path(os.environ["APPDIR"]) / "usr/lib/libSDL3.so.0",) if os.environ.get("APPDIR") else ()), msys / "clang64/bin/SDL3.dll", ROOT.parent / "msys64/clang64/bin/SDL3.dll"):
             if not path.is_file():
                 continue
             try:
@@ -715,6 +715,49 @@ def is_game_dir(folder):
 
 
 UPDATE_SUFFIXES = ("-patch", "-update", "_patch", "_update")
+
+
+def find_game_dir(folder):
+    """The game folder at or under the chosen one: the folder itself, its uroot, or up to three
+    levels below (CUSA02344/uroot, a download folder holding CUSA02344), skipping updates.
+    Returns (folder or None, note): the note explains a near miss, such as names in capitals,
+    which Linux treats as other names."""
+    folder = Path(folder)
+    queue, seen, near = [(folder, 0)], 0, ""
+    while queue and seen < 400:
+        current, depth = queue.pop(0)
+        seen += 1
+        if is_game_dir(current):
+            return current, ""
+        try:
+            entries = sorted(current.iterdir())
+        except OSError as error:
+            near = near or f"{current} cannot be read ({error.strerror})."
+            continue
+        lower = {entry.name.lower(): entry for entry in entries}
+        if "eboot.bin" in lower and "sce_sys" in lower and not near:
+            eboot, sys_dir = lower["eboot.bin"], lower["sce_sys"]
+            try:
+                sfo = {e.name.lower(): e for e in sys_dir.iterdir()}.get("param.sfo")
+            except OSError as error:
+                sfo, near = None, f"{sys_dir} cannot be read ({error.strerror})."
+            if near:
+                pass
+            elif eboot.name != "eboot.bin" or sys_dir.name != "sce_sys" or (sfo and sfo.name != "param.sfo"):
+                near = (f"{current} holds {eboot.name} and {sys_dir.name}/{sfo.name if sfo else '?'}, but the "
+                        "names must be lower case on Linux (eboot.bin, sce_sys/param.sfo).")
+            elif not sfo:
+                near = f"{sys_dir} has no param.sfo: the dump is incomplete."
+            elif not eboot.is_file():
+                near = f"{eboot} is not a readable file (a broken link?)."
+            elif not sfo.is_file():
+                near = f"{sfo} is not a readable file (a broken link?)."
+        if depth < 3:
+            for entry in entries:
+                name = entry.name.lower()
+                if entry.is_dir() and not name.endswith(UPDATE_SUFFIXES) and name != "sce_sys":
+                    queue.append((entry, depth + 1))
+    return None, near
 
 
 def game_update_dir(folder):
@@ -1892,10 +1935,13 @@ class Launcher:
             initialdir=str(self.game_dir() if self.game_dir().exists() else ROOT))
         if not folder:
             return False
-        if not is_game_dir(folder):
-            messagebox.showerror(APP_TITLE, "That folder has no eboot.bin and sce_sys/param.sfo.\n\n"
-                                            "Choose the game's root folder (CUSA02344).")
+        found, note = find_game_dir(folder)
+        if not found:
+            messagebox.showerror(APP_TITLE, "No eboot.bin and sce_sys/param.sfo were found in that folder "
+                                            "or the three levels below it.\n\n" + (note + "\n\n" if note else "")
+                                            + "Choose the game's root folder (CUSA02344).")
             return False
+        folder = str(found)
         self.config["game_dir"] = folder
         if WINE:
             self.config["game_dir_unix"] = unix_path(folder)
@@ -3128,6 +3174,11 @@ class Launcher:
 
     def check_updates(self, manual=False):
         current = updater.installed_version(ROOT)
+        if os.environ.get("APPIMAGE") or os.environ.get("APPDIR"):
+            # The releases hold the Windows package: an AppImage is updated by a new AppImage.
+            if manual:
+                messagebox.showinfo(APP_TITLE, "This is the Linux AppImage: download a newer AppImage to update.")
+            return
         if current is None:
             if manual:
                 messagebox.showinfo(APP_TITLE, "This copy runs from the source tree: update it with git.")

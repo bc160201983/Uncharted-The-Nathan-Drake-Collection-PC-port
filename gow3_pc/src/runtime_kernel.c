@@ -14,8 +14,8 @@
 #include <sys/time.h>
 #ifdef _WIN32
 #include <windows.h>
-#include <x86intrin.h>
 #endif
+#include <x86intrin.h>
 #ifndef _WIN32
 #include <sys/random.h>
 #include <sys/resource.h>
@@ -61,6 +61,20 @@ __attribute__((constructor)) static void remember_start(void) {
         const uint64_t stop=__rdtsc();
         QueryPerformanceCounter(&end);
         native_tsc_hz=(uint64_t)((long double)(stop-start)*frequency.QuadPart/(end.QuadPart-begin.QuadPart));
+#else
+    /* Linux: the same calibration against CLOCK_MONOTONIC. The game's code reads the TSC with
+     * inline rdtsc, so the frequency it is told must be the real one, or its clock runs fast. */
+    const char *native=getenv("GOW3_NATIVE_TSC");
+    if (native && native[0]=='1') {
+        struct timespec begin, end, nap={0,100000000};
+        clock_gettime(CLOCK_MONOTONIC,&begin);
+        const uint64_t start=__rdtsc();
+        while (nanosleep(&nap,&nap)) {}
+        const uint64_t stop=__rdtsc();
+        clock_gettime(CLOCK_MONOTONIC,&end);
+        const long double ns=(long double)(end.tv_sec-begin.tv_sec)*1e9L+(long double)(end.tv_nsec-begin.tv_nsec);
+        native_tsc_hz=(uint64_t)((long double)(stop-start)*1e9L/ns);
+#endif
         native_process_start=__rdtsc();
         clock_gettime(CLOCK_MONOTONIC,&process_start);
         printf("Runtime: native TSC frequency %llu Hz (inline guest RDTSC)\n",(unsigned long long)native_tsc_hz);
@@ -74,7 +88,6 @@ __attribute__((constructor)) static void remember_start(void) {
             printf("Runtime: guest TSC clock slowed %.2fx (GOW3_TIME_SCALE, diagnostics)\n",atof(scale));
         }
     }
-#endif
 }
 /* gow3 diagnostics (GOW3_TIME_SCALE=<factor> > 1): every guest clock (TSC frequency, process
  * time, clock_gettime, gettimeofday) runs that much slower than real time, counted from the
@@ -150,9 +163,7 @@ static ABI uint64_t process_time(void) {
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000+(uint64_t)((t.tv_nsec-process_start.tv_nsec)/1000);
 }
 static ABI uint64_t process_time_counter(void) {
-#ifdef _WIN32
     if (native_tsc_hz) return __rdtsc()-native_process_start;
-#endif
     struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
     scale_timespec(&t,&process_start);
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(uint64_t)(t.tv_nsec-process_start.tv_nsec);
@@ -161,9 +172,7 @@ static ABI uint64_t process_time_frequency(void) { return native_tsc_hz ? native
 /* The guest's TSC is the process clock in nanoseconds. The raw rdtsc differs per core on some
  * hosts (3.9 s apart on a Xeon E5-2680 v4, #42), so a thread moving cores made the game jump. */
 static ABI uint64_t read_tsc(void) {
-#ifdef _WIN32
     if (native_tsc_hz) return __rdtsc();
-#endif
     return process_time_counter();
 }
 static ABI uint64_t tsc_frequency(void) { return native_tsc_hz ? native_tsc_hz : 1000000000; }

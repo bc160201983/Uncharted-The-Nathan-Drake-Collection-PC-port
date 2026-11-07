@@ -14,6 +14,9 @@
 #include <pthread.h>
 #ifndef _WIN32
 #include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+static inline unsigned long GetCurrentThreadId() { return (unsigned long)syscall(SYS_gettid); }
 #endif
 #include <time.h>
 #include "gow3_copy.h"

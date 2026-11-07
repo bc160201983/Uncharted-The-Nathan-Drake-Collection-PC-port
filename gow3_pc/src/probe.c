@@ -561,6 +561,8 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
 }
 #endif
 #ifndef _WIN32
+/* Linux: the Windows debug-register watch is not available; the GPU library may still call it. */
+void runtime_exec_watch_retarget(uint64_t address) { (void)address; }
 static void fault(int sig, siginfo_t *info, void *context) {
     /* GPU page tracking (write-protected guest pages) is resolved first, except during a
      * speculative read: see vectored_fault. */
@@ -1252,7 +1254,7 @@ int main(int argc, char **argv) {
      * LoadExec argv for Uncharted 2/3 is the complete argv: "eboot.bin" "ispartofuccollection". */
     const char *guest_argv[17]={"/app0/eboot.bin"};
     int guest_argc=1;
-    unsigned timeout_seconds = 10;
+    unsigned timeout_seconds = 0; /* no limit by default, as on Windows; --timeout N for tests */
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
     const char *app0_overlays[4]; int app0_overlay_count=0;
     for (int i = 2; i < argc; ++i) {

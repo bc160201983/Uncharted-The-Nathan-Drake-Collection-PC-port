@@ -5887,7 +5887,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                  window < end; window += 1_MB) {
                                 if (buffer_cache.IsCpuWriteHot(window, 1_MB)) {
                                     const VAddr lo = std::max(window, VAddr(vsharp.base_address));
-                                    const VAddr hi = std::min(window + 1_MB, end);
+                                    const VAddr hi = std::min<VAddr>(window + 1_MB, end);
                                     small_gpu_writes.emplace_back(lo, hi - lo);
                                     VideoCore::NoteReadbackKind(lo, hi - lo,
                                                                 VideoCore::ReadbackHotWindow);
