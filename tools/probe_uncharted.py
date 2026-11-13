@@ -198,6 +198,31 @@ U3_FOCUS_100 = ("c4e37904cb00c5f0c2c900c5f850c183f80f7438e8c3c110004885c07427488
                 "488d350595c100488d15e598c100488d0d3b95c10041b8690700004531c9ffd0cd41")
 U2_FOCUS_100 = ("c4e37904c900c5f0c2c900c5f850c183f80f7438e8a8d71a004885c07427488d3d4c9c8300"
                 "488d354b998300488d155b9c8300488d0d7e99830041b84d0400004531c9ffd0cd41")
+U2_SPEED_102 = ("e83843b300488945e048817de000000000742f488d3dc7fcde00488d359df9de00488d151dfdde00"
+                "488d0dd2f9de0049b9000000000000000041b895070000ff55e0eb00cd41eb00")
+U2_SPEED_100 = ("e8e83a0800488945e048817de000000000742f488d3d87a77400488d355da47400488d15dda77400"
+                "488d0d92a4740049b9000000000000000041b895070000ff55e0eb00cd41eb00")
+U2_SPEED_FIX = bytes.fromhex("c5f857c0c5fa118340050000eb3c") + b"\xcc" * 58
+VEHICLE_SPEED_NAN_PATCHES = {
+    "big2-ps4_Shipping.elf": [
+        # 9 Nov 2026 (GitHub #381, #346: chapter 21 convoy, only above 60 FPS): a vehicle's speed
+        # controller (0xa8e680) takes its frame time as ticks of 1/300 s (game clock 0x1116180 +
+        # 0x90, times 0.00333) and divides the speed error's change by it; a frame shorter than a
+        # tick (above 60 FPS, frames bunch up after a stall) counts 0 ticks, the division gives
+        # inf or NaN, and SetTargetSpeed (0x5240) asserts IsFinite(m_targetSpeed_mps) and halts
+        # (int 0x41). Its assert path becomes: that frame's target speed is 0, then the normal
+        # exit; the next frame's ticks are whole again. At 60 FPS the path is never taken.
+        # 1.00 (14 Nov 2026): the same code, only the call and lea displacements differ. Exact
+        # patterns: each version's bytes match only its own executable (a wildcard pattern matched
+        # 1.00 too, and the byte check then stopped the start).
+        ("Uncharted 2 vehicle target speed: not finite -> 0 for that frame (above 60 FPS)", [
+            ("c5fa108340050000 e8???????? a801 7548 " + U2_SPEED_102, 17, bytes.fromhex(U2_SPEED_102),
+             U2_SPEED_FIX),
+            ("c5fa108340050000 e8???????? a801 7548 " + U2_SPEED_100, 17, bytes.fromhex(U2_SPEED_100),
+             U2_SPEED_FIX),
+        ]),
+    ],
+}
 FOCUS_NAN_PATCHES = {
     "big3-ps4_Shipping.elf": [
         ("Uncharted 3 player focus: reset instead of asserting on NaN", [
@@ -1513,6 +1538,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         patches.extend(REWARD_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_FOCUS_RESET", "1") != "0":
         patches.extend(FOCUS_NAN_PATCHES.get(executable, []))
+    if os.environ.get("UNCHARTED_VEHICLE_SPEED_RESET", "1") != "0":
+        patches.extend(VEHICLE_SPEED_NAN_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_LEG_IK_RESET", "1") != "0":
         patches.extend(LEG_IK_NAN_PATCHES.get(executable, []))
     if executable in JOB_PARAMS_GUARD and os.environ.get("UNCHARTED_JOB_PARAMS_GUARD", "1") != "0":

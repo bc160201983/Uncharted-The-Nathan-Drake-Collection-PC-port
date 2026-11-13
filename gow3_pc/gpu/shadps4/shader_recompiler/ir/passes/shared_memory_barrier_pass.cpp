@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
+#include "common/alignment.h"
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/passes/resource_pass.h"
@@ -528,6 +531,199 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
             (!has_lds(node.data.block) || allowed(node.data.block))) {
             EmitBarrierInBlock(node.data.block);
         }
+    }
+}
+
+// gow3 9 Nov 2026 (Intel crash in Uncharted 3 chapter 2, GitHub #384 #385 #365 #328 #138): a group
+// barrier inside an `if` that only some invocations enter. GCN runs s_barrier per wave whatever the
+// exec mask (a wave that skips the block whole drops out of the count when it ends), so the PS4 is
+// fine; Vulkan wants every invocation of the group at each barrier. NVIDIA and AMD tolerate it, Intel
+// waits for the invocations that never come and Windows resets the GPU. Compute shader f8fa9165 (a
+// 90-thread prefix sum: `if (stride <= tid) { two LDS reads; barrier; LDS write; barrier; }`) stops
+// the GPU there in two players' breadcrumb logs (Iris Xe and Arc A750, 0.8.4).
+// The if is converted: every invocation runs its body, the LDS writes of those whose condition is
+// false go to a spare dword after the group's LDS, and the values the body hands on take the old
+// value for them (select). Only bodies of plain blocks whose side effects are LDS writes and
+// barriers, with no lane-level operations, are converted.
+// On by default on Intel drivers for the listed shaders; GOW3_DIVERGENT_BARRIERS=1 on any GPU
+// (tests), =all every compute shader that has such an if, =0 off.
+namespace {
+enum class UniformBarrierMode { Off, Listed, All };
+
+UniformBarrierMode UniformBarrierModeFor(bool intel) {
+    static const char* env = std::getenv("GOW3_DIVERGENT_BARRIERS");
+    if (env && env[0] == '0') {
+        return UniformBarrierMode::Off;
+    }
+    if (env && std::string_view{env} == "all") {
+        return UniformBarrierMode::All;
+    }
+    return (env && env[0] == '1') || intel ? UniformBarrierMode::Listed : UniformBarrierMode::Off;
+}
+
+bool ListedUniformBarrierShader(u64 pgm_hash) {
+    return pgm_hash == 0xf8fa9165; // Uncharted 3 prefix sum (chapter 2 museum, Intel)
+}
+
+std::atomic<bool> g_intel_barriers{false};
+} // namespace
+
+void SetUniformBarrierGpu(bool intel) {
+    g_intel_barriers.store(intel, std::memory_order_relaxed);
+}
+
+std::string UniformBarrierTag(u64 pgm_hash, bool compute) {
+    if (!compute) {
+        return {};
+    }
+    switch (UniformBarrierModeFor(g_intel_barriers.load(std::memory_order_relaxed))) {
+    case UniformBarrierMode::Listed:
+        return ListedUniformBarrierShader(pgm_hash) ? "_ub" : "";
+    case UniformBarrierMode::All:
+        return "_uba";
+    default:
+        return {};
+    }
+}
+
+static bool IsLaneLevel(const IR::Inst& inst) {
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::GetExec:
+    case IR::Opcode::SetExec:
+    case IR::Opcode::GetVcc:
+    case IR::Opcode::GetVccLo:
+    case IR::Opcode::GetVccHi:
+    case IR::Opcode::QuadBroadcast:
+    case IR::Opcode::ReadFirstLane:
+    case IR::Opcode::ReadLane:
+    case IR::Opcode::WriteLane:
+    case IR::Opcode::Ballot:
+    case IR::Opcode::BallotFindLsb:
+    case IR::Opcode::InverseBallot:
+    case IR::Opcode::GroupAny:
+    case IR::Opcode::MaskedBitCount32:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void UniformBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info, const Profile& /*profile*/) {
+    if (program.info.hw_stage != HwStage::Compute) {
+        return;
+    }
+    const auto mode = UniformBarrierModeFor(g_intel_barriers.load(std::memory_order_relaxed));
+    if (mode == UniformBarrierMode::Off ||
+        (mode == UniformBarrierMode::Listed && !ListedUniformBarrierShader(program.info.pgm_hash))) {
+        return;
+    }
+    using Type = IR::AbstractSyntaxNode::Type;
+    auto& list = program.syntax_list;
+    const u32 used = runtime_info.hw.cs.shared_memory_size + program.info.shared_memory_scratch_size;
+    const u32 spare = Common::AlignUp(used, 8u);
+    u32 converted = 0, refused = 0;
+    for (size_t i = 1; i < list.size(); ++i) {
+        if (list[i].type != Type::If || list[i - 1].type != Type::Block) {
+            continue;
+        }
+        // The body: plain blocks up to the matching EndIf.
+        size_t end = i + 1;
+        bool plain = true, barrier = false;
+        while (end < list.size() && list[end].type != Type::EndIf) {
+            if (list[end].type != Type::Block) {
+                plain = false;
+                break;
+            }
+            for (const IR::Inst& inst : list[end].data.block->Instructions()) {
+                barrier |= inst.GetOpcode() == IR::Opcode::Barrier;
+            }
+            ++end;
+        }
+        if (!plain || !barrier || end >= list.size() || end == i + 1 ||
+            end + 1 >= list.size() || list[end + 1].type != Type::Block ||
+            !IsGroupNonUniform(list[i].data.if_node.cond)) {
+            continue;
+        }
+        IR::Block* const header = list[i - 1].data.block;
+        IR::Block* const last = list[end - 1].data.block;
+        IR::Block* const merge = list[i].data.if_node.merge;
+        // Checks first: nothing is changed unless all of it can be.
+        bool ok = merge == list[end + 1].data.block;
+        std::string why = ok ? "" : "merge block";
+        std::vector<IR::Inst*> writes;
+        for (size_t b = i + 1; ok && b < end; ++b) {
+            for (IR::Inst& inst : list[b].data.block->Instructions()) {
+                const IR::Opcode op = inst.GetOpcode();
+                if (IsLaneLevel(inst) && inst.HasUses()) {
+                    // Unused ones (the structurizer's exec bookkeeping) go with dead code later.
+                    ok = false;
+                } else if (op == IR::Opcode::WriteSharedU16 || op == IR::Opcode::WriteSharedU32 ||
+                           op == IR::Opcode::WriteSharedU64) {
+                    ok = !inst.Flags<bool>(); // not GDS
+                    writes.push_back(&inst);
+                } else if (op == IR::Opcode::Barrier || op == IR::Opcode::Phi) {
+                    // fine
+                } else if (inst.MayHaveSideEffects()) {
+                    ok = false;
+                }
+                if (!ok) {
+                    why = std::string{IR::NameOf(op)};
+                    break;
+                }
+            }
+        }
+        std::vector<std::pair<IR::Inst*, size_t>> phis; // merge phis: (phi, index of the body edge)
+        for (IR::Inst& inst : merge->Instructions()) {
+            if (!ok || inst.GetOpcode() != IR::Opcode::Phi) {
+                break;
+            }
+            size_t body_edge = SIZE_MAX, header_edge = SIZE_MAX;
+            for (size_t a = 0; a < inst.NumArgs(); ++a) {
+                if (inst.PhiBlock(a) == last) {
+                    body_edge = a;
+                } else if (inst.PhiBlock(a) == header) {
+                    header_edge = a;
+                }
+            }
+            ok = inst.NumArgs() == 2 && body_edge != SIZE_MAX && header_edge != SIZE_MAX;
+            if (!ok) {
+                why = "phi with " + std::to_string(inst.NumArgs()) + " edges";
+            }
+            phis.emplace_back(&inst, body_edge);
+        }
+        if (!ok) {
+            ++refused;
+            static std::atomic<u32> told{0};
+            if (told.fetch_add(1) < 16) {
+                std::printf("GPU: cs %#llx: an if with a group barrier stays as it is: %s\n",
+                            static_cast<unsigned long long>(program.info.pgm_hash), why.c_str());
+            }
+            continue;
+        }
+        const IR::U1 cond = list[i].data.if_node.cond;
+        for (IR::Inst* write : writes) {
+            IR::IREmitter ir{*write->GetParent(), IR::Block::InstructionList::s_iterator_to(*write)};
+            const IR::U32 offset{write->Arg(0)};
+            write->SetArg(0, ir.Select(cond, offset, ir.Imm32(spare)));
+        }
+        IR::IREmitter at_end{*last, last->end()};
+        for (auto [phi, body_edge] : phis) {
+            const size_t header_edge = 1 - body_edge;
+            phi->SetArg(body_edge, at_end.Select(cond, phi->Arg(body_edge), phi->Arg(header_edge)));
+        }
+        list[i].data.if_node.cond = IR::U1{IR::Value{true}};
+        ++converted;
+    }
+    if (converted) {
+        program.info.shared_memory_scratch_size =
+            std::max(program.info.shared_memory_scratch_size, spare + 8 - runtime_info.hw.cs.shared_memory_size);
+    }
+    static std::atomic<u32> reports{0};
+    if ((converted || refused) && reports.fetch_add(1) < 16) {
+        std::printf("GPU: cs %#llx: %u if(s) with a group barrier run by every invocation (writes of "
+                    "the others go aside), %u left as they are (GOW3_DIVERGENT_BARRIERS)\n",
+                    static_cast<unsigned long long>(program.info.pgm_hash), converted, refused);
+        std::fflush(stdout);
     }
 }
 

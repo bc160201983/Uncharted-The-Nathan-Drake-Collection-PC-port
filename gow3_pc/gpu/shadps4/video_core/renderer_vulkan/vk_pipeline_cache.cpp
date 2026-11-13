@@ -24,6 +24,7 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "gow3_settings.h"
@@ -413,6 +414,12 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
+    // gow3 9 Nov 2026: Intel drivers get UniformBarrierPass, and the shader cache names follow it
+    // (UniformBarrierTag). Not a Profile field: the cache's stored profile is compared byte for
+    // byte, and a new field would set every player's cache aside.
+    Shader::Optimization::SetUniformBarrierGpu(
+        instance.GetDriverID() == vk::DriverId::eIntelProprietaryWindows ||
+        instance.GetDriverID() == vk::DriverId::eIntelOpenSourceMESA);
     // gow3: the compiler threads always exist; the in-game menu switches async compilation live
     // (Gow3Settings::async_shaders, GOW3_ASYNC_SHADERS at start).
     {

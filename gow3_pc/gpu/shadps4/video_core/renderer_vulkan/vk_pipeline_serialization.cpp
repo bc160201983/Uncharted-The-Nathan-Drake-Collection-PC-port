@@ -54,7 +54,8 @@ static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx, bool compute)
                        Shader::Optimization::EffectLoopClamp(pgm_hash) ? "_lc1" : "",
                        Shader::WorkgroupSplitListed(pgm_hash) ? "_ws256" : "",
                        Shader::Optimization::SafeClothCacheTag(pgm_hash) +
-                           Shader::Optimization::SharedMemoryBoundsTag(pgm_hash, compute));
+                           Shader::Optimization::SharedMemoryBoundsTag(pgm_hash, compute) +
+                           Shader::Optimization::UniformBarrierTag(pgm_hash, compute));
 }
 } // namespace Serialization
 

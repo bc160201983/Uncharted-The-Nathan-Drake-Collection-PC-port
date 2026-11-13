@@ -156,6 +156,8 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::SsaRewritePass(program);
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
     Shader::Optimization::DeadCodeEliminationPass(program);
+    // gow3 9 Nov 2026: after dead code goes (the structurizer's unused exec bookkeeping).
+    Shader::Optimization::UniformBarrierPass(program, runtime_info, profile);
     // gow3 6 Nov 2026: the game's LDS accesses checked like the PS4 (before the wave64 lowering
     // adds its own scratch accesses, which go after the spare dword).
     Shader::Optimization::SharedMemoryBoundsPass(program, runtime_info, profile);

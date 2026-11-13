@@ -58,6 +58,10 @@ void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_inf
 bool SharedMemoryBounds(u64 pgm_hash);
 std::string SharedMemoryBoundsTag(u64 pgm_hash, bool compute);
 std::string SafeClothCacheTag(u64 pgm_hash);
+/// gow3 9 Nov 2026: group barriers inside ifs that only some invocations enter (Intel hangs).
+void UniformBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info, const Profile& profile);
+void SetUniformBarrierGpu(bool intel);
+std::string UniformBarrierTag(u64 pgm_hash, bool compute);
 void SafeClothExitPass(IR::Program& program, const RuntimeInfo& runtime_info,
                        const Profile& profile);
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);

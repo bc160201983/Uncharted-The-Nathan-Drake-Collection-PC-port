@@ -4,6 +4,44 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 14 November 2026 (0.8.5)
+
+- **Uniform barriers on Intel** (Uncharted 3 chapter 2 / chapter 6 "device lost" on Intel graphics:
+  #384 #385 #365 #328 #138; `UniformBarrierPass` in shared_memory_barrier_pass.cpp, after the first
+  dead-code pass; GOW3_DIVERGENT_BARRIERS=0: off, =1: on any GPU, =all: every compute shader with
+  such an if): compute shader cs f8fa9165 (a 90-thread prefix sum over an image column) runs
+  s_barrier inside an exec-masked branch (`if (stride <= tid) { LDS reads; barrier; LDS write;
+  barrier; }`). GCN counts waves at a barrier whatever the exec mask, so the PS4 is fine; in SPIR-V
+  the barrier sits in non-uniform control flow, which Vulkan does not allow. NVIDIA and AMD tolerate
+  it, Intel's driver waits for the invocations that never come (two players' 0.8.4 breadcrumb logs,
+  Iris Xe and Arc A750, stop at that dispatch). The if is converted: every invocation runs its body,
+  the LDS writes of the invocations whose condition is false go to a spare dword after the group's
+  LDS (the scratch size grows by 8 bytes), and the merge phis take select(cond, body value, old
+  value). Only bodies of plain blocks whose side effects are LDS writes and barriers, with no
+  lane-level operation in use, are converted; anything else is logged and left as it is. On Intel
+  proprietary and Mesa drivers (`SetUniformBarrierGpu`, from the pipeline cache's constructor),
+  listed shader only; the compute cache name gets `_ub` (`_uba` with =all), so other GPUs keep their
+  binaries. Not a Profile field: the shader cache stores the Profile as bytes and compares it, and a
+  field in the middle would set every player's cache aside. The IR dump (GOW3_DUMP_SHADERS) prints the
+  converted if's constant condition. Checked on a GeForce with the switch on: the shader converts,
+  spirv-val passes, the game runs with 0 errors.
+- **Uncharted 2 vehicle target speed** (chapter 21 convoy crash above 60 FPS: #381 #346;
+  tools/probe_uncharted.py VEHICLE_SPEED_NAN_PATCHES, UNCHARTED_VEHICLE_SPEED_RESET=0: off): a
+  vehicle's speed controller (0xa8e680) takes its frame time as ticks of 1/300 s (game clock
+  0x1116180 + 0x90) and divides by it; a frame shorter than a tick counts 0 ticks, the division gives
+  inf or NaN, and SetTargetSpeed (0x5240) asserts IsFinite(m_targetSpeed_mps) and halts (int 0x41).
+  Its 72-byte assert path (0x52c3) now sets that frame's target speed to 0 and jumps to the
+  function's epilogue (0x530d); the next frame's ticks are whole again. At 60 FPS the path is never
+  taken. Version 1.00 has the same code with other call and lea displacements: one exact variant per
+  version (`U2_SPEED_102`, `U2_SPEED_100`), so neither can match the other's executable.
+- **Uncharted 2 ultrawide HUD** (#191, Ferosnow95): Launcher -> Display -> HUD (UNCHARTED_HUD;
+  GOW3_HUD_ASPECT, GOW3_HUD_MODE) with 16:9, Wide and Stretched; the HUD's draws are found by their
+  target and placed by the horizontal extent of their vertex positions (hud_layout.h). No change at
+  16:9 or narrower.
+- **Controller launcher shell** (#269, memeguyoffical, squashed): Settings -> System -> Controller
+  only mode, off by default; launcher config version 11 (keeps 0.8.4's version 10 step). The pull
+  request's key art and screenshots are not included.
+
 ## 6 November 2026, afternoon (0.8.4)
 
 - **PS4 LDS bounds** (Uncharted 3 chapter 2 "device lost" as young Sully appears: #295 #138 #342

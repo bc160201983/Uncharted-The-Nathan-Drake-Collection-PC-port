@@ -12,8 +12,11 @@ std::string DumpASLNode(const AbstractSyntaxNode& node,
     case AbstractSyntaxNode::Type::Block:
         return fmt::format("Block: ${}", block_to_index.at(node.data.block));
     case AbstractSyntaxNode::Type::If:
-        return fmt::format("If: cond = %{}, body = ${}, merge = ${}",
-                           inst_to_index.at(node.data.if_node.cond.Inst()),
+        // gow3 14 Nov 2026: UniformBarrierPass leaves a constant condition.
+        return fmt::format("If: cond = {}, body = ${}, merge = ${}",
+                           node.data.if_node.cond.IsImmediate()
+                               ? std::string{node.data.if_node.cond.U1() ? "true" : "false"}
+                               : fmt::format("%{}", inst_to_index.at(node.data.if_node.cond.Inst())),
                            block_to_index.at(node.data.if_node.body),
                            block_to_index.at(node.data.if_node.merge));
     case AbstractSyntaxNode::Type::EndIf:
