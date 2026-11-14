@@ -990,6 +990,9 @@ def apply_patches(image, patches):
 def game_executable():
     """The runtime as Uncharted.exe (Task Manager, Windows' graphics settings and overlays show
     this name), copied from the build output whenever that is newer."""
+    if os.name != "nt":  # Linux build (AppImage): the native runtime, run as built
+        native = Path(os.environ.get("UNCHARTED_RUNTIME") or ROOT / "gow3_pc/out/gow3-probe")
+        return native
     built = ROOT / "gow3_pc/out/gow3-probe.exe"
     game_exe = ROOT / "gow3_pc/out/Uncharted.exe"
     if os.environ.get("UNCHARTED_TEST_PROBE_EXE") == "1":  # test: not under the game's name

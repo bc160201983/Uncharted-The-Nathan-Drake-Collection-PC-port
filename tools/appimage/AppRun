@@ -1,0 +1,41 @@
+#!/bin/bash
+# AppRun for the Linux AppImage of Uncharted: The Nathan Drake Collection PC port.
+# The AppImage is read-only, but the launcher and runtime write saves, logs, settings and the
+# shader cache next to themselves (analysis/). So the program files are copied once per version
+# into a writable folder and started from there; analysis/ is never touched by the copy.
+set -euo pipefail
+HERE="$(dirname "$(readlink -f "$0")")"
+export APPDIR="${APPDIR:-$HERE}"
+
+DATA="${UNCHARTED_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/uncharted-ndc}"
+INSTALL="$DATA/app"
+STAMP="$INSTALL/.appimage-version"
+VERSION="$(cat "$APPDIR/usr/share/uncharted/app/VERSION" 2>/dev/null || echo dev)-$(stat -c %Y "$APPDIR/usr/share/uncharted/app/gow3_pc/out/gow3-probe")"
+
+if [[ ! -f $STAMP || $(cat "$STAMP") != "$VERSION" ]]; then
+    mkdir -p "$INSTALL"
+    # Program files only; saves/settings/shader cache under analysis/ stay as they are.
+    (cd "$APPDIR/usr/share/uncharted/app" && tar --exclude=./analysis -cf - .) | (cd "$INSTALL" && tar -xf -)
+    mkdir -p "$INSTALL/analysis/uncharted-user"
+    [[ -f $INSTALL/analysis/uncharted-user/disabled-optimizations.txt ]] ||
+        cp "$APPDIR/usr/share/uncharted/app/analysis/uncharted-user/disabled-optimizations.txt" \
+           "$INSTALL/analysis/uncharted-user/" 2>/dev/null || true
+    echo "$VERSION" > "$STAMP"
+fi
+
+export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PYTHONHOME="$APPDIR/usr/python"
+export PYTHONNOUSERSITE=1
+export TCL_LIBRARY="$(echo "$APPDIR"/usr/python/lib/tcl[0-9].[0-9]*)"
+export TK_LIBRARY="$(echo "$APPDIR"/usr/python/lib/tk[0-9].[0-9]*)"
+export UNCHARTED_RUNTIME="$INSTALL/gow3_pc/out/gow3-probe"
+PY="$APPDIR/usr/python/bin/python3"
+
+cd "$INSTALL"
+case "${1:-}" in
+    --boot)  # direct start without the launcher: AppImage --boot <game folder> [extra args]
+        shift; game="$1"; shift
+        exec "$PY" -u tools/probe_uncharted.py --boot --seconds 0 --game "$game" "$@" ;;
+    --shell) shift; exec bash "$@" ;;
+    *)       exec "$PY" launcher/uncharted_launcher.pyw "$@" ;;
+esac
