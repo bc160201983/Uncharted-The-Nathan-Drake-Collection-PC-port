@@ -4,6 +4,15 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 14 November 2026, evening (0.8.6)
+
+- **Launcher back to 0.8.4's** (#402 #401): 06b7775 (#269, the optional controller / PlayStation 5
+  style shell) reverted. In 0.8.5 the classic launcher came out oversized and distorted on many PCs
+  (#402) and the controller mode showed black pages (#401). launcher/, tools/package_windows.sh and
+  README.md are again as before that commit (0.8.4's launcher plus #191's HUD setting). A settings
+  file written by 0.8.5 (version 11) loads unchanged; its extra keys are ignored and it is saved as
+  version 10 again. The runtime and the start script are the same as in 0.8.5.
+
 ## 14 November 2026 (0.8.5)
 
 - **Uniform barriers on Intel** (Uncharted 3 chapter 2 / chapter 6 "device lost" on Intel graphics:
