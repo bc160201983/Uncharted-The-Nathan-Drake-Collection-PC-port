@@ -42,6 +42,8 @@ cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool
 cp launcher/*.py launcher/*.pyw launcher/*.json "$stage/launcher/"
 # The package's version (tools/VERSION; the launcher's updates compare it with the releases).
 cp tools/VERSION "$stage/VERSION"
+# RecompLauncher's setup file, next to Uncharted Launcher.exe.
+cp recomplauncher.json "$stage/recomplauncher.json"
 cp launcher/assets/uncharted.ico launcher/assets/icon.png "$stage/launcher/assets/"
 # The runtime's optimizations known to break Uncharted (GOW3_TOGGLE_FILE).
 cp tools/defaults/disabled-optimizations.txt "$stage/analysis/uncharted-user/"
