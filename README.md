@@ -1,5 +1,7 @@
 # Uncharted: The Nathan Drake Collection — PC port
 
+<a href="https://recomplauncher.com/game/uncharted-the-nathan-drake-collection-pc-port"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 Run the PS4 **Uncharted: The Nathan Drake Collection** (CUSA02344: *Drake's Fortune*, *Among
 Thieves* and *Drake's Deception*) natively on Windows. The game's own x86-64 code runs directly
 on the PC; a runtime supplies the PS4 system libraries, and a Vulkan renderer executes the PS4 GPU
