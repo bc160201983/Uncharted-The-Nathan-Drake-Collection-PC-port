@@ -2069,6 +2069,34 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     return result
 
 
+def prepare_game(args):
+    """--prepare (for launchers): the preparation run_game does before each start (prepare.py,
+    link_modules.py, content_profile.py) for each game in the copy, without starting a game. Prints
+    "progress <0-1> <text>" lines; exit 0 when the copy is ready, else 1 with one line on stderr."""
+    game = args.game.resolve()
+    if not (game / "eboot.bin").is_file() or not (game / "sce_sys/param.sfo").is_file():
+        print(f"{game} has no eboot.bin and sce_sys/param.sfo (the dumped CUSA02344 folder)", file=sys.stderr)
+        return 1
+    titles = {"u1": "Drake's Fortune", "u2": "Among Thieves", "u3": "Drake's Deception"}
+    scripts = ROOT / "gow3_pc/scripts"
+    steps = [(executable, script) for executable in GAME_KEYS if (game / executable).is_file()
+             for script in ("prepare.py", "link_modules.py", "content_profile.py")]
+    for number, (executable, script) in enumerate(steps):
+        print(f"progress {number / len(steps):.2f} Preparing {titles[GAME_KEYS[executable]]}", flush=True)
+        stem = "uncharted" if executable == "eboot.bin" else Path(executable).stem
+        out = args.analysis_root / stem if args.analysis_root else ROOT / "analysis" / (stem + instance_suffix())
+        command = [sys.executable, str(scripts / script), str(game), "--out", str(out)]
+        if script != "content_profile.py":
+            command += ["--executable", executable]
+        result = subprocess.run(command, capture_output=True, text=True, errors="replace")
+        if result.returncode != 0:
+            lines = [line for line in (result.stderr or result.stdout).splitlines() if line.strip()]
+            print(lines[-1] if lines else f"{script} failed with exit code {result.returncode}", file=sys.stderr)
+            return 1
+    print("progress 1.00 Game files ready", flush=True)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game", type=Path, default=ROOT / "game/CUSA02344/uroot")
@@ -2088,6 +2116,9 @@ def main():
     parser.add_argument("--cpu-only", action="store_true")
     parser.add_argument("--capture", action="store_true", help="Request a renderer frame dump every three seconds")
     parser.add_argument("--seconds", type=int, default=30, help="External process time limit; 0 disables it")
+    parser.add_argument("--prepare", action="store_true",
+                        help="Only prepare the three games from --game, without a window or a game start; "
+                             "prints 'progress <0-1> <text>' lines, exits 0 when ready")
     args = parser.parse_args()
     if args.runtime_executable:
         args.runtime_executable = args.runtime_executable.resolve()
@@ -2095,6 +2126,8 @@ def main():
             parser.error("--runtime-executable must name an existing file")
     if args.seconds < 0:
         parser.error("--seconds must be nonnegative")
+    if args.prepare:
+        return prepare_game(args)
     user = args.user_dir.resolve() if args.user_dir else user_dir()
     args.user_dir = user
     if args.analysis_root:
