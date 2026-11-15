@@ -1,0 +1,57 @@
+{
+    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+    "format": 1,
+    "repo": "bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port",
+    "name": "Uncharted: The Nathan Drake Collection PC port",
+    "game": {
+        "kind": "folder",
+        "label": "Your dumped CUSA02344 folder of Uncharted: The Nathan Drake Collection (PS4), the one holding eboot.bin and sce_sys (often called uroot).",
+        "check": {
+            "file": "eboot.bin"
+        }
+    },
+    "prepare": {
+        "program": [
+            "python/python.exe",
+            "python/pythonw.exe"
+        ],
+        "args": [
+            "{install}/tools/probe_uncharted.py",
+            "--prepare",
+            "--game",
+            "{game}"
+        ],
+        "label": "Checking and preparing your game files",
+        "timeout": 600
+    },
+    "start": {
+        "program": [
+            "python/python.exe",
+            "python/pythonw.exe"
+        ],
+        "args": [
+            "{install}/tools/probe_uncharted.py",
+            "--boot",
+            "--seconds",
+            "0",
+            "--collection-menu",
+            "--game",
+            "{game}"
+        ]
+    },
+    "folders": {
+        "saves": [
+            {
+                "path": "{install}/analysis"
+            }
+        ],
+        "logs": [
+            {
+                "path": "{install}/analysis"
+            }
+        ]
+    },
+    "requires": [
+        "files.folder"
+    ]
+}
