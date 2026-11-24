@@ -870,10 +870,12 @@ RESOLUTIONS = [("960x540", "540p"), ("1280x720", "720p"), ("1600x900", "900p"), 
 # 1280x800): the render resolution's width, taller; the games keep the 16:9 width of view and
 # show more at the top and bottom.
 ASPECTS = [("16:10", "16:10"), ("16:9", "16:9"), ("21:9", "21:9"), ("32:9", "32:9")]
-# Uncharted 2 at 21:9 / 32:9 (tools/probe_uncharted.py hud_layout): its HUD and menus in the
+# Uncharted 2 and 3 at 21:9 / 32:9 (tools/probe_uncharted.py hud_layout): their HUD and menus in the
 # centred 16:9 area, in it with the side elements at the screen edges, or the game's own stretch.
 HUD_WIDE_AREAS = [("screen", "Screen edges"), ("21:9", "21:9"), ("32:9", "32:9")]
 HUD_MODES = [("16:9", "16:9"), ("wide", "Wide"), ("stretch", "Stretched")]
+# The games whose HUD placement the port does at 21:9 / 32:9 (Drake's Fortune: not yet).
+HUD_LAYOUT_GAMES = {"u2": "Uncharted 2", "u3": "Uncharted 3"}
 ASPECT_WIDTHS = {"16:10": 16 / 10, "16:9": 16 / 9, "21:9": 64 / 27, "32:9": 32 / 9}
 # Upscaling: the resolution chosen is the output; the game draws at it divided by the quality's
 # scale and the upscaler brings each frame up to it before the HUD is drawn. FSR 1 is spatial (the
@@ -1871,6 +1873,7 @@ class Launcher:
             self.refresh_pad_slots()
         if hasattr(self, "binding_slots"):
             self.refresh_bindings()
+        self.refresh_hud_rows()
         self.sync_sharpening()
         if hasattr(self, "preset_cards"):
             self.redraw_presets()
@@ -2050,7 +2053,8 @@ class Launcher:
         row.pack(side="top", fill="x", pady=(0, self.px(10)))
         text = tk.Frame(row, bg=BG)
         text.pack(side="left", fill="x", expand=True)
-        tk.Label(text, text=title, font=self.f_body_bold, bg=BG, fg=TEXT, anchor="w").pack(side="top", fill="x")
+        self.row_title = tk.Label(text, text=title, font=self.f_body_bold, bg=BG, fg=TEXT, anchor="w")
+        self.row_title.pack(side="top", fill="x")
         if hint:
             tk.Label(text, text=hint, font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
                      wraplength=self.px(560)).pack(side="top", fill="x")
@@ -2187,24 +2191,26 @@ class Launcher:
             "1280x800) fills the screen and shows more at the top and bottom.", aspect)
 
         def hud(parent):
-            return Segmented(parent, HUD_MODES, self.config.get("hud", "16:9"),
-                             lambda value: self.change_config("hud", value), self.f_small)
+            return Segmented(parent, HUD_MODES, self.hud_setting("hud"),
+                             lambda value: self.change_game_setting("hud", value), self.f_small)
         self.widgets["hud"] = self.row(
             page, "HUD (Uncharted 2, ultrawide)",
             "At 21:9 and 32:9: 16:9 keeps the HUD and menus in the middle 16:9 of the screen; Wide "
             "moves the corner elements (ammo, prompts at the sides) out to the screen edges, the rest "
             "stays in the middle (experimental); Stretched is the game's own, stretched to the sides.",
             hud)
+        self.hud_title = self.row_title
 
         def hud_wide(parent):
-            return Segmented(parent, HUD_WIDE_AREAS, self.config.get("hud_wide_aspect", "screen"),
-                             lambda value: self.change_config("hud_wide_aspect", value),
+            return Segmented(parent, HUD_WIDE_AREAS, self.hud_setting("hud_wide_aspect"),
+                             lambda value: self.change_game_setting("hud_wide_aspect", value),
                              self.f_small)
         self.widgets["hud_wide_aspect"] = self.row(
             page, "Wide HUD edges",
             "With HUD Wide: where the side elements go \u2014 the screen's edges, or the edges of a "
             "21:9 area (closer in on a 32:9 screen).",
             hud_wide)
+        self.refresh_hud_rows()
 
         def resolution(parent):
             return Segmented(parent, resolution_options(self.game_settings().get("aspect", "16:9")),
@@ -3335,6 +3341,29 @@ class Launcher:
             text=f"Draws {render.replace('x', ' × ')}, upscaled to {output.replace('x', ' × ')}"
             if output else "")
 
+    def hud_setting(self, key):
+        """The selected game's HUD option; before it had its own, the one setting for every game."""
+        default = {"hud": "16:9", "hud_wide_aspect": "screen"}[key]
+        return self.game_settings().get(key, self.config.get(key, default))
+
+    def refresh_hud_rows(self):
+        """The HUD rows follow the selected game: shown for the games with a HUD placement."""
+        hud, wide = self.widgets.get("hud"), self.widgets.get("hud_wide_aspect")
+        if not isinstance(hud, Segmented) or not isinstance(wide, Segmented):
+            return
+        name = HUD_LAYOUT_GAMES.get(self.config["game"])
+        if name:
+            self.hud_title.config(text=f"HUD ({name}, ultrawide)")
+            hud.set(self.hud_setting("hud"))
+            wide.set(self.hud_setting("hud_wide_aspect"))
+            if not hud.master.winfo_ismapped():
+                hud.master.pack(side="top", fill="x", pady=(0, self.px(10)),
+                                after=self.widgets["aspect"].master)
+                wide.master.pack(side="top", fill="x", pady=(0, self.px(10)), after=hud.master)
+        else:
+            hud.master.pack_forget()
+            wide.master.pack_forget()
+
     def change_game_setting(self, key, value):
         self.game_settings()[key] = value
         if key in ("mouse", "mouse_sens", "mouse_invert", "prompts", "mouse_aim_sens", "mouse_vertical",
@@ -3412,8 +3441,14 @@ class Launcher:
         env["GOW3_MOVIE_STRETCH"] = "1" if self.config.get("movie_stretch", False) else "0"
         env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"
         env["UNCHARTED_UNLOCK_REWARDS"] = "1" if self.config.get("unlock_rewards", False) else "0"
-        env["UNCHARTED_HUD"] = str(self.config.get("hud", "16:9"))
-        env["UNCHARTED_HUD_WIDE_ASPECT"] = str(self.config.get("hud_wide_aspect", "screen"))
+        # The launching game's HUD placement (Uncharted 2 and 3); unset for the others.
+        env.pop("UNCHARTED_HUD", None)
+        env.pop("UNCHARTED_HUD_WIDE_ASPECT", None)
+        if game["key"] in HUD_LAYOUT_GAMES:
+            hud_settings = self.config["games"][game["key"]]
+            env["UNCHARTED_HUD"] = str(hud_settings.get("hud", self.config.get("hud", "16:9")))
+            env["UNCHARTED_HUD_WIDE_ASPECT"] = str(
+                hud_settings.get("hud_wide_aspect", self.config.get("hud_wide_aspect", "screen")))
         if self.chosen_update():
             env["UNCHARTED_UPDATE"] = str(self.chosen_update())  # tools/probe_uncharted.py find_update
         env["UNCHARTED_CHEATS"] = ",".join(name for name, *_ in CHEATS if self.config.get("cheat_" + name, False))
