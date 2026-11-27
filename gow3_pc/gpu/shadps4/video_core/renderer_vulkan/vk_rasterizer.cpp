@@ -149,6 +149,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         hud_trace = env[0] == '1';
     }
     hud_wide = HudLayout::WideFromEnv();
+    hud_tracker.nonindexed = HudLayout::NonIndexedFromEnv();
     if (hud_aspect > 0.0f) {
         std::printf("HUD: drawn in the centred %.4f:1 area (over the frame after pixel shader "
                     "%08llx, after its copy %08llx)\n", hud_aspect,
@@ -2489,11 +2490,29 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (hud_draw) {
         float min_x = 0.0f, max_x = 0.0f;
         std::string detail;
+        // Only the in-game HUD is split in wide mode; menus stay in the 16:9 area.
+        const bool splittable = hud_wide && hud_tracker.last_over_frame;
+        std::vector<std::pair<float, float>> intervals;
         const bool valid = HudExtent(pipeline, is_indexed, index_offset, min_x, max_x,
-                                     hud_trace ? &detail : nullptr);
-        // Only the in-game HUD is split by thirds in wide mode; menus stay in the 16:9 area.
+                                     hud_trace ? &detail : nullptr,
+                                     splittable ? &intervals : nullptr);
         hud_anchor = HudLayout::Classify(valid, min_x, max_x, false);
-        hud_split = hud_wide && hud_tracker.last_over_frame && hud_anchor != HudLayout::Anchor::Full;
+        // A non-indexed draw over the frame is placed only with a known extent short of the
+        // full width (the crosshair); otherwise it stays as it was, at the full width.
+        const bool rejected = !is_indexed && hud_tracker.last_over_frame &&
+                              (!valid || hud_anchor == HudLayout::Anchor::Full);
+        if (rejected) {
+            hud_anchor = HudLayout::Anchor::Full;
+        }
+        hud_split = splittable && hud_anchor != HudLayout::Anchor::Full;
+        hud_cut_left = -1.0f / 3.0f;
+        hud_cut_right = 1.0f / 3.0f;
+        if (hud_split) {
+            // Cut between the draw's elements, not at fixed thirds (text and prompts batched
+            // with other elements would be sliced).
+            HudLayout::NormaliseIntervals(intervals);
+            std::tie(hud_cut_left, hud_cut_right) = HudLayout::SplitPoints(std::move(intervals));
+        }
         if (hud_trace) {
             static std::mutex trace_mutex;
             static std::unordered_map<u64, u32> traced;
@@ -2506,7 +2525,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                             u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash), u32(ps),
                             Regs().num_indices, is_indexed ? "indices" : "vertices",
                             valid ? "" : "(unknown)", min_x, max_x,
-                            kNames[u32(hud_anchor)], hud_split ? " (split)" : "");
+                            kNames[u32(hud_anchor)],
+                            rejected ? " (kept)" : hud_split ? " (split)" : "");
                 const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
                 const auto& fetch = pipeline->GetFetchShader();
                 std::string text = fmt::format("HUD attribs: vs {:08x} ps {:08x}",
@@ -2538,6 +2558,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 std::printf("%s\n", text.c_str());
                 std::fflush(stdout);
             }
+        }
+        if (rejected) {
+            hud_tracker.Reject();
+            hud_draw = false;
+            hud_anchor = HudLayout::Anchor::Centre;
         }
     }
     // gow3 21 Oct 2026 diagnostics (U3 museum red carpet), GOW3_MESH_DUMP=<index buffer hex>:
@@ -3086,6 +3111,10 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         NoteHudDraw(fragment ? fragment->pgm_hash : 0, is_indexed);
         hud_anchor = HudLayout::Anchor::Centre; // GPU-written arguments: no extent
         hud_split = false;
+        if (!is_indexed && hud_tracker.last_over_frame) {
+            hud_tracker.Reject(); // a non-indexed draw is placed only by a known extent
+            hud_draw = false;
+        }
     }
     PrepareRenderState(pipeline);
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
@@ -6716,7 +6745,8 @@ void Rasterizer::NoteHudDraw(u64 ps_hash, bool indexed) {
 }
 
 bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
-                           float& min_x, float& max_x, std::string* detail) const {
+                           float& min_x, float& max_x, std::string* detail,
+                           std::vector<std::pair<float, float>>* intervals) const {
     using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
     const auto& regs = Regs();
     const auto& fetch = pipeline->GetFetchShader();
@@ -6817,9 +6847,15 @@ bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u3
             }
         }
     }
+    // The x of each vertex in draw order (NaN: unreadable or a primitive restart), for the
+    // primitives' intervals.
+    std::vector<float> xs;
     const auto take = [&](u64 vertex) {
         const VAddr address = buffer.base_address + vertex * stride;
         if (!readable(address, half ? sizeof(u16) : sizeof(float))) {
+            if (intervals) {
+                xs.push_back(std::nanf(""));
+            }
             return;
         }
         float x;
@@ -6829,6 +6865,9 @@ bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u3
             x = HudLayout::HalfToFloat(h);
         } else {
             std::memcpy(&x, reinterpret_cast<const void*>(address), sizeof(x));
+        }
+        if (intervals) {
+            xs.push_back(x);
         }
         if (std::isfinite(x)) {
             min_x = std::min(min_x, x);
@@ -6855,12 +6894,21 @@ bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u3
             }
             if (index != restart) {
                 take(u64(index) + vertex_offset);
+            } else if (intervals) {
+                xs.push_back(std::nanf(""));
             }
         }
     } else {
         for (u32 i = 0; i < count; ++i) {
             take(u64(vertex_offset) + i);
         }
+    }
+    if (intervals && any) {
+        using Primitive = AmdGpu::PrimitiveType;
+        const u32 group = regs.primitive_type == Primitive::QuadList        ? 4
+                          : regs.primitive_type == Primitive::TriangleStrip ? 0
+                                                                            : 3;
+        *intervals = HudLayout::PrimitiveIntervals(xs, group);
     }
     return any;
 }
@@ -7987,7 +8035,8 @@ void Rasterizer::UpdateViewportScissorState() const {
             const s32 game_x0 = s.offset.x, game_x1 = s.offset.x + s32(s.extent.width);
             const auto columns =
                 hud_split ? HudLayout::PassColumns(hud_anchor, game_x0, game_x1, hud_width,
-                                                   hud_height, hud_k, hud_wide_aspect)
+                                                   hud_height, hud_k, hud_wide_aspect,
+                                                   hud_cut_left, hud_cut_right)
                           : HudLayout::Scissor(game_x0, game_x1, hud_width, hud_height, hud_k,
                                                hud_anchor, hud_wide_aspect);
             s.offset.x = columns.x0;

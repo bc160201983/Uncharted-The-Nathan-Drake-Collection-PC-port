@@ -405,11 +405,15 @@ private:
     u32 hud_width = 0;         ///< and its target's width
     bool hud_split = false;    ///< wide mode: this draw is recorded once per anchor (a third each)
     u32 hud_height = 0;        ///< and height
+    float hud_cut_left = -1.0f / 3.0f;  ///< where the split passes cut (layout x, HudLayout::SplitPoints)
+    float hud_cut_right = 1.0f / 3.0f;
     float hud_wide_aspect = 0.0f; ///< GOW3_HUD_WIDE_ASPECT: area of the side elements (0: screen)
     void NoteHudDraw(u64 ps_hash, bool indexed);
     /// The horizontal extent of a draw's vertex positions (its first float position attribute).
+    /// `intervals` (optional) gets the x span of each primitive, in the vertex units.
     bool HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
-                   float& min_x, float& max_x, std::string* detail = nullptr) const;
+                   float& min_x, float& max_x, std::string* detail = nullptr,
+                   std::vector<std::pair<float, float>>* intervals = nullptr) const;
     void NoteHudTarget(const RenderState& state);
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
