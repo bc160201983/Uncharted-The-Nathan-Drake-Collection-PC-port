@@ -833,11 +833,25 @@ def hud_wide_aspect():
     return value if value in ("21:9", "32:9") else None
 
 
+# The shaders the HUD placement keys on, per game: the tonemap pixel shader finishing the frame
+# (the in-game HUD is drawn after it) and the frame-copy pixel shader. Uncharted 3 uses the same
+# ones as Uncharted 2 (to be confirmed); Drake's Fortune has none yet.
+HUD_LAYOUT_SHADERS = {
+    "big2-ps4_Shipping.elf": ("484cdbf5", "749bbec9"),
+    "big3-ps4_Shipping.elf": ("484cdbf5", "749bbec9"),
+}
+# Vertex shaders of HUD-pass draws that are not placed but scaled about their own centre
+# (GOW3_HUD_SELF_SCALE_VS): Uncharted 3's aiming reticle and pickup rings (ce096b7c) hold final
+# NDC positions that the game widens by the screen's aspect itself, on top of the HUD layer's
+# stretch.
+HUD_SELF_SCALE_VS = {"big3-ps4_Shipping.elf": "ce096b7c"}
+
+
 def hud_layout(executable, width, height):
     """The HUD mode the runtime applies at this render size, or None (16:9 or narrower, stretch,
-    Drake's Fortune and Uncharted 3)."""
+    Drake's Fortune)."""
     mode = hud_mode()
-    if executable != "big2-ps4_Shipping.elf" or mode == "stretch" or width / height <= 16 / 9 + 0.01:
+    if executable not in HUD_LAYOUT_SHADERS or mode == "stretch" or width / height <= 16 / 9 + 0.01:
         return None
     return mode
 
@@ -1811,9 +1825,12 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         env["GOW3_HUD_MODE"] = hud
         if hud == "wide" and (wide_area := hud_wide_aspect()):
             env["GOW3_HUD_WIDE_ASPECT"] = wide_area
-        env.setdefault("GOW3_HUD_COMPOSITE_PS", "749bbec9")
-        env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")  # the in-game HUD is drawn over its frame
+        tonemap_ps, composite_ps = HUD_LAYOUT_SHADERS[executable]
+        env.setdefault("GOW3_HUD_COMPOSITE_PS", composite_ps)
+        env.setdefault("GOW3_UI_TONEMAP_PS", tonemap_ps)  # the in-game HUD is drawn over its frame
         env.setdefault("GOW3_HUD_TRACE", "1")  # HUD draw counts and shaders in the log
+        if self_scale := HUD_SELF_SCALE_VS.get(executable):
+            env.setdefault("GOW3_HUD_SELF_SCALE_VS", self_scale)
         print(f"HUD: {hud} (the HUD and menus in the 16:9 area of {width}x{height})")
     # Output resolution above the render resolution (UNCHARTED_OUTPUT_RES[_U1/_U2/_U3]=WxH): the
     # game draws at the render size and its finished frame is upscaled to the output size where

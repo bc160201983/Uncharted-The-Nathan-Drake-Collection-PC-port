@@ -405,11 +405,22 @@ private:
     u32 hud_width = 0;         ///< and its target's width
     bool hud_split = false;    ///< wide mode: this draw is recorded once per anchor (a third each)
     u32 hud_height = 0;        ///< and height
+    std::vector<u32> hud_self_scale_vs; ///< GOW3_HUD_SELF_SCALE_VS (HudLayout::SelfScale)
+    bool hud_self = false;     ///< this draw scales itself about hud_self_centre
+    float hud_self_centre = 0.0f; ///< the centre it scales about (NDC; HudLayout::SelfScaleRuns)
+    int hud_self_run = 0;      ///< and its run (the draws of one reticle in a row)
+    HudLayout::SelfScaleRuns hud_runs;
+    u64 hud_runs_frame = 0;    ///< the tracker's frame the runs are of
+    float hud_self_s = 1.0f;   ///< and its horizontal scale
+    float hud_cut_left = -1.0f / 3.0f;  ///< where the split passes cut (layout x, HudLayout::SplitPoints)
+    float hud_cut_right = 1.0f / 3.0f;
     float hud_wide_aspect = 0.0f; ///< GOW3_HUD_WIDE_ASPECT: area of the side elements (0: screen)
     void NoteHudDraw(u64 ps_hash, bool indexed);
     /// The horizontal extent of a draw's vertex positions (its first float position attribute).
+    /// `intervals` (optional) gets the x span of each primitive, in the vertex units.
     bool HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
-                   float& min_x, float& max_x, std::string* detail = nullptr) const;
+                   float& min_x, float& max_x, std::string* detail = nullptr,
+                   std::vector<std::pair<float, float>>* intervals = nullptr) const;
     void NoteHudTarget(const RenderState& state);
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
