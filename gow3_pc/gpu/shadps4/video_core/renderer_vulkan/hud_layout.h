@@ -215,6 +215,62 @@ inline Span Viewport(float x, float width, float target_width, float k) {
     return {centre + (x - centre) * k, width * k};
 }
 
+/// An extent in NDC (positions beyond +-4 are in the 1280-wide UI space).
+inline void ExtentToNdc(float& min_x, float& max_x) {
+    if (std::max(std::fabs(min_x), std::fabs(max_x)) > 4.0f) {
+        min_x = min_x / 640.0f - 1.0f;
+        max_x = max_x / 640.0f - 1.0f;
+    }
+}
+
+/// The centre the self-scaling draws of one shape scale about. A reticle is several draws in a
+/// row (circle, brackets, ticks), and each scaled about its own centre would keep the gaps
+/// between them too wide: a run is the consecutive self-scaling draws of a frame (any other draw
+/// ends it), and a draw in run i scales about the centre of run i's whole extent in the frame
+/// before (its own centre when there was none: the first frame, a new shape).
+struct SelfScaleRuns {
+    static constexpr int kMax = 16;
+    struct Run {
+        float lo = 0.0f, hi = 0.0f;
+        bool valid = false;
+    };
+    Run previous[kMax]{}, current[kMax]{};
+    int count = 0;       ///< runs of this frame so far
+    bool open = false;   ///< the last draw was a self-scaling one
+
+    void BeginFrame() {
+        std::copy(std::begin(current), std::end(current), std::begin(previous));
+        std::fill(std::begin(current), std::end(current), Run{});
+        count = 0;
+        open = false;
+    }
+    void EndRun() {
+        open = false;
+    }
+    /// A self-scaling draw with a valid extent (NDC): the centre it scales about; `run` gets the
+    /// run's index.
+    float Draw(float min_x, float max_x, int* run = nullptr) {
+        if (!open) {
+            open = true;
+            ++count;
+        }
+        const int index = std::min(count, kMax) - 1;
+        if (run) {
+            *run = count - 1;
+        }
+        if (count <= kMax) {
+            Run& r = current[index];
+            r.lo = r.valid ? std::min(r.lo, min_x) : min_x;
+            r.hi = r.valid ? std::max(r.hi, max_x) : max_x;
+            r.valid = true;
+            if (previous[index].valid) {
+                return (previous[index].lo + previous[index].hi) * 0.5f;
+            }
+        }
+        return (min_x + max_x) * 0.5f;
+    }
+};
+
 /// A viewport x and width scaled by s about the NDC x `centre`, which stays where it was.
 inline Span SelfScaleViewport(float x, float width, float centre, float s) {
     return {x + width * (centre + 1.0f) * 0.5f * (1.0f - s), width * s};

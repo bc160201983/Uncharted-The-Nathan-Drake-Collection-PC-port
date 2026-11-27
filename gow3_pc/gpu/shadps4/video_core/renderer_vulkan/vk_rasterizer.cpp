@@ -2511,8 +2511,16 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         if (rejected || hud_self) {
             hud_anchor = HudLayout::Anchor::Full;
         }
+        if (hud_tracker.frames != hud_runs_frame) {
+            hud_runs_frame = hud_tracker.frames;
+            hud_runs.BeginFrame();
+        }
         if (hud_self) {
-            hud_self_centre = HudLayout::ExtentCentre(min_x, max_x);
+            float lo = min_x, hi = max_x;
+            HudLayout::ExtentToNdc(lo, hi);
+            hud_self_centre = hud_runs.Draw(lo, hi, &hud_self_run);
+        } else {
+            hud_runs.EndRun();
         }
         hud_split = splittable && hud_anchor != HudLayout::Anchor::Full;
         hud_cut_left = -1.0f / 3.0f;
@@ -2539,8 +2547,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                             rejected ? " (kept)" : hud_split ? " (split)" : "");
                 if (hud_self) {
                     const float k = HudLayout::Factor(hud_aspect, hud_width, hud_height);
-                    std::printf("HUD draw: vs %08x -> self scale x%.3f about %.3f\n", vs_hash,
-                                HudLayout::SelfScale(k), hud_self_centre);
+                    std::printf("HUD draw: vs %08x -> self scale x%.3f about %.3f (run %d)\n",
+                                vs_hash, HudLayout::SelfScale(k), hud_self_centre,
+                                hud_self_run);
                 }
                 const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
                 const auto& fetch = pipeline->GetFetchShader();
@@ -2579,6 +2588,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             hud_draw = false;
             hud_anchor = HudLayout::Anchor::Centre;
         }
+    } else {
+        hud_runs.EndRun(); // any other draw ends a reticle's run
     }
     // gow3 21 Oct 2026 diagnostics (U3 museum red carpet), GOW3_MESH_DUMP=<index buffer hex>:
     // for draws of that mesh, the vertex shader's user data and the 16 dwords behind each
