@@ -150,6 +150,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     }
     hud_wide = HudLayout::WideFromEnv();
     hud_tracker.nonindexed = HudLayout::NonIndexedFromEnv();
+    hud_self_scale_vs = HudLayout::SelfScaleFromEnv();
     if (hud_aspect > 0.0f) {
         std::printf("HUD: drawn in the centred %.4f:1 area (over the frame after pixel shader "
                     "%08llx, after its copy %08llx)\n", hud_aspect,
@@ -2487,6 +2488,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     NoteHudDraw(fragment ? fragment->pgm_hash : 0, is_indexed);
     hud_anchor = HudLayout::Anchor::Centre;
     hud_split = false;
+    hud_self = false;
+    hud_self_s = 1.0f;
     if (hud_draw) {
         float min_x = 0.0f, max_x = 0.0f;
         std::string detail;
@@ -2499,10 +2502,17 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         hud_anchor = HudLayout::Classify(valid, min_x, max_x, false);
         // A non-indexed draw over the frame is placed only with a known extent short of the
         // full width (the crosshair); otherwise it stays as it was, at the full width.
-        const bool rejected = !is_indexed && hud_tracker.last_over_frame &&
+        // A draw of GOW3_HUD_SELF_SCALE_VS is not placed: it scales itself about its centre.
+        const u32 vs_hash = u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
+        hud_self = valid && std::find(hud_self_scale_vs.begin(), hud_self_scale_vs.end(),
+                                      vs_hash) != hud_self_scale_vs.end();
+        const bool rejected = !hud_self && !is_indexed && hud_tracker.last_over_frame &&
                               (!valid || hud_anchor == HudLayout::Anchor::Full);
-        if (rejected) {
+        if (rejected || hud_self) {
             hud_anchor = HudLayout::Anchor::Full;
+        }
+        if (hud_self) {
+            hud_self_centre = HudLayout::ExtentCentre(min_x, max_x);
         }
         hud_split = splittable && hud_anchor != HudLayout::Anchor::Full;
         hud_cut_left = -1.0f / 3.0f;
@@ -2527,6 +2537,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                             valid ? "" : "(unknown)", min_x, max_x,
                             kNames[u32(hud_anchor)],
                             rejected ? " (kept)" : hud_split ? " (split)" : "");
+                if (hud_self) {
+                    const float k = HudLayout::Factor(hud_aspect, hud_width, hud_height);
+                    std::printf("HUD draw: vs %08x -> self scale x%.3f about %.3f\n", vs_hash,
+                                HudLayout::SelfScale(k), hud_self_centre);
+                }
                 const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
                 const auto& fetch = pipeline->GetFetchShader();
                 std::string text = fmt::format("HUD attribs: vs {:08x} ps {:08x}",
@@ -3111,6 +3126,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         NoteHudDraw(fragment ? fragment->pgm_hash : 0, is_indexed);
         hud_anchor = HudLayout::Anchor::Centre; // GPU-written arguments: no extent
         hud_split = false;
+        hud_self = false;
         if (!is_indexed && hud_tracker.last_over_frame) {
             hud_tracker.Reject(); // a non-indexed draw is placed only by a known extent
             hud_draw = false;
@@ -6915,10 +6931,13 @@ bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u3
 
 void Rasterizer::NoteHudTarget(const RenderState& state) {
     hud_k = 1.0f;
+    hud_width = state.width;
+    hud_height = state.height;
+    hud_self_s = hud_draw && hud_self ? HudLayout::SelfScale(HudLayout::Factor(
+                                            hud_aspect, state.width, state.height))
+                                      : 1.0f;
     if (hud_draw && hud_anchor != HudLayout::Anchor::Full) {
         hud_k = HudLayout::Factor(hud_aspect, state.width, state.height);
-        hud_width = state.width;
-        hud_height = state.height;
     }
 }
 
@@ -7993,6 +8012,12 @@ void Rasterizer::UpdateViewportScissorState() const {
                                                   hud_wide_aspect);
                 viewport.x = x0;
                 viewport.width = x1 - x0;
+            }
+            if (hud_self_s < 1.0f) {
+                const auto span = HudLayout::SelfScaleViewport(viewport.x, viewport.width,
+                                                               hud_self_centre, hud_self_s);
+                viewport.x = span.x;
+                viewport.width = span.width;
             }
         }
 

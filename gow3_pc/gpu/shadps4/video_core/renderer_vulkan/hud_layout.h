@@ -162,6 +162,23 @@ inline std::pair<float, float> SplitPoints(std::vector<std::pair<float, float>> 
     return {left, std::max(left, right)};
 }
 
+/// The horizontal scale of a draw that scales itself about its own centre (world and screen
+/// anchored shapes whose vertices are final NDC, widened by the game for the screen's aspect on
+/// top of the HUD layer's stretch: the aiming reticle, pickup rings): the squeeze k twice, so the
+/// shape is as round as at 16:9. 1 when the HUD is not squeezed.
+inline float SelfScale(float k) {
+    return k >= 1.0f ? 1.0f : k * k;
+}
+
+/// The centre of an extent in NDC (positions beyond +-4 are in the 1280-wide UI space).
+inline float ExtentCentre(float min_x, float max_x) {
+    if (std::max(std::fabs(min_x), std::fabs(max_x)) > 4.0f) {
+        min_x = min_x / 640.0f - 1.0f;
+        max_x = max_x / 640.0f - 1.0f;
+    }
+    return (min_x + max_x) * 0.5f;
+}
+
 /// Width of the area the Left and Right anchors fill: a centred area of `area_aspect` (clamped to
 /// the target; 0: the whole target).
 inline float WideArea(float target_width, float target_height, float area_aspect) {
@@ -196,6 +213,11 @@ struct Span {
 inline Span Viewport(float x, float width, float target_width, float k) {
     const float centre = target_width * 0.5f;
     return {centre + (x - centre) * k, width * k};
+}
+
+/// A viewport x and width scaled by s about the NDC x `centre`, which stays where it was.
+inline Span SelfScaleViewport(float x, float width, float centre, float s) {
+    return {x + width * (centre + 1.0f) * 0.5f * (1.0f - s), width * s};
 }
 
 /// Scissor columns [x0, x1): a scissor across the whole target stays (full-width quads are drawn
@@ -331,6 +353,24 @@ struct Tracker {
         last_over_frame = false;
     }
 };
+
+/// GOW3_HUD_SELF_SCALE_VS: vertex shader hashes (hex, comma separated, low 32 bits) of the draws
+/// that scale themselves (SelfScale) instead of being placed.
+inline std::vector<uint32_t> SelfScaleFromEnv() {
+    std::vector<uint32_t> list;
+    if (const char* env = std::getenv("GOW3_HUD_SELF_SCALE_VS")) {
+        for (const char* p = env; *p;) {
+            char* end;
+            const uint64_t value = std::strtoull(p, &end, 16);
+            if (end == p) {
+                break;
+            }
+            list.push_back(uint32_t(value));
+            p = *end == ',' ? end + 1 : end;
+        }
+    }
+    return list;
+}
 
 inline uint64_t TonemapFromEnv() {
     const char* env = std::getenv("GOW3_UI_TONEMAP_PS");

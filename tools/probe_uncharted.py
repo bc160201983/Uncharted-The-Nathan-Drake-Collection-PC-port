@@ -840,6 +840,11 @@ HUD_LAYOUT_SHADERS = {
     "big2-ps4_Shipping.elf": ("484cdbf5", "749bbec9"),
     "big3-ps4_Shipping.elf": ("484cdbf5", "749bbec9"),
 }
+# Vertex shaders of HUD-pass draws that are not placed but scaled about their own centre
+# (GOW3_HUD_SELF_SCALE_VS): Uncharted 3's aiming reticle and pickup rings (ce096b7c) hold final
+# NDC positions that the game widens by the screen's aspect itself, on top of the HUD layer's
+# stretch.
+HUD_SELF_SCALE_VS = {"big3-ps4_Shipping.elf": "ce096b7c"}
 
 
 def hud_layout(executable, width, height):
@@ -1824,6 +1829,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         env.setdefault("GOW3_HUD_COMPOSITE_PS", composite_ps)
         env.setdefault("GOW3_UI_TONEMAP_PS", tonemap_ps)  # the in-game HUD is drawn over its frame
         env.setdefault("GOW3_HUD_TRACE", "1")  # HUD draw counts and shaders in the log
+        if self_scale := HUD_SELF_SCALE_VS.get(executable):
+            env.setdefault("GOW3_HUD_SELF_SCALE_VS", self_scale)
         print(f"HUD: {hud} (the HUD and menus in the 16:9 area of {width}x{height})")
     # Output resolution above the render resolution (UNCHARTED_OUTPUT_RES[_U1/_U2/_U3]=WxH): the
     # game draws at the render size and its finished frame is upscaled to the output size where

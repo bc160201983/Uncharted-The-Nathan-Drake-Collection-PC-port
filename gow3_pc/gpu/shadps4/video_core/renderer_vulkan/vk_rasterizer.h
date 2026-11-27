@@ -405,6 +405,10 @@ private:
     u32 hud_width = 0;         ///< and its target's width
     bool hud_split = false;    ///< wide mode: this draw is recorded once per anchor (a third each)
     u32 hud_height = 0;        ///< and height
+    std::vector<u32> hud_self_scale_vs; ///< GOW3_HUD_SELF_SCALE_VS (HudLayout::SelfScale)
+    bool hud_self = false;     ///< this draw scales itself about hud_self_centre
+    float hud_self_centre = 0.0f; ///< its extent's centre (NDC)
+    float hud_self_s = 1.0f;   ///< and its horizontal scale
     float hud_cut_left = -1.0f / 3.0f;  ///< where the split passes cut (layout x, HudLayout::SplitPoints)
     float hud_cut_right = 1.0f / 3.0f;
     float hud_wide_aspect = 0.0f; ///< GOW3_HUD_WIDE_ASPECT: area of the side elements (0: screen)
