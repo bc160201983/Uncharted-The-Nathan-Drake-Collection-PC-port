@@ -796,6 +796,21 @@ HOR_PLUS_PATCHES = {
                          [(0x17, "rbx", 2, 3), (0xf1, "rbx", 2, 0), (0x316, "rbx", 1, 0), (0xe31, "rdi", 0, 1)],
                          [(0x10d, 0x9f, bytes.fromhex("488b05b415a3004885c0")),
                           (0x32e, 0x65, bytes.fromhex("488b059313a3004885c0"))]),
+    ]),
+    # The scene view's GPU constants (Uncharted 3 copies of the Uncharted 2 sites above): their x
+    # scale, still from the 16:9 zoom, made light shafts and lamp cones wrong past 16:9 (a flat,
+    # cut-off wedge at the sides). The same zoom * min(1, aspect * 16/9); stubs in the
+    # two SetConstantBuffers asserts (reached only through test rax, rax; js) at 0xf61248 and
+    # 0xf63168 (UNCHARTED_UW_VIEW_CONSTANTS=0: not applied).
+    ("Uncharted 3 ultrawide: view constants as wide as the view (1)", [
+        hor_plus_variant("c4c17a10842454020000 c57a100d???????? c5b25ec8", 0x254, 0x250,
+                         [(0x0, "r12", 0, 1)],
+                         [(0xa1b, 0x35, bytes.fromhex("488b056955c9004885c0"))]),
+    ]),
+    ("Uncharted 3 ultrawide: view constants as wide as the view (2)", [
+        hor_plus_variant("c4c17a10842454020000 c5da5ec8", 0x254, 0x250,
+                         [(0x0, "r12", 0, 1)],
+                         [(0x8ca, 0x35, bytes.fromhex("488b054936c9004885c0"))]),
     ])],
 }
 
